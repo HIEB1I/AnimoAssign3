@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
-import { Search as SearchIcon, Edit, Check, Eraser, ChevronDown, Eye, X, Download } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
+import { getSessionUserId } from "../../lib/session";
 import {
   getOMSC_Options,
   listOMSC,
@@ -9,12 +10,228 @@ import {
   getOMSC_SchedulePresets,
   getOMSC_Detail,
   exportOMSC_Pdf,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
   downloadBlob,
   type OMSpecialClassRow,
   type OMSpecialClassOptions,
   type OMSCSchedulePreset,
   type OMSpecialClassDetail,
 } from "../../api";
+
+/* ---------------- RFC Conversation Modal (Special Class) ---------------- */
+function SpecialConversationModal({
+  open,
+  onClose,
+  userId,
+  termId,
+  facultyId,
+  facultyName,
+  sectionId,
+  onToast,
+}: {
+  open: boolean;
+  onClose: () => void;
+  userId: string;
+  termId: string;
+  facultyId?: string | null;
+  facultyName?: string;
+  sectionId?: string;
+  onToast?: (message: string, kind?: "success" | "error") => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [locked, setLocked] = useState<boolean>(false);
+  const [reply, setReply] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setLocked(false);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setLocked(false);
+
+        if (!facultyId) {
+          setError("No faculty assigned yet.");
+          return;
+        }
+        if (!sectionId) {
+          setError("Missing special class id.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: String(facultyId),
+          section_id: sectionId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setMessages([]);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setLocked(Boolean(rfc.locked));
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load conversation.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, open]);
+
+  if (!open) return null;
+
+  const canReply = !loading && !locked && !!facultyId && !!sectionId;
+
+  const sendReply = async () => {
+    if (!canReply) return;
+    if (!reply.trim()) {
+      onToast?.("Please type a message.", "error");
+      return;
+    }
+    try {
+      setLoading(true);
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: String(facultyId),
+        section_id: sectionId,
+        action: "reply",
+        message: reply.trim(),
+      });
+      setReply("");
+      const res = await getOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: String(facultyId),
+        section_id: sectionId,
+      });
+      setMessages(res?.rfc?.messages || res?.rfc?.thread || []);
+      onToast?.("Message sent.", "success");
+    } catch (e: any) {
+      onToast?.(e?.message || "Failed to send message.", "error");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-4xl rounded-2xl bg-white shadow-2xl relative max-h-[92vh] flex flex-col overflow-hidden">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-semibold text-purple-700 mb-2">Conversation</h3>
+          <div className="text-sm text-gray-600">
+            Faculty: <span className="font-semibold">{facultyName || "UNASSIGNED"}</span>
+          </div>
+
+          {loading && <div className="mt-3 text-sm text-gray-600">Loading…</div>}
+          {error && <div className="mt-3 text-sm text-red-600">{error}</div>}
+
+          {!loading && !error && !messages.length && (
+            <div className="mt-3 rounded-lg border border-gray-200 bg-gray-50 p-3 text-sm text-gray-700">
+              No messages yet. The faculty can start the conversation from the Special Class modal.
+            </div>
+          )}
+        </div>
+
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+                return (
+                  <div key={idx} className={cls("flex", isFaculty ? "justify-start" : "justify-end")}>
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? (facultyName || "FACULTY").toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-purple-600 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
+        </div>
+
+        <div className="mx-6 pb-6">
+          <label className="block text-sm font-medium mb-1">Reply</label>
+          <div className="flex items-end gap-2">
+            <textarea
+              className="flex-1 rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-purple-500/30"
+              rows={3}
+              placeholder={locked ? "Conversation is locked." : "Type your message…"}
+              value={reply}
+              disabled={!canReply}
+              onChange={(e) => setReply(e.target.value)}
+            />
+            <button
+              type="button"
+              disabled={!canReply || !reply.trim()}
+              onClick={() => void sendReply()}
+              className={cls(
+                "inline-flex h-10 w-10 items-center justify-center rounded-xl text-white shadow",
+                "bg-purple-600 hover:brightness-[1.06] active:translate-y-[0.5px]",
+                (!canReply || !reply.trim()) && "opacity-60 cursor-not-allowed"
+              )}
+              title="Send"
+              aria-label="Send"
+            >
+              <Send className={cls("h-4 w-4", loading && "animate-pulse")} />
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
 
 /* --------------------------------- helpers --------------------------------- */
 type DayCode = "M" | "T" | "W" | "H" | "F" | "S";
@@ -198,10 +415,12 @@ function DetailRow({ label, value }: { label: string; value: any }) {
   );
 }
 
-export default function OM_SpecialClass() {
+export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
+
+  const [exportOpen, setExportOpen] = useState(false);
 
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
@@ -222,6 +441,7 @@ export default function OM_SpecialClass() {
   const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
+  const [errKind, setErrKind] = useState<"success" | "error">("error");
 
   // selection
   const [selectedIds, setSelectedIds] = useState<Record<string, boolean>>({});
@@ -242,6 +462,33 @@ export default function OM_SpecialClass() {
   const [viewLoading, setViewLoading] = useState(false);
   const [viewErr, setViewErr] = useState("");
   const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
+
+  // RFC / conversation modal (Special Class)
+  const [conv, setConv] = useState<{
+    open: boolean;
+    termId: string;
+    facultyId?: string | null;
+    facultyName?: string;
+    sectionId: string;
+  } | null>(null);
+
+  const userId = useMemo(() => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      return String(raw.userId || raw.user_id || raw.id || "");
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const toast = (message: string, kind?: "success" | "error") => {
+    // This screen uses an inline banner for feedback; keep it consistent.
+    setErrKind(kind === "success" ? "success" : "error");
+    setErr(message);
+    if (kind === "success") {
+      window.setTimeout(() => setErr(""), 2500);
+    }
+  };
 
   const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
     const direct = (slot === 1 ? r.room1 : r.room2) || "";
@@ -314,6 +561,7 @@ export default function OM_SpecialClass() {
         });
         setRoomIdToInfo(rm);
       } catch (e: any) {
+        setErrKind("error");
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
@@ -329,6 +577,8 @@ export default function OM_SpecialClass() {
     try {
       setLoading(true);
       setErr("");
+      setErrKind("error");
+      setErrKind("error");
       const res = await listOMSC({ status, q });
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
@@ -344,6 +594,7 @@ export default function OM_SpecialClass() {
       });
     } catch (e: any) {
       setRows([]);
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to load special class.");
     } finally {
       setLoading(false);
@@ -401,7 +652,9 @@ export default function OM_SpecialClass() {
 
     try {
       setErr("");
+      setErrKind("error");
       if (selectedList.length === 0) {
+        setErrKind("error");
         setErr("Select at least one application to export.");
         return;
       }
@@ -414,10 +667,148 @@ export default function OM_SpecialClass() {
         downloadBlob(blob, makeFileName(id));
       }
     } catch (e: any) {
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to export selected PDF.");
     } finally {
       setLoading(false);
     }
+  };
+
+  // CHAIR Plantilla-style Excel export (HTML -> .xls), but with a Special Class form header.
+  // NOTE: This intentionally keeps "Name of Faculty" blank, matching the user's template requirement.
+  const exportTableExcel = () => {
+    if (!rows || rows.length === 0) {
+      setErrKind("error");
+      setErr("No rows to export.");
+      return;
+    }
+
+    const normalizeForExcel = (value: string) => {
+      let v = value ?? "";
+      if (v === "—") v = "";
+      v = v
+        .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
+        .replace(/[\u2018\u2019]/g, "'")
+        .replace(/[\u201C\u201D]/g, '"')
+        .replace(/\u00A0/g, " ")
+        .replace(/[\r\n\t]/g, " ");
+      v = v.replace(/\s+/g, " ").trim();
+      return v;
+    };
+
+    const esc = (v: string) =>
+      v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+    const scheduleForRow = (r: OMSpecialClassRow) => {
+      const parts: string[] = [];
+      if (r.day1 && r.begin1 && r.end1) parts.push(`${r.day1} ${prettyHHMM(r.begin1)}-${prettyHHMM(r.end1)}`);
+      if (r.day2 && r.begin2 && r.end2) parts.push(`${r.day2} ${prettyHHMM(r.begin2)}-${prettyHHMM(r.end2)}`);
+      return parts.join("; ");
+    };
+
+    const roomForRow = (r: OMSpecialClassRow) => {
+      const parts: string[] = [];
+      if (r.room1) parts.push(r.room1);
+      if (r.room2) parts.push(r.room2);
+      return parts.join(" / ");
+    };
+
+    const termLine = activeTermLabel ? activeTermLabel : "";
+    const COLS = 8;
+
+    const headerRows = `
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;font-size:14pt;">De La Salle University</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">OFFICE OF THE PROVOST</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;font-weight:bold;">APPLICATION FOR SPECIAL CLASS</td></tr>
+      <tr><td colspan="${COLS}" style="text-align:center;">${esc(termLine)}</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+
+      <tr>
+        <td style="font-weight:bold;">DATE:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">For:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr>
+        <td style="font-weight:bold;">From:</td>
+        <td colspan="3"></td>
+        <td style="font-weight:bold;">Endorsed by:</td>
+        <td colspan="3"></td>
+      </tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+      <tr><td colspan="${COLS}">This is to request for the opening of the following classes as <b>SPECIAL CLASS</b>.</td></tr>
+      <tr><td colspan="${COLS}" style="height:12px;"></td></tr>
+    `;
+
+    const tableHeader = `
+      <tr>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">No.</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Course Code</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Section</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Student / Reason</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Schedule</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Room</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Name of Faculty</th>
+        <th style="border:1px solid #000;background:#f3f4f6;padding:6px;text-align:center;">Provost Approval</th>
+      </tr>
+    `;
+
+    const bodyRows = rows
+      .map((r, i) => {
+        const student = r.student_name ? String(r.student_name) : "";
+        const reason = r.reason_other ? String(r.reason_other) : r.reason ? String(r.reason) : "";
+        const studentReason = [student, reason].filter(Boolean).join(" — ");
+        const cells = [
+          String(i + 1),
+          r.course_code || "",
+          r.section_code || "",
+          studentReason,
+          scheduleForRow(r),
+          roomForRow(r),
+          "", // Name of Faculty left blank
+          "", // Provost Approval blank
+        ].map((c) => esc(normalizeForExcel(String(c ?? ""))));
+
+        return `
+          <tr>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[0]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[1]}</td>
+            <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[2]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[3]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[4]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[5]}</td>
+            <td style="border:1px solid #000;padding:6px;"></td>
+            <td style="border:1px solid #000;padding:6px;"></td>
+          </tr>
+        `;
+      })
+      .join("");
+
+    const safeTerm = (activeTermLabel || "").replace(/[^a-z0-9\-\s_]/gi, "").trim();
+    const filename = safeTerm ? `Special_Class_${safeTerm}.xls` : "Special_Class.xls";
+
+    const html = `
+      <html>
+        <head><meta charset="utf-8" /></head>
+        <body>
+          <table cellspacing="0" cellpadding="0" style="border-collapse:collapse;font-family:Calibri;font-size:11pt;">
+            ${headerRows}
+            ${tableHeader}
+            ${bodyRows}
+          </table>
+        </body>
+      </html>
+    `;
+
+    const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   };
 
 
@@ -549,29 +940,16 @@ export default function OM_SpecialClass() {
     }));
   };
 
-  const clearAllDraft = () => {
-    // Clear EVERYTHING: faculty + section + schedule
-    setDidClearAll(true);
+  const cancelEdit = () => {
+    setEditId(null);
+    setDraft({});
+    setPresets([]);
     setPresetChoice("CUSTOM");
-
-    setDraft((d) => ({
-      ...d,
-      faculty_id: null,
-      section_id: null,
-      section_code: "",
-      day1: "" as any,
-      begin1: "",
-      end1: "",
-      day2: "" as any,
-      begin2: "",
-      end2: "",
-      schedule_id1: null,
-      schedule_id2: null,
-      assignment_id: null,
-    }));
-
     setFacultyInput("");
+    setDidClearAll(false);
+    setClearMode("none");
   };
+
   const saveEdit = async () => {
     if (!editId) return;
 
@@ -629,7 +1007,7 @@ export default function OM_SpecialClass() {
         }
       }
 
-      await updateOMSC(editId, payload);
+      await updateOMSC(editId, payload, getSessionUserId());
 
       setEditId(null);
       setDraft({});
@@ -639,6 +1017,7 @@ export default function OM_SpecialClass() {
       setDidClearAll(false);
       await load();
     } catch (e: any) {
+      setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to update special class.");
     } finally {
       setLoading(false);
@@ -681,7 +1060,14 @@ export default function OM_SpecialClass() {
       </header>
 
       {err && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+        <div
+          className={cls(
+            "mb-4 rounded-lg px-3 py-2 text-sm",
+            errKind === "success"
+              ? "border border-emerald-200 bg-emerald-50 text-emerald-700"
+              : "border border-red-200 bg-red-50 text-red-700"
+          )}
+        >
           {err}
         </div>
       )}
@@ -699,22 +1085,63 @@ export default function OM_SpecialClass() {
 
         <SelectBox value={status} onChange={setStatus} options={statuses} />
 
-        <button
-          type="button"
-          onClick={exportSelectedPdf}
-          disabled={loading || selectedList.length === 0}
-          title="Export selected applications to PDF"
-          className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-100 disabled:bg-emerald-600 disabled:text-white disabled:cursor-not-allowed"
-        >
-          <Download className="h-4 w-4" />
-          Export PDF
-        </button>
+        <div className="relative">
+          <button
+            type="button"
+            onClick={() => setExportOpen((v) => !v)}
+            disabled={loading}
+            title="Export"
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+          >
+            <Download className="h-4 w-4" />
+            Export
+            <ChevronDown className="h-4 w-4" />
+          </button>
+
+          {exportOpen && (
+            <div
+              className="absolute right-0 mt-2 w-64 rounded-lg border border-gray-200 bg-white shadow-lg z-50"
+              onMouseLeave={() => setExportOpen(false)}
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  setExportOpen(false);
+                  exportSelectedPdf();
+                }}
+                disabled={selectedList.length === 0 || loading}
+                className={cls(
+                  "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
+                  (selectedList.length === 0 || loading) && "opacity-60 cursor-not-allowed"
+                )}
+                title={selectedList.length === 0 ? "Select at least one application" : "Export selected applications to PDF"}
+              >
+                Export selected (PDF)
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setExportOpen(false);
+                  exportTableExcel();
+                }}
+                disabled={rows.length === 0 || loading}
+                className={cls(
+                  "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
+                  (rows.length === 0 || loading) && "opacity-60 cursor-not-allowed"
+                )}
+                title={rows.length === 0 ? "No rows to export" : "Export the current table to Excel"}
+              >
+                Export table (Excel)
+              </button>
+            </div>
+          )}
+        </div>
       </div>
 
       <div className="table-wrapper w-full overflow-hidden">
-        <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-auto rounded-xl">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
           <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-700">
+            <thead className="bg-gray-50 border-b text-gray-900">
               <tr>
                 <th className="text-left px-3 py-2 whitespace-nowrap w-10">
                   <input
@@ -743,7 +1170,7 @@ export default function OM_SpecialClass() {
 
                 <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-                <th className="w-20 px-4 py-2" />
+                <th className="w-20 px-4 py-2 text-center whitespace-nowrap"> </th>
               </tr>
             </thead>
 
@@ -1061,48 +1488,85 @@ export default function OM_SpecialClass() {
                         )}
                       </td>
 
-                      <td className="px-4 py-3">
-                        <div className="flex items-center justify-center gap-2">
-                          {editing ? (
-                            <>
-                              <button
-                                onClick={saveEdit}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-                                title="Save"
-                              >
-                                <Check className="h-4 w-4" />
-                              </button>
+                      <td className="px-2 py-3 whitespace-nowrap">
+  <div className="flex items-center justify-center gap-1">
+    {editing ? (
+      <>
+        <button
+          onClick={saveEdit}
+          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+          title="Save"
+          aria-label="Save"
+        >
+          <Check className="h-4 w-4" />
+        </button>
 
-                              <button
-                                type="button"
-                                onClick={clearAllDraft}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-                                title="Clear all fields"
-                              >
-                                <Eraser className="h-4 w-4" />
-                              </button>
-                            </>
-                          ) : (
-                            <>
-                              <button
-                                onClick={() => openView(r)}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border border-gray-200 text-gray-700 hover:bg-gray-50"
-                                title="View Application"
-                              >
-                                <Eye className="h-4 w-4" />
-                              </button>
+        <button
+          type="button"
+          onClick={cancelEdit}
+          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+          title="Cancel"
+          aria-label="Cancel"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      </>
+    ) : (
+      <>
+        {!hideMessageIcon && (
+        <button
+          type="button"
+          onClick={() => {
+            setConv({
+              open: true,
+              termId: r.term_id,
+              facultyId: r.faculty_id ?? null,
+              facultyName: r.faculty_name || "UNASSIGNED",
+              sectionId: r.special_id,
+            });
+          }}
+          disabled={!r.faculty_id}
+          className={cls(
+            "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+            !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
+          )}
+          title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
+          aria-label="Message"
+        >
+          <MessageSquareText className="h-4 w-4" />
+          {Boolean((r as any)?.rfc_needs_om) && (
+            <span
+              className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
+              aria-label="New message"
+              title="New message"
+            />
+          )}
+        </button>
+        )}
 
-                              <button
-                                onClick={() => beginEdit(r)}
-                                className="flex h-8 w-8 items-center justify-center rounded-full border border-emerald-200 text-emerald-700 hover:bg-emerald-50"
-                                title="Edit"
-                              >
-                                <Edit className="h-4 w-4" />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </td>
+        <button
+          type="button"
+          onClick={() => openView(r)}
+          className="inline-flex items-center justify-center p-1 rounded-md text-gray-700 hover:bg-gray-100"
+          title="View Application"
+          aria-label="View Application"
+        >
+          <Eye className="h-4 w-4" />
+        </button>
+
+        <button
+          type="button"
+          onClick={() => beginEdit(r)}
+          className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
+          title="Edit"
+          aria-label="Edit"
+        >
+          <Edit className="h-4 w-4" />
+        </button>
+      </>
+    )}
+  </div>
+</td>
                     </tr>
                   );
                 })
@@ -1239,6 +1703,20 @@ export default function OM_SpecialClass() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* Special Class conversation (RFC thread) */}
+      {!hideMessageIcon && (
+      <SpecialConversationModal
+        open={!!conv?.open}
+        onClose={() => setConv(null)}
+        userId={userId}
+        termId={conv?.termId || ""}
+        facultyId={conv?.facultyId}
+        facultyName={conv?.facultyName}
+        sectionId={conv?.sectionId}
+        onToast={toast}
+      />
       )}
     </main>
   );

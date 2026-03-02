@@ -1,5 +1,6 @@
 // frontend/src/pages/FACULTY/FAC_Overview.tsx
 import React, { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import ReactDOM from "react-dom";
 import {
   Send as SendIcon,
   X,
@@ -9,6 +10,7 @@ import {
   XCircle,
   BadgeCheck,
   Layers,
+  Info,
 } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -150,7 +152,27 @@ const lightRedBtn =
    0) Page
    ========================================= */
 export default function FAC_Overview() {
-  const [tab, setTab] = useState<"My Profile" | "Schedule Overview" | "Submit Preferences">("My Profile");
+  const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+  const userId = raw.userId || raw.user_id || raw.id;
+
+  const TAB_VALUES = ["My Profile", "Schedule Overview", "Submit Preferences"] as const;
+  type FacultyTab = (typeof TAB_VALUES)[number];
+
+  const tabStorageKey = userId
+    ? `animo.faculty.overview.activeTab.${userId}`
+    : "animo.faculty.overview.activeTab";
+
+  const readInitialTab = (): FacultyTab => {
+    try {
+      const saved = localStorage.getItem(tabStorageKey);
+      if (!saved) return "My Profile";
+      return (TAB_VALUES as readonly string[]).includes(saved) ? (saved as FacultyTab) : "My Profile";
+    } catch {
+      return "My Profile";
+    }
+  };
+
+  const [tab, setTab] = useState<FacultyTab>(readInitialTab);
   const [showInbox, setShowInbox] = useState(false); // NEW
   const [data, setData] = useState<any>(null);
   const [error, setError] = useState<string | null>(null);
@@ -186,6 +208,15 @@ const pushToast = useCallback(
       }
     }, []);
 
+  // Persist active tab across refresh.
+  useEffect(() => {
+    try {
+      localStorage.setItem(tabStorageKey, tab);
+    } catch {
+      // ignore storage write failures (private mode / denied storage)
+    }
+  }, [tab, tabStorageKey]);
+
 
   // Expose a global helper so other components can open the inbox if needed
   useEffect(() => {
@@ -203,9 +234,6 @@ const pushToast = useCallback(
       window.removeEventListener("faculty:closeInbox", onClose);
     };
   }, []);
-
-  const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-  const userId = raw.userId || raw.user_id || raw.id;
 
   const loadOverview = useCallback(async () => {
   if (!userId) {
@@ -481,6 +509,7 @@ function FacultyProfileTab({
   });
 
   useEffect(() => {
+    if (editing) return;
     setDraftName({
       first_name: String(faculty?.first_name || "").trim(),
       last_name: String(faculty?.last_name || "").trim(),
@@ -502,7 +531,7 @@ function FacultyProfileTab({
     } else {
       setDraftKacs([]);
     }
-  }, [faculty]);
+  }, [faculty, editing]);
 
   useEffect(() => {
     // Load KAC options once for editing.
@@ -575,7 +604,26 @@ function FacultyProfileTab({
         payload.certifications = list;
       }
       if (kind === "kacs") {
-        payload.qualified_kacs = (draftKacs || []).map((x) => String(x).trim()).filter(Boolean);
+        const nextQualified = (draftKacs || []).map((x) => String(x).trim()).filter(Boolean);
+        payload.qualified_kacs = nextQualified;
+
+        // IMPORTANT FIX (UI): "My Profile" displays a merged list of Qualified + Preferred KACs.
+        // If the user removes a KAC from Qualified, and that KAC also exists in Preferred,
+        // it should disappear immediately to avoid confusion.
+        const prevIdsRaw = faculty?.qualified_kac_ids;
+        const prevFromIds = Array.isArray(prevIdsRaw)
+          ? prevIdsRaw.map((x: any) => String(x).trim()).filter(Boolean)
+          : [];
+        const prevFromDetails = Array.isArray(faculty?.qualified_kacs)
+          ? faculty.qualified_kacs
+              .map((k: any) => String(k?.kac_id || k?.kacId || "").trim())
+              .filter(Boolean)
+          : [];
+        const prevQualified = prevFromIds.length ? prevFromIds : prevFromDetails;
+        const removed = new Set(prevQualified.filter((id: string) => !nextQualified.includes(id)));
+        if (removed.size) {
+          setPreferredKacIds((prev) => (prev || []).filter((id) => !removed.has(String(id).trim())));
+        }
       }
 
       const res = await updateFacultyOverviewProfile(userId, payload);
@@ -591,10 +639,12 @@ function FacultyProfileTab({
   };
 
   const toggleKac = (id: string) => {
+    const norm = String(id || "").trim();
+    if (!norm) return;
     setDraftKacs((prev) => {
-      const s = new Set(prev);
-      if (s.has(id)) s.delete(id);
-      else s.add(id);
+      const s = new Set((prev || []).map((x) => String(x || "").trim()).filter(Boolean));
+      if (s.has(norm)) s.delete(norm);
+      else s.add(norm);
       return Array.from(s);
     });
   };
@@ -606,17 +656,34 @@ function FacultyProfileTab({
     return s || "—";
   };
 
+  const formatHireDate = (v: any) => {
+    const rawVal = v ?? "";
+    const s = String(rawVal).trim();
+    if (!s) return "—";
+    const d = new Date(s);
+    if (!Number.isNaN(d.getTime())) {
+      return new Intl.DateTimeFormat("en-US", { year: "numeric", month: "short", day: "2-digit" }).format(d);
+    }
+    return s;
+  };
+
+
   const email = String(faculty?.email || faculty?.email_address || faculty?.emailAddress || "").trim();
 
   // Pills intentionally kept empty for now; key profile attributes are shown as cards on the right.
   const pills: { label: string; value: string }[] = [];
 
-  const guardrails: { key: "employment" | "teaching"; label: string; value: string }[] = [
+  const guardrails: { key: "employment" | "teaching"; label: string; value: React.ReactNode }[] = [
     { key: "employment", label: "Employment", value: employmentLabel(faculty?.employment_type) },
     {
       key: "teaching",
       label: "Teaching experience",
-      value: faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—",
+      value: (
+        <div className="flex flex-col leading-tight">
+          <span>{faculty?.teaching_years != null ? `${faculty.teaching_years} yrs` : "—"}</span>
+          <span className="text-sm font-medium text-slate-600">Hire date: {formatHireDate(faculty?.hire_date)}</span>
+        </div>
+      ),
     },
   ];
 
@@ -643,6 +710,7 @@ function FacultyProfileTab({
         ...k,
         kac_id: id,
         courses,
+        from_preferences: false,
       });
     }
 
@@ -657,6 +725,7 @@ function FacultyProfileTab({
         program_area: opt?.program_area || "",
         // Preferred KACs must show the same course list as qualified KACs.
         courses: Array.isArray((opt as any)?.courses) ? (opt as any).courses : [],
+        from_preferences: true,
       });
     }
 
@@ -976,7 +1045,7 @@ function FacultyProfileTab({
                     value={kacQuery}
                     onChange={(e) => setKacQuery(e.target.value)}
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-sm"
-                    placeholder="Search KAC…"
+                    placeholder="Search KAC or Course code…"
                   />
                   {kacQuery.trim() ? (
                     <button
@@ -997,11 +1066,16 @@ function FacultyProfileTab({
                   .filter((k) => {
                     const q = kacQuery.trim().toLowerCase();
                     if (!q) return true;
-                    const s = `${k?.kac_name || ""} ${k?.kac_code || ""} ${k?.program_area || ""}`.toLowerCase();
+                    const courseHay = Array.isArray((k as any)?.courses)
+                      ? (k as any).courses
+                          .map((c: any) => `${c?.course_code || ""} ${c?.course_title || ""}`)
+                          .join(" ")
+                      : "";
+                    const s = `${k?.kac_name || ""} ${k?.kac_code || ""} ${k?.program_area || ""} ${courseHay}`.toLowerCase();
                     return s.includes(q);
                   })
                   .map((k) => {
-                    const id = String(k?.kac_id || "");
+                    const id = String(k?.kac_id || "").trim();
                     const checked = draftKacs.includes(id);
                     return (
                       <label
@@ -1090,6 +1164,11 @@ function FacultyProfileTab({
                         <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[11px] text-slate-700">
                           {k.kac_code || k.kac_id || "KAC"}
                         </span>
+                        {k?.from_preferences ? (
+                          <span className="rounded-full border border-amber-200 bg-amber-50 px-2 py-0.5 text-[11px] text-amber-700">
+                            From Preferences
+                          </span>
+                        ) : null}
                       </div>
                       <div className="mt-0.5 text-[12px] text-slate-500">{k.program_area || "—"}</div>
                     </div>
@@ -1346,6 +1425,8 @@ type TLItem = {
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
+  student?: string;
+  reason?: string;
   is_serviced?: boolean;
   serviced_department?: string;
   course_code: string;
@@ -1379,6 +1460,10 @@ type TLItemForCalendar = {
   serviced_department?: string;
   // Store original item for modal
   originalItem: TLItem;
+
+  // UI-only controls for RFC modal behavior
+  forceConversationOnly?: boolean;
+  allowStartConversation?: boolean;
 };
 
 
@@ -1392,6 +1477,7 @@ const TIME_BANDS_LABEL = [
   "18:00 – 19:30",
   "19:45 – 21:00",
 ];
+
 
 const BANDS_STARTS = [
   "07:30",
@@ -1530,7 +1616,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
 
   return (
     <button
-      onClick={it.is_special_class || isServiced ? undefined : onClick}
+      onClick={it.is_special_class ? undefined : onClick}
       className={cls(
         "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
         it.is_special_class
@@ -1540,7 +1626,7 @@ const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalend
           : campusColor
           ? "border-neutral-200 text-black hover:brightness-[1.02]"
           : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
-        (it.is_special_class || isServiced) && "cursor-default"
+        it.is_special_class && "cursor-default"
       )}
       style={campusColor ? { backgroundColor: campusColor } : undefined}
       title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
@@ -1581,6 +1667,9 @@ const LIST_HEADERS = [
   "Syllabus",
 ];
 
+// Special Class tab columns: keep details but group schedule fields so rows fit without horizontal scrolling.
+const SPECIAL_TABLE_HEADERS = ["Student", "Reason", "Course Code & Title", "Section", "Day", "Time", "Room", "Mode", "Syllabus", "Action"];
+
 function splitBeginEnd(time?: string): { begin: string; end: string } {
   const raw = (time || "").trim();
   if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
@@ -1597,10 +1686,490 @@ function splitBeginEnd(time?: string): { begin: string; end: string } {
 }
 
 function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh }: TeachingLoadEnhancedProps) {
-  const [view, setView] = useState<"Calendar" | "List">("Calendar");
+  const [view, setView] = useState<"Calendar" | "List" | "Special">("Calendar");
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
-  const [isAccepting, setIsAccepting] = useState(false);
+  const [specialEdit, setSpecialEdit] = useState<null | {
+    special_id: string;
+    section_id: string;
+    original: any;
+  }>(null);
+  const [specialEditBusy, setSpecialEditBusy] = useState(false);
+  const [specialRooms1, setSpecialRooms1] = useState<any[]>([]);
+  const [specialRooms2, setSpecialRooms2] = useState<any[]>([]);
+  const [specialRoomsLoading, setSpecialRoomsLoading] = useState(false);
+  const [specialEditDraft, setSpecialEditDraft] = useState({
+    day1: "",
+    begin1: "",
+    end1: "",
+    room1: "",
+    day2: "",
+    begin2: "",
+    end2: "",
+    room2: "",
+  });
+  
+
+  // Auto-pair common begin/end slots (default behavior; user can still manually adjust End).
+  const TIME_PAIR: Record<string, string> = useMemo(
+    () => ({
+      "07:30": "09:00",
+      "09:15": "10:45",
+      "11:00": "12:30",
+      "14:15": "16:00",
+      "14:30": "16:00",
+      "16:15": "17:45",
+      "18:00": "19:30",
+      "19:45": "21:00",
+    }),
+    []
+  );
+
+  // Auto-pair common day combinations (default behavior; user can still manually adjust Day 2).
+  const DAY_PAIR: Record<string, string> = useMemo(
+    () => ({
+      Monday: "Thursday",
+      Thursday: "Monday",
+      Tuesday: "Friday",
+      Friday: "Tuesday",
+      Wednesday: "Saturday",
+      Saturday: "Wednesday",
+    }),
+    []
+  );
+
+  const DD_BASE =
+    "w-full rounded-xl border border-gray-200 bg-white py-2.5 pl-3 pr-10 text-left text-sm shadow-sm outline-none hover:bg-gray-50 focus:ring-2 focus:ring-emerald-500/30";
+  const DD_MENU =
+    // NOTE: menu is rendered in a portal (fixed) so it won't be clipped by modal scroll containers.
+    "fixed z-[2000] mt-2 max-h-80 overflow-auto rounded-2xl border border-gray-300 bg-white shadow-lg";
+
+  function SpecialDropdown({
+    value,
+    onChange,
+    options,
+    placeholder = "—",
+    className = "w-full",
+    disabled = false,
+    includeEmptyOption,
+  }: {
+    value: string;
+    onChange: (v: string) => void;
+    options: Array<{ value: string; label: string }>;
+    placeholder?: string;
+    className?: string;
+    disabled?: boolean;
+    includeEmptyOption?: { value: string; label: string };
+  }) {
+    const [open, setOpen] = useState(false);
+    const [hover, setHover] = useState(0);
+    const btnRef = useRef<HTMLButtonElement>(null);
+    const listRef = useRef<HTMLDivElement>(null);
+    const [menuRect, setMenuRect] = useState<{ top: number; left: number; width: number } | null>(null);
+
+    const fullOptions = useMemo(() => {
+      const base = Array.isArray(options) ? options : [];
+      return includeEmptyOption ? [includeEmptyOption, ...base] : base;
+    }, [options, includeEmptyOption]);
+
+    const currentLabel =
+      fullOptions.find((o) => String(o.value) === String(value))?.label || "";
+
+    useEffect(() => {
+      const idx = Math.max(
+        0,
+        fullOptions.findIndex((o) => String(o.value) === String(value))
+      );
+      setHover(idx);
+    }, [value, fullOptions]);
+
+    useEffect(() => {
+      const close = (e: MouseEvent) =>
+        open &&
+        !btnRef.current?.contains(e.target as Node) &&
+        !listRef.current?.contains(e.target as Node) &&
+        setOpen(false);
+      document.addEventListener("mousedown", close);
+      return () => document.removeEventListener("mousedown", close);
+    }, [open]);
+
+    // Keep the dropdown menu positioned correctly (and above all modal content).
+    useEffect(() => {
+      if (!open || disabled) return;
+
+      const compute = () => {
+        const el = btnRef.current;
+        if (!el) return;
+        const r = el.getBoundingClientRect();
+        setMenuRect({ top: r.bottom, left: r.left, width: r.width });
+      };
+
+      compute();
+      window.addEventListener("scroll", compute, true);
+      window.addEventListener("resize", compute);
+      return () => {
+        window.removeEventListener("scroll", compute, true);
+        window.removeEventListener("resize", compute);
+      };
+    }, [open, disabled]);
+
+    const onKey = (e: React.KeyboardEvent) => {
+      if (disabled) return;
+      if (!open && ["ArrowDown", "Enter", " "].includes(e.key)) {
+        e.preventDefault();
+        setOpen(true);
+        return;
+      }
+      if (!open) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setOpen(false);
+        btnRef.current?.focus();
+      }
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        setHover((i) => (i + 1) % Math.max(1, fullOptions.length));
+      }
+      if (e.key === "ArrowUp") {
+        e.preventDefault();
+        setHover((i) => (i - 1 + Math.max(1, fullOptions.length)) % Math.max(1, fullOptions.length));
+      }
+      if (e.key === "Enter") {
+        e.preventDefault();
+        const picked = fullOptions[hover];
+        if (picked) onChange(String(picked.value));
+        setOpen(false);
+        btnRef.current?.focus();
+      }
+    };
+
+    return (
+      <div className={cls("relative", className)} onKeyDown={onKey}>
+        <button
+          ref={btnRef}
+          type="button"
+          disabled={disabled}
+          onClick={() => !disabled && setOpen((v) => !v)}
+          aria-haspopup="listbox"
+          aria-expanded={open}
+          className={cls(DD_BASE, disabled ? "opacity-60 cursor-not-allowed" : "")}
+        >
+          {currentLabel || value || <span className="text-gray-400">{placeholder}</span>}
+          <span className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2">▾</span>
+        </button>
+
+        {open && !disabled && menuRect &&
+          ReactDOM.createPortal(
+            <div
+              ref={listRef}
+              role="listbox"
+              className={DD_MENU}
+              style={{ top: menuRect.top + 8, left: menuRect.left, width: menuRect.width }}
+            >
+              {fullOptions.map((opt, i) => (
+                <button
+                  key={`${opt.value}-${opt.label}-${i}`}
+                  type="button"
+                  role="option"
+                  aria-selected={String(value) === String(opt.value)}
+                  onMouseEnter={() => setHover(i)}
+                  onClick={() => {
+                    onChange(String(opt.value));
+                    setOpen(false);
+                    btnRef.current?.focus();
+                  }}
+                  className={cls(
+                    "block w-full px-4 py-3 text-left text-[15px]",
+                    i === hover && "bg-emerald-50"
+                  )}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>,
+            document.body
+          )}
+      </div>
+    );
+  }
+const [isAccepting, setIsAccepting] = useState(false);
+  const [isSyncingSpecial, setIsSyncingSpecial] = useState(false);
   const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
+
+  const TIME_POINTS = useMemo(
+    () =>
+      Array.from(
+        new Set([
+          "07:30",
+          "09:00",
+          "09:15",
+          "10:45",
+          "11:00",
+          "12:30",
+          "14:15",
+          "14:30",
+          "16:00",
+          "16:15",
+          "17:45",
+          "18:00",
+          "19:30",
+          "19:45",
+          "21:00",
+        ])
+      ),
+    []
+  );
+
+  const hmToHHMM = useCallback(
+    (v: string) => String(v || "").replace(/\D/g, "").padStart(4, "0"),
+    []
+  );
+
+  const apiGet = useCallback(async (url: string) => {
+    const r = await fetch(url, { credentials: "include" });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(t || `Request failed: ${r.status}`);
+    }
+    return r.json();
+  }, []);
+
+  const apiPost = useCallback(async (url: string, body: any) => {
+    const r = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify(body ?? {}),
+    });
+    if (!r.ok) {
+      const t = await r.text();
+      throw new Error(t || `Request failed: ${r.status}`);
+    }
+    return r.json();
+  }, []);
+
+  // ---------------- Special-class room value normalization ----------------
+  // Backend expects `room_id`, but the Faculty overview list provides *room labels* (room_number).
+  // If we post the label as room_id, the backend can't resolve it and will display TBA after save.
+  // These helpers map between the two using the eligible rooms list (room_id + room_number).
+  const isUnassignedRoomLabel = useCallback((v: unknown) => {
+    const s = String(v ?? "").trim();
+    if (!s) return true;
+    const u = s.toUpperCase();
+    return u === "TBA" || u === "ONLINE";
+  }, []);
+
+  const resolveRoomIdFromEligible = useCallback(
+    (eligible: any[], valueOrLabel: string) => {
+      const raw = String(valueOrLabel ?? "").trim();
+      if (!raw || isUnassignedRoomLabel(raw)) return "";
+      const list = Array.isArray(eligible) ? eligible : [];
+
+      // If already a room_id from the list, keep it.
+      const direct = list.find((r: any) => String(r?.room_id ?? "") === raw);
+      if (direct) return String(direct?.room_id ?? "");
+
+      // Otherwise treat it as a label and try to match room_number / room_name.
+      const norm = raw.toUpperCase();
+      const byLabel = list.find((r: any) => {
+        const label = String(r?.room_number || r?.room_name || "").trim();
+        return label && label.toUpperCase() === norm;
+      });
+      return byLabel ? String(byLabel?.room_id ?? "") : raw; // fallback (keeps current UI text)
+    },
+    [isUnassignedRoomLabel]
+  );
+
+  const openEditSpecial = async (it: any) => {
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      const userId = raw.userId || raw.user_id || raw.id;
+      const special_id = String(it?.special_id || it?.originalItem?.special_id || "").trim();
+      const section_id = String(it?.section_id || it?.originalItem?.section_id || "").trim();
+      if (!userId || !special_id || !section_id) {
+        onToast?.("error", "Missing special class identifiers.");
+        return;
+      }
+
+      const oi = it?.originalItem || it;
+      const t1 = splitBeginEnd(oi?.time1);
+      const t2 = splitBeginEnd(oi?.time2);
+      const d1 = String(oi?.day1 || "TBA");
+      const d2 = String(oi?.day2 || "");
+      // NOTE: In the overview list these are room *labels* (room_number), not room_id.
+      const room1Label = String((oi as any)?.room1 || "").trim();
+      const room2Label = String((oi as any)?.room2 || "").trim();
+
+      setSpecialEdit({ special_id, section_id, original: oi });
+
+      const day1Val = d1 && d1 !== "TBA" ? d1 : "Monday";
+      const begin1Val = t1.begin && t1.begin !== "—" ? t1.begin : "";
+      const end1ValRaw = t1.end && t1.end !== "—" ? t1.end : "";
+      const end1Val = end1ValRaw || (begin1Val ? (TIME_PAIR[begin1Val] || "") : "");
+
+      const day2ValRaw = d2 && d2 !== "TBA" ? d2 : "";
+      const day2Val = day2ValRaw || (DAY_PAIR[day1Val] || "");
+      const begin2Val = t2.begin && t2.begin !== "—" ? t2.begin : "";
+      const end2ValRaw = t2.end && t2.end !== "—" ? t2.end : "";
+      const end2Val = end2ValRaw || (begin2Val ? (TIME_PAIR[begin2Val] || "") : "");
+
+      setSpecialEditDraft({
+        day1: day1Val,
+        begin1: begin1Val,
+        end1: end1Val,
+        // Keep label for now; we will convert to room_id once eligible rooms are loaded.
+        room1: room1Label && room1Label.toUpperCase() !== "ONLINE" ? room1Label : "",
+        day2: day2Val,
+        begin2: begin2Val,
+        end2: end2Val,
+        room2: room2Label && room2Label.toUpperCase() !== "ONLINE" ? room2Label : "",
+      });
+
+      // Load eligible rooms for both meetings (best-effort).
+      setSpecialRoomsLoading(true);
+      const paramsBase = (day: string, begin: string, end: string) =>
+        `/api/faculty/special-class/eligible-rooms?user_id=${encodeURIComponent(String(userId))}` +
+        `&section_id=${encodeURIComponent(section_id)}` +
+        `&day=${encodeURIComponent(String(day || ""))}` +
+        `&start_time=${encodeURIComponent(hmToHHMM(begin))}` +
+        `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
+
+      const list1 =
+        d1 && t1.begin !== "—" && t1.end !== "—"
+          ? await apiGet(paramsBase(d1, t1.begin, t1.end))
+          : [];
+      const list2 =
+        d2 && t2.begin !== "—" && t2.end !== "—"
+          ? await apiGet(paramsBase(d2, t2.begin, t2.end))
+          : [];
+      setSpecialRooms1(Array.isArray(list1) ? list1 : []);
+      setSpecialRooms2(Array.isArray(list2) ? list2 : []);
+
+      // Convert existing room labels to room_id so saving won't wipe rooms.
+      // Only auto-convert if the user hasn't already picked something else.
+      setSpecialEditDraft((p) => {
+        const next = { ...p } as any;
+        if (p.room1 && String(p.room1) === room1Label) {
+          next.room1 = resolveRoomIdFromEligible(list1, p.room1);
+        }
+        if (p.room2 && String(p.room2) === room2Label) {
+          next.room2 = resolveRoomIdFromEligible(list2, p.room2);
+        }
+        return next;
+      });
+    } catch (e: any) {
+      onToast?.("error", e?.message || "Failed to open edit modal.");
+      setSpecialEdit(null);
+    } finally {
+      setSpecialRoomsLoading(false);
+    }
+  };
+
+  const saveSpecialEdit = async () => {
+    if (!specialEdit) return;
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      const userId = raw.userId || raw.user_id || raw.id;
+      if (!userId) throw new Error("User is not logged in");
+
+      setSpecialEditBusy(true);
+
+      // Ensure we post room_id (not room label). If the current value is a label,
+      // map it using the latest eligible rooms list.
+      const room1Id = resolveRoomIdFromEligible(specialRooms1, specialEditDraft.room1);
+      const room2Id = resolveRoomIdFromEligible(specialRooms2, specialEditDraft.room2);
+
+      await apiPost("/api/faculty/special-class/update-schedule", {
+        user_id: userId,
+        special_id: specialEdit.special_id,
+        section_id: specialEdit.section_id,
+        meeting1: {
+          day: specialEditDraft.day1,
+          begin: hmToHHMM(specialEditDraft.begin1),
+          end: hmToHHMM(specialEditDraft.end1),
+          room_id: room1Id || "",
+        },
+        meeting2:
+          specialEditDraft.day2 && specialEditDraft.begin2 && specialEditDraft.end2
+            ? {
+                day: specialEditDraft.day2,
+                begin: hmToHHMM(specialEditDraft.begin2),
+                end: hmToHHMM(specialEditDraft.end2),
+                room_id: room2Id || "",
+              }
+            : {},
+      });
+
+      onToast?.("success", "Special class schedule updated. Notifications sent to OM/Chair.");
+      setSpecialEdit(null);
+      setSpecialRooms1([]);
+      setSpecialRooms2([]);
+
+      // Refresh Overview so the row reflects changes.
+      await Promise.resolve(onRefresh?.());
+    } catch (e: any) {
+      onToast?.("error", e?.message || "Failed to save schedule changes.");
+    } finally {
+      setSpecialEditBusy(false);
+    }
+  };
+
+  // Re-fetch eligible rooms when the user adjusts the day/time fields.
+  useEffect(() => {
+    if (!specialEdit) return;
+
+    const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+    const userId = raw.userId || raw.user_id || raw.id;
+    if (!userId) return;
+
+    const t = window.setTimeout(async () => {
+      try {
+        setSpecialRoomsLoading(true);
+        const paramsBase = (day: string, begin: string, end: string) =>
+          `/api/faculty/special-class/eligible-rooms?user_id=${encodeURIComponent(String(userId))}` +
+          `&section_id=${encodeURIComponent(specialEdit.section_id)}` +
+          `&day=${encodeURIComponent(String(day || ""))}` +
+          `&start_time=${encodeURIComponent(hmToHHMM(begin))}` +
+          `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
+
+        const can1 = !!specialEditDraft.day1 && !!specialEditDraft.begin1 && !!specialEditDraft.end1;
+        const can2 = !!specialEditDraft.day2 && !!specialEditDraft.begin2 && !!specialEditDraft.end2;
+
+        const [r1, r2] = await Promise.all([
+          can1 ? apiGet(paramsBase(specialEditDraft.day1, specialEditDraft.begin1, specialEditDraft.end1)) : [],
+          can2 ? apiGet(paramsBase(specialEditDraft.day2, specialEditDraft.begin2, specialEditDraft.end2)) : [],
+        ]);
+
+        setSpecialRooms1(Array.isArray(r1) ? r1 : []);
+        setSpecialRooms2(Array.isArray(r2) ? r2 : []);
+
+        // If the current selection is still a label, try to normalize it to a room_id
+        // based on the freshly fetched eligible rooms list.
+        setSpecialEditDraft((p) => {
+          const next = { ...p } as any;
+          next.room1 = resolveRoomIdFromEligible(Array.isArray(r1) ? r1 : [], p.room1);
+          next.room2 = resolveRoomIdFromEligible(Array.isArray(r2) ? r2 : [], p.room2);
+          return next;
+        });
+      } catch {
+        // Best-effort: keep dropdown usable (TBA still selectable)
+      } finally {
+        setSpecialRoomsLoading(false);
+      }
+    }, 250);
+
+    return () => window.clearTimeout(t);
+  }, [
+    specialEdit?.section_id,
+    specialEditDraft.day1,
+    specialEditDraft.begin1,
+    specialEditDraft.end1,
+    specialEditDraft.day2,
+    specialEditDraft.begin2,
+    specialEditDraft.end2,
+    apiGet,
+    hmToHHMM,
+    resolveRoomIdFromEligible,
+  ]);
 
   // Calendar row sizing:
   // - Keep empty rows compact and consistent (match the schedule card height)
@@ -1623,8 +2192,21 @@ const scheduleFinalLabel = (() => {
 })();
 
 
+  // Split teaching load into regular/serviced vs special classes.
+  // Requirement: Special classes must NOT appear in the main Calendar/List views.
+  const regularTeachingLoad = useMemo(
+    () => (teachingLoad || []).filter((it) => !Boolean((it as any)?.is_special_class)),
+    [teachingLoad]
+  );
+  const specialTeachingLoad = useMemo(
+    () => (teachingLoad || []).filter((it) => Boolean((it as any)?.is_special_class)),
+    [teachingLoad]
+  );
+
+
+
   // --- *** MODIFIED: Remove TLData, pass teachingLoad to placeItems *** ---
-  const placed = useMemo(() => placeItems(teachingLoad || []), [teachingLoad]);
+  const placed = useMemo(() => placeItems(regularTeachingLoad || []), [regularTeachingLoad]);
   const groups = useMemo(() => groupPlacedByCell(placed), [placed]);
 
   const [showSyllabus, setShowSyllabus] = useState(false);
@@ -1642,7 +2224,7 @@ const scheduleFinalLabel = (() => {
     setShowSyllabus(true);
   };
 
-  const hasTBA = teachingLoad.some(item => item.day1 === 'TBA' || item.time1 === 'TBA');
+  const hasTBA = regularTeachingLoad.some((item) => item.day1 === 'TBA' || item.time1 === 'TBA');
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -1654,46 +2236,49 @@ const scheduleFinalLabel = (() => {
           </div>
 
 	          {/* Legend (centered above the calendar/list controls) */}
-	          <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
-	              <span>Manila</span>
-	            </span>
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
-	              <span>Laguna</span>
-	            </span>
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
-	              <span>Special Class</span>
-	            </span>
-	          
-<span className="inline-flex items-center gap-2">
-  <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
-  <span>Serviced</span>
-</span>
-</div>
-          <div className="flex gap-2">
-          {["Calendar", "List"].map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => setView(v as any)}
-              className={cls(
-                "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
-                view === v
-                  ? "bg-emerald-700 text-white shadow-inner"
-                  : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200 active:translate-y-[0.5px]"
-              )}
-            >
-              {v}
-            </button>
-          ))}
+	          {view !== "Special" && (
+	            <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
+	              <span className="inline-flex items-center gap-2">
+	                <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	                <span>Manila</span>
+	              </span>
+	              <span className="inline-flex items-center gap-2">
+	                <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	                <span>Laguna</span>
+	              </span>
+	              <span className="inline-flex items-center gap-2">
+	                <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+	                <span>Serviced</span>
+	              </span>
+	            </div>
+	          )}
 
-          <div className="flex flex-col items-start">
-          <button
-            type="button"
-            onClick={async () => {
+          <div className="flex items-start gap-2 flex-wrap">
+
+          <div className="flex gap-2">
+          {["Calendar", "List", "Special"].map((v) => (
+  <button
+    key={v}
+    type="button"
+    onClick={() => setView(v as any)}
+    className={cls(
+      "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+      view === v
+        ? "bg-emerald-700 text-white shadow-inner"
+        : "bg-neutral-100 text-neutral-700 hover:bg-neutral-200 active:translate-y-[0.5px]"
+    )}
+    title={v === "Special" ? "Special Class" : undefined}
+  >
+    {v === "Special" ? "Special Class" : v}
+  </button>
+            ))}
+          </div>
+
+	            {view !== "Special" ? (
+	              <div className="flex flex-col items-start">
+	                <button
+	                  type="button"
+	                  onClick={async () => {
               try {
                 if (isAccepting) return;
                 setIsAccepting(true);
@@ -1729,63 +2314,121 @@ const scheduleFinalLabel = (() => {
               } finally {
                 setIsAccepting(false);
               }
-            }}
-            disabled={isAccepting || scheduleFinal || isAlreadyApproved}
-            className={cls(
-              "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
-              "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              (isAccepting || scheduleFinal || isAlreadyApproved)
-                ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-                : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
-            )}
-          >
-            {scheduleFinal
-              ? "Finalized"
-              : isAlreadyApproved
-              ? "Approved"
-              : isAccepting
-              ? "Accepting…"
-              : "Accept Schedule"}
-          </button>
+	                  }}
+	                  disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+	                  className={cls(
+	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+	                    (isAccepting || scheduleFinal || isAlreadyApproved)
+	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+	                      : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
+	                  )}
+	                >
+	                  {scheduleFinal
+	                    ? "Finalized"
+	                    : isAlreadyApproved
+	                    ? "Approved"
+	                    : isAccepting
+	                    ? "Accepting…"
+	                    : "Accept Schedule"}
+	                </button>
 
-          <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
-            <input
-              type="checkbox"
-              className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
-              checked={sendToGcal}
-              onChange={(e) => setSendToGcal(e.target.checked)}
-              disabled={isAccepting || scheduleFinal || isAlreadyApproved}
-            />
-            <span>Send to GCalendar</span>
-          </label>
+	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
+	                  <input
+	                    type="checkbox"
+	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 focus:ring-emerald-600/40"
+	                    checked={sendToGcal}
+	                    onChange={(e) => setSendToGcal(e.target.checked)}
+	                    disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+	                  />
+	                  <span>Send to GCalendar</span>
+	                </label>
+	              </div>
+	            ) : (
+	              <button
+	                type="button"
+	                onClick={async () => {
+	                  try {
+	                    if (isSyncingSpecial) return;
+	                    setIsSyncingSpecial(true);
+
+	                    const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+	                    const userId = raw.userId || raw.user_id || raw.id || "";
+	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+	                    const resp: any = await acceptFacultyLoadAssignment(
+                      userId,
+                      ({
+                        ...(termId ? { term_id: termId } : {}),
+                        send_to_gcal: true,
+                        sync_special_only: true,
+                        overwrite_gcal: true,
+                      } as any)
+                    );
+
+	                    if (resp?.calendar_ok === false) {
+	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
+	                    } else {
+	                      onToast?.(
+	                        "success",
+	                        resp?.calendar_events_created
+	                          ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
+	                          : "No special classes to sync.",
+	                        "Synced"
+	                      );
+	                    }
+	                  } catch (e: any) {
+	                    const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
+	                    onToast?.("error", msg, "Action failed");
+	                    console.error(e);
+	                  } finally {
+	                    setIsSyncingSpecial(false);
+	                  }
+	                }}
+	                disabled={isSyncingSpecial}
+	                className={cls(
+	                  "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+	                  "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+	                  isSyncingSpecial
+	                    ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+	                    : "bg-blue-700 text-white hover:bg-blue-800 active:translate-y-[0.5px]"
+	                )}
+	                title="Sync Special Classes to Google Calendar"
+	              >
+	                {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
+	              </button>
+	            )}
         </div>
         </div>
       </div>
 
 	      {/* Legend (mobile): centered above the calendar/list table */}
-	      <div className="mb-3 flex justify-center md:hidden">
-	        <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
-	          <span className="font-semibold text-neutral-800">Legend:</span>
-	          <span className="inline-flex items-center gap-2">
-	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
-	            <span>Manila</span>
-	          </span>
-	          <span className="inline-flex items-center gap-2">
-	            <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
-	            <span>Laguna</span>
-	          </span>
-	          <span className="inline-flex items-center gap-2">
-	            <span className="h-3 w-3 rounded-sm border border-purple-200 bg-purple-100" />
-	            <span>Special Class</span>
-	          </span>
-	          <span className="inline-flex items-center gap-2">
-	            <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
-	            <span>Serviced</span>
-	          </span>
+	      {view !== "Special" && (
+	        <div className="mb-3 flex justify-center md:hidden">
+	          <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
+	            <span className="font-semibold text-neutral-800">Legend:</span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#97AC9F" }} />
+	              <span>Manila</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#859EAC" }} />
+	              <span>Laguna</span>
+	            </span>
+	            <span className="inline-flex items-center gap-2">
+	              <span className="h-3 w-3 rounded-sm border border-yellow-200 bg-yellow-50" />
+	              <span>Serviced</span>
+	            </span>
+	          </div>
 	        </div>
-	      </div>
+	      )}
 
-      {scheduleFinal && (
+      {/*
+        IMPORTANT:
+        "Schedule Locked" applies only to regular/serviced load assignment.
+        It must NOT appear in the Special Class tab.
+      */}
+      {scheduleFinal && view !== "Special" && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
         </div>
@@ -1854,9 +2497,8 @@ const scheduleFinalLabel = (() => {
                           it={it}
                           onClick={() => {
                             if (scheduleFinal) return;
-                            // Reflected Special Classes and Serviced classes must NOT allow RFC.
+                            // Reflected Special Classes must NOT allow RFC.
                             if (it.is_special_class) return;
-                            if ((it as any)?.is_serviced) return;
                             setModal({ day: g.day, item: it });
                           }}
                         />
@@ -1867,8 +2509,221 @@ const scheduleFinalLabel = (() => {
               </div>
             </div>
           </div>
-        ) : (
-           // --- *** MODIFIED: New List View *** ---
+) : view === "Special" ? (
+  <>
+    {/* Special Class Tab (List-style) */}
+  <div className="overflow-x-auto">
+    <div className="min-w-[1100px] rounded-xl border border-neutral-300 bg-white">
+      <div className="border-b border-neutral-200 bg-purple-50 px-4 py-3">
+        <div className="flex items-center gap-2 text-sm font-semibold text-purple-900">
+          <span>Special Classes</span>
+          <span
+            title="To message the OM about a Special Class, click the row to open the modal and use the Conversation tab."
+            aria-label="Info"
+            className="inline-flex"
+          >
+            <Info className="h-4 w-4 text-purple-900/70" />
+          </span>
+        </div>
+        <div className="mt-0.5 text-xs text-purple-800/80">
+          These classes are shown separately and do not appear in Calendar/List views.
+        </div>
+      </div>
+
+      <div className="w-full">
+
+        <table className="w-full table-fixed border-separate border-spacing-0 text-sm">
+          
+          <colgroup>
+            <col className="w-[12%]" />
+            <col className="w-[16%]" />
+            {/* Evenly distribute the remaining columns (do not adjust Student/Reason) */}
+            <col className="w-[15%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+            <col className="w-[9%]" />
+          </colgroup>
+          <thead className="bg-gray-50 text-gray-700">
+            <tr className="[&>th]:border-b [&>th]:border-gray-200">
+              {SPECIAL_TABLE_HEADERS.map((h) => (
+                <th
+                  key={h}
+                  className={cls(
+                    "px-3 py-2 text-xs font-semibold whitespace-normal break-words",
+                    (h === "Course Code & Title" || h === "Student" || h === "Reason") ? "text-left" : "text-center"
+                  )}
+                >
+                  {h}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="text-gray-900">
+            {specialTeachingLoad.length === 0 ? (
+              <tr>
+                <td colSpan={SPECIAL_TABLE_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
+                  No special classes.
+                </td>
+              </tr>
+            ) : (
+              specialTeachingLoad.map((it, idx) => {
+                const t1 = splitBeginEnd(it.time1);
+                const t2 = splitBeginEnd(it.time2);
+
+                const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
+                const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
+                const d1 = d1Raw ? dayInitial(d1Raw) : "—";
+                const d2 = d2Raw ? dayInitial(d2Raw) : "—";
+
+                const room1Display = normalizeRoomDisplayForSpecial((it as any).room1);
+                const room2Display = normalizeRoomDisplayForSpecial((it as any).room2);
+
+                const modeDisplay = specialModeFromRooms((it as any).room1, (it as any).room2);
+
+                // Allow opening the RFC modal from special classes (Conversation-only mode is handled inside the modal).
+                const onOpen = () => {
+                  const day = normalizeDay(it.day1) || normalizeDay(it.day2) || "TBA";
+                  setModal({
+                    day,
+                    item: {
+                      code: it.course_code,
+                      title: it.course_title,
+                      sec: it.section,
+                      units: it.units,
+                      mode: it.mode,
+                      room: room1Display || "TBA",
+                      time: it.time1 || "TBA",
+                      syllabus: it.syllabus,
+                      is_special_class: true,
+                      special_id: (it as any)?.special_id,
+                      forceConversationOnly: true,
+                      allowStartConversation: true,
+                      originalItem: it,
+                    },
+                  });
+                };
+
+                return (
+                  <tr
+                    key={idx}
+                    className={cls(
+                      "bg-purple-50 hover:bg-purple-100/60 cursor-pointer",
+                      "[&>td]:border-t [&>td]:border-gray-100"
+                    )}
+                    onClick={onOpen}
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" || e.key === " ") {
+                        e.preventDefault();
+                        onOpen();
+                      }
+                    }}
+                    title="Open Proposed Schedule"
+                  >
+                                        <td className="px-3 py-3 align-top">
+                      <div className="leading-tight">
+                        <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">{(it as any)?.student || "—"}</div>
+                      
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top">
+                      <div className="text-[12px] text-gray-800 break-words whitespace-normal">
+                        {(it as any)?.reason || "—"}
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top">
+                      <div className="leading-tight break-words whitespace-normal">
+                        <div className="text-sm font-semibold text-gray-900">{it.course_code || "—"}</div>
+                        <div className="mt-0.5 text-[12px] text-gray-600">{it.course_title || "—"}</div>
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top text-center text-sm">{it.section || "—"}</td>
+
+                    
+<td className="px-3 py-3 align-top text-center">
+                      <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight">
+                        <div className="font-semibold">{d1 || "—"}</div>
+                        {(d2 || t2.begin || t2.end || room2Display) && <div className="font-semibold">{d2 || "—"}</div>}
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top text-center">
+                      <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight whitespace-nowrap">
+                        <div>{(t1.begin && t1.end) ? `${t1.begin}–${t1.end}` : "TBA"}</div>
+                        {(d2 || t2.begin || t2.end || room2Display) && (
+                          <div>{(t2.begin && t2.end) ? `${t2.begin}–${t2.end}` : "TBA"}</div>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top text-center">
+                      <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight break-words whitespace-normal">
+                        <div>{room1Display || "TBA"}</div>
+                        {(d2 || t2.begin || t2.end || room2Display) && (
+                          <div>{room2Display || "TBA"}</div>
+                        )}
+                      </div>
+                    </td>
+
+                    <td className="px-3 py-3 align-top text-center text-sm text-gray-800">{modeDisplay}</td>
+
+                    <td className="px-3 py-3 align-top text-center">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openSyllabus(it);
+                        }}
+                        className={cls(
+                          "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                          "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]",
+                          !it.syllabus && "opacity-60"
+                        )}
+                        title={it.syllabus ? "View syllabus" : "No syllabus uploaded"}
+                        aria-label="View syllabus"
+                      >
+                        <SyllabusIcon className="h-4 w-4" />
+                      </button>
+                    </td>
+
+                    <td className="px-3 py-3 align-top text-center">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          openEditSpecial(it);
+                        }}
+                        className={cls(
+                          "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                          "border-purple-200 bg-purple-50 hover:bg-purple-100 active:translate-y-[0.5px]"
+                        )}
+                        title="Edit Special Class Schedule"
+                        aria-label="Edit Special Class Schedule"
+                      >
+                        <Edit className="h-4 w-4" />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+  </>
+) : (
+  <>
+    {/* New List View */}
           <div className="space-y-6">
             <div className="overflow-x-auto">
               <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
@@ -1897,14 +2752,14 @@ const scheduleFinalLabel = (() => {
                     </tr>
                   </thead>
                   <tbody className="text-gray-900">
-                    {teachingLoad.length === 0 ? (
+                    {regularTeachingLoad.length === 0 ? (
                       <tr>
                         <td colSpan={LIST_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
                           No records.
                         </td>
                       </tr>
                     ) : (
-                      teachingLoad.map((it, idx) => {
+                      regularTeachingLoad.map((it, idx) => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
                         const isSpecial = Boolean((it as any)?.is_special_class);
@@ -1980,8 +2835,8 @@ const scheduleFinalLabel = (() => {
               </div>
             </div>
           </div>
+  </>
         )}
-      </div>
 
        {/* Syllabus modal — add it here */}
       {showSyllabus && (
@@ -2018,6 +2873,228 @@ const scheduleFinalLabel = (() => {
                 className="px-4 py-2 rounded-lg bg-gray-100 hover:bg-gray-200 text-sm"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Edit Special Class Schedule modal */}
+      {specialEdit && (
+        <div className="fixed inset-0 z-[110] grid place-items-center bg-black/40 p-4">
+          <div className="w-full max-w-6xl rounded-2xl bg-white shadow-2xl overflow-hidden">
+            <div className="flex items-start justify-between gap-4 border-b border-neutral-200 p-5">
+              <div className="min-w-0">
+                <h2 className="text-lg font-semibold text-purple-800">Edit Special Class Schedule</h2>
+                <div className="mt-1 text-xs text-neutral-600">
+                  This change does not require approval. OM/Chair will be notified automatically.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (specialEditBusy) return;
+                  setSpecialEdit(null);
+                  setSpecialRooms1([]);
+                  setSpecialRooms2([]);
+                }}
+                className="rounded-full p-1 hover:bg-neutral-100"
+                aria-label="Close"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+
+            <div className="max-h-[80vh] overflow-y-auto p-5">
+              {(() => {
+	                // NOTE: specialEdit is guarded by `{specialEdit && (...)}` above,
+	                // but TS doesn't always narrow across the IIFE boundary.
+	                const oi = (specialEdit?.original ?? {}) as any;
+                const t1 = splitBeginEnd(oi?.time1);
+                const t2 = splitBeginEnd(oi?.time2);
+                const orig1 = `${dayInitial(oi?.day1 || "TBA") || "TBA"} ${(t1.begin && t1.end && t1.begin !== "—") ? `${t1.begin}–${t1.end}` : "TBA"} (${normalizeRoomDisplayForSpecial((oi as any)?.room1) || "TBA"})`;
+                const orig2 = `${dayInitial(oi?.day2 || "TBA") || "TBA"} ${(t2.begin && t2.end && t2.begin !== "—") ? `${t2.begin}–${t2.end}` : "TBA"} (${normalizeRoomDisplayForSpecial((oi as any)?.room2) || "TBA"})`;
+
+                return (
+                  <>
+                    <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4">
+                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                          <div className="text-sm font-semibold text-neutral-800">Meeting 1</div>
+                          <div className="text-xs text-neutral-600">Original: {orig1}</div>
+                        </div>
+                        <div className="flex items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-3 py-2">
+                          <div className="text-sm font-semibold text-neutral-800">Meeting 2</div>
+                          <div className="text-xs text-neutral-600">Original: {orig2}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="mt-4 rounded-xl border border-neutral-200 bg-white">
+                      <div className="border-b border-neutral-200 bg-gray-50 px-4 py-3">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+
+                            <div className="mt-1 grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
+                              <div>Day 1</div>
+                              <div>Begin 1</div>
+                              <div>End 1</div>
+                              <div>Room 1</div>
+                            </div>
+
+                            <div className="mt-1 grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
+                              <div>Day 2</div>
+                              <div>Begin 2</div>
+                              <div>End 2</div>
+                              <div>Room 2</div>
+                            </div>
+                        
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 gap-3 px-4 py-4 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                        {/* Day 1 */}
+                        <SpecialDropdown
+                          value={specialEditDraft.day1}
+                          onChange={(v) => {
+                            const autoDay2 = DAY_PAIR[v] || "";
+                            setSpecialEditDraft((p) => ({ ...p, day1: v, day2: autoDay2 }));
+                          }}
+                          options={ALL_DAYS.map((d) => ({ value: d, label: d }))}
+                          placeholder="—"
+                        />
+
+                        {/* Begin 1 (auto-sets End 1) */}
+                        <SpecialDropdown
+                          value={specialEditDraft.begin1}
+                          onChange={(v) => {
+                            const autoEnd = v ? (TIME_PAIR[v] || "") : "";
+                            setSpecialEditDraft((p) => ({ ...p, begin1: v, end1: autoEnd }));
+                          }}
+                          options={[
+                            { value: "", label: "—" },
+                            ...TIME_POINTS.map((t) => ({ value: t, label: t })),
+                          ]}
+                          placeholder="—"
+                        />
+
+                        {/* End 1 (editable) */}
+                        <SpecialDropdown
+                          value={specialEditDraft.end1}
+                          onChange={(v) => setSpecialEditDraft((p) => ({ ...p, end1: v }))}
+                          options={[
+                            { value: "", label: "—" },
+                            ...TIME_POINTS.map((t) => ({ value: t, label: t })),
+                          ]}
+                          placeholder="—"
+                        />
+
+                        {/* Room 1 */}
+                        <SpecialDropdown
+                          value={specialEditDraft.room1}
+                          onChange={(v) => setSpecialEditDraft((p) => ({ ...p, room1: v }))}
+                          options={[
+                            { value: "", label: "TBA" },
+                            ...specialRooms1.map((r: any) => ({
+                              value: String(r?.room_id ?? ""),
+                              label: String(r?.room_number || r?.room_name || r?.room_id || ""),
+                            })),
+                          ].filter((o) => o.value !== "")}
+                          includeEmptyOption={{ value: "", label: "TBA" }}
+                          disabled={specialRoomsLoading}
+                        />
+
+                        </div>
+
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+
+                        {/* Day 2 (auto-filled but editable) */}
+                        <SpecialDropdown
+                          value={specialEditDraft.day2}
+                          onChange={(v) => setSpecialEditDraft((p) => ({ ...p, day2: v }))}
+                          options={[
+                            { value: "", label: "—" },
+                            ...ALL_DAYS.map((d) => ({ value: d, label: d })),
+                          ]}
+                          placeholder="—"
+                        />
+
+                        {/* Begin 2 (auto-sets End 2) */}
+                        <SpecialDropdown
+                          value={specialEditDraft.begin2}
+                          onChange={(v) => {
+                            const autoEnd = v ? (TIME_PAIR[v] || "") : "";
+                            setSpecialEditDraft((p) => ({ ...p, begin2: v, end2: autoEnd }));
+                          }}
+                          options={[
+                            { value: "", label: "—" },
+                            ...TIME_POINTS.map((t) => ({ value: t, label: t })),
+                          ]}
+                          placeholder="—"
+                        />
+
+                        {/* End 2 (editable) */}
+                        <SpecialDropdown
+                          value={specialEditDraft.end2}
+                          onChange={(v) => setSpecialEditDraft((p) => ({ ...p, end2: v }))}
+                          options={[
+                            { value: "", label: "—" },
+                            ...TIME_POINTS.map((t) => ({ value: t, label: t })),
+                          ]}
+                          placeholder="—"
+                        />
+
+                        {/* Room 2 */}
+                        <SpecialDropdown
+                          value={specialEditDraft.room2}
+                          onChange={(v) => setSpecialEditDraft((p) => ({ ...p, room2: v }))}
+                          options={[
+                            { value: "", label: "TBA" },
+                            ...specialRooms2.map((r: any) => ({
+                              value: String(r?.room_id ?? ""),
+                              label: String(r?.room_number || r?.room_name || r?.room_id || ""),
+                            })),
+                          ].filter((o) => o.value !== "")}
+                          includeEmptyOption={{ value: "", label: "TBA" }}
+                          disabled={specialRoomsLoading || !specialEditDraft.day2}
+                        />
+                        </div>
+                    </div>
+                    </div>
+
+                    {specialRoomsLoading && (
+                      <div className="mt-2 text-xs text-neutral-500">Loading available rooms…</div>
+                    )}
+                  </>
+                );
+              })()}
+            </div>
+
+            <div className="flex items-center justify-end gap-2 border-t border-neutral-200 p-4">
+              <button
+                type="button"
+                onClick={() => {
+                  if (specialEditBusy) return;
+                  setSpecialEdit(null);
+                  setSpecialRooms1([]);
+                  setSpecialRooms2([]);
+                }}
+                className="rounded-xl border border-neutral-200 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={saveSpecialEdit}
+                disabled={specialEditBusy || !specialEditDraft.day1 || !specialEditDraft.begin1 || !specialEditDraft.end1}
+                className={cls(
+                  "rounded-xl px-4 py-2 text-sm font-semibold text-white",
+                  specialEditBusy
+                    ? "bg-purple-300 cursor-not-allowed"
+                    : "bg-purple-700 hover:bg-purple-800"
+                )}
+              >
+                {specialEditBusy ? "Saving…" : "Save Changes"}
               </button>
             </div>
           </div>
@@ -2203,7 +3280,29 @@ function ChangeRequestModal({
     }
   }, [open]);
 
+  // Special Class Tab: force Conversation-only view.
+  useEffect(() => {
+    if (!open || !context) return;
+    if ((context.item as any)?.forceConversationOnly) {
+      setPanel("conversation");
+    }
+  }, [open, context]);
+
   if (!open || !context) return null;
+
+  // IMPORTANT:
+  // Special Classes use a synthetic section_id like "SPECIAL:<special_id>" for display.
+  // The RFC thread key and backend routing for Special Classes expect the raw special_id.
+  // Normalize here so Faculty can always message OM from the Conversation panel.
+  const normalizeRfcKey = (rawId: string, isSpecial: boolean) => {
+    const s = String(rawId || "").trim();
+    if (!s) return "";
+    if (!isSpecial) return s;
+    return s.replace(/^SPECIAL:/i, "");
+  };
+
+  const forceConversationOnly = Boolean((context.item as any)?.forceConversationOnly);
+  const effectivePanel: "request" | "conversation" = forceConversationOnly ? "conversation" : panel;
 
   const toggle = (label: ChangeKind) =>
     setChoices((prev) => (prev.includes(label) ? prev.filter((c) => c !== label) : [...prev, label]));
@@ -2231,7 +3330,7 @@ function ChangeRequestModal({
     (mustTime && (!selTime1 || (hasSecond && !selTime2))) ||
     (mustDay && (!selDay1 || (hasSecond && !selDay2))) ||
     // Remarks are required once an RFC is being submitted
-    (panel === "request" && choices.length > 0 && !remarks.trim());
+    (effectivePanel === "request" && choices.length > 0 && !remarks.trim());
 
   return (
     <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
@@ -2240,7 +3339,7 @@ function ChangeRequestModal({
 	      <div className="border-b border-neutral-200 p-5 sm:p-6">
 	        <div className="flex items-start justify-between gap-4">
 	          <div className="min-w-0">
-	            <h3 className="text-xl font-semibold text-emerald-700">Request for Change (RFC)</h3>
+	            <h3 className="text-xl font-semibold text-emerald-700">Proposed Schedule</h3>
 	            <p className="mt-0.5 text-sm text-neutral-500">
 	              {context.item.code} {context.item.sec}
 	            </p>
@@ -2257,48 +3356,64 @@ function ChangeRequestModal({
 
 	        {/* Panel switcher */}
 	        <div className="mt-4 flex w-full items-center justify-between gap-3">
-	          <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-	            <button
-	              type="button"
-	              onClick={() => setPanel("request")}
-	              className={cls(
-	                "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                panel === "request"
-	                  ? "bg-white text-neutral-900 shadow-sm"
-	                  : "text-neutral-600 hover:text-neutral-900"
-	              )}
-	              aria-pressed={panel === "request"}
-	            >
-	              Request
-	            </button>
-	            <button
-	              type="button"
-	              onClick={() => setPanel("conversation")}
-	              className={cls(
-	                "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                panel === "conversation"
-	                  ? "bg-white text-neutral-900 shadow-sm"
-	                  : "text-neutral-600 hover:text-neutral-900"
-	              )}
-	              aria-pressed={panel === "conversation"}
-	            >
-	              Conversation
-	            </button>
-	          </div>
-	         
+	          {(context.item as any)?.forceConversationOnly ? (
+              <div className="inline-flex rounded-xl border border-purple-200 bg-purple-50 px-3 py-1.5 text-sm font-medium text-purple-900">
+                Conversation
+              </div>
+            ) : (
+	            <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+	              <button
+	                type="button"
+	                onClick={() => setPanel("request")}
+	                className={cls(
+	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
+	                  panel === "request"
+	                    ? "bg-white text-neutral-900 shadow-sm"
+	                    : "text-neutral-600 hover:text-neutral-900"
+	                )}
+	                aria-pressed={panel === "request"}
+	              >
+	                Request
+	              </button>
+	              <button
+	                type="button"
+	                onClick={() => setPanel("conversation")}
+	                className={cls(
+	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
+	                  panel === "conversation"
+	                    ? "bg-white text-neutral-900 shadow-sm"
+	                    : "text-neutral-600 hover:text-neutral-900"
+	                )}
+	                aria-pressed={panel === "conversation"}
+	              >
+	                Conversation
+	              </button>
+	            </div>
+	          )}
 	        </div>
 	      </div>
 
 	      {/* Body (scrollable) */}
 	      <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
-	        {panel === "conversation" ? (
+	        {effectivePanel === "conversation" ? (
 	          <RfcThreadView
 	            term={term}
-	            sectionId={
-	              (context.item.originalItem as any)?.section_id ||
-	              (context.item.originalItem as any)?.sectionId ||
-	              ""
-	            }
+	            sectionId={(() => {
+	              const oiAny: any = (context.item.originalItem as any) || {};
+	              const isSpecial = Boolean(
+	                (context.item as any)?.is_special_class ||
+	                  (context.item as any)?.isSpecialClass ||
+	                  oiAny?.is_special_class
+	              );
+	              const raw =
+	                (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
+	                oiAny?.section_id ||
+	                oiAny?.sectionId ||
+	                "";
+	              return normalizeRfcKey(raw, isSpecial);
+	            })()}
+	            allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
+	            alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
 	          />
 	        ) : (
 	          <div className="space-y-4">
@@ -2484,17 +3599,27 @@ function ChangeRequestModal({
 	        )}
 	      </div>
 
-	      {/* Footer (always visible) */}
-	      <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
-          <button
-            onClick={onClose}
-            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
-          >
-            Cancel
-          </button>
-          <button
-            disabled={disabled}
-            onClick={async () => {
+	      {/* Footer */}
+	      {forceConversationOnly ? (
+	        <div className="p-6 pt-0 flex items-center justify-end">
+	          <button
+	            onClick={onClose}
+	            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+	          >
+	            Close
+	          </button>
+	        </div>
+	      ) : (
+	        <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
+            <button
+              onClick={onClose}
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+            >
+              Cancel
+            </button>
+            <button
+              disabled={disabled}
+              onClick={async () => {
             try {
               const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
               const userId = raw.userId || raw.user_id || raw.id || "";
@@ -2545,6 +3670,7 @@ function ChangeRequestModal({
               const oiAny: any = (context?.item?.originalItem ?? context?.item ?? {});
               const sectionId =
                 oiAny.section_id ||
+                oiAny.special_id ||
                 oiAny.id ||
                 oiAny.sectionId ||
                 oiAny.section?.section_id ||
@@ -2588,25 +3714,36 @@ function ChangeRequestModal({
             } finally {
               onClose();
             }
-          }}
+	          }}
 
-            className={cls(
-              "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
-              "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-              disabled && "opacity-60 cursor-not-allowed"
-            )}
-            aria-disabled={disabled}
-          >
-            <SendIcon className="h-4 w-4" strokeWidth={2.2} />
-            Send
-          </button>
-	      </div>
+              className={cls(
+                "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
+                "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px] focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+                disabled && "opacity-60 cursor-not-allowed"
+              )}
+              aria-disabled={disabled}
+            >
+              <SendIcon className="h-4 w-4" strokeWidth={2.2} />
+              Send
+            </button>
+	        </div>
+	      )}
       </div>
     </div>
   );
 }
 
-function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
+function RfcThreadView({
+  term,
+  sectionId,
+  allowStartConversation,
+  alwaysShowReply,
+}: {
+  term: any;
+  sectionId: string;
+  allowStartConversation?: boolean;
+  alwaysShowReply?: boolean;
+}) {
   const [thread, setThread] = useState<any | null>(null);
   const [loading, setLoading] = useState(false);
   const [reply, setReply] = useState("");
@@ -2652,14 +3789,8 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
   }
 
   const msgs = thread?.messages || thread?.thread || [];
-  if (!thread || !Array.isArray(msgs) || msgs.length === 0) {
-    return (
-      <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
-        No RFC thread yet. You may send a request below.
-      </div>
-    );
-  }
-  const locked = Boolean(thread.locked);
+  const hasMsgs = Array.isArray(msgs) && msgs.length > 0;
+  const locked = Boolean(thread?.locked);
 
   return (
     <div className="rounded-xl border border-neutral-200 bg-white p-3">
@@ -2667,30 +3798,36 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
         <div className="text-sm font-semibold text-neutral-800">RFC Conversation</div>
       </div>
 
-      <div ref={scrollRef} className="max-h-[60vh] space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
-        {msgs.map((m: any, i: number) => {
-          const role = String(m.sender_role || "").toLowerCase();
-          const isMe = role === "faculty";
-          const ts = m.created_at ? new Date(m.created_at) : null;
-          const time = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : "";
-          return (
-            <div key={i} className={cls("flex", isMe ? "justify-end" : "justify-start")}>
-              <div
-                className={cls(
-                  "max-w-[85%] rounded-xl px-3 py-2 text-sm shadow-sm",
-                  isMe ? "bg-emerald-700 text-white" : "bg-white text-neutral-800 border border-neutral-200"
-                )}
-              >
-                <div className="whitespace-pre-wrap">{m.message}</div>
-                {!!time && <div className={cls("mt-1 text-[11px]", isMe ? "text-emerald-100" : "text-neutral-500")}>{time}</div>}
+      {hasMsgs ? (
+        <div ref={scrollRef} className="max-h-[60vh] space-y-2 overflow-y-auto rounded-lg bg-neutral-50 p-2">
+          {msgs.map((m: any, i: number) => {
+            const role = String(m.sender_role || "").toLowerCase();
+            const isMe = role === "faculty";
+            const ts = m.created_at ? new Date(m.created_at) : null;
+            const time = ts && !isNaN(ts.getTime()) ? ts.toLocaleString() : "";
+            return (
+              <div key={i} className={cls("flex", isMe ? "justify-end" : "justify-start")}> 
+                <div
+                  className={cls(
+                    "max-w-[85%] rounded-xl px-3 py-2 text-sm shadow-sm",
+                    isMe ? "bg-emerald-700 text-white" : "bg-white text-neutral-800 border border-neutral-200"
+                  )}
+                >
+                  <div className="whitespace-pre-wrap">{m.message}</div>
+                  {!!time && <div className={cls("mt-1 text-[11px]", isMe ? "text-emerald-100" : "text-neutral-500")}>{time}</div>}
+                </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      ) : (
+        <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3 text-sm text-neutral-600">
+          {allowStartConversation ? "No conversation yet. You can start one below." : "No RFC thread yet. You may send a request below."}
+        </div>
+      )}
 
       {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
-      {!locked && (
+      {!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation)) && (
         <div className="mt-3 flex items-end gap-2">
           <textarea
             rows={2}
@@ -2701,9 +3838,10 @@ function RfcThreadView({ term, sectionId }: { term: any; sectionId: string }) {
           />
           <button
             type="button"
-            disabled={sending || !reply.trim()}
+            disabled={sending || !reply.trim() || !sectionId}
             onClick={async () => {
               if (!reply.trim()) return;
+              if (!sectionId) return;
               try {
                 setSending(true);
                 const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");

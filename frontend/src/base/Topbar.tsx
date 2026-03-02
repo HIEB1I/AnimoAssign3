@@ -3,6 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useInboxBadge } from "@/realtime/inboxBadge";
 
+import { logoutApi } from "../api"; // adjust path if needed
+
 import { useMemo } from "react";
 import {
   Bell,
@@ -216,11 +218,12 @@ export default function Topbar({
     };
   }, [menuOpen]);
 
-  const logout = () => {
-    localStorage.removeItem("authToken");
-    sessionStorage.clear();
-    navigate("/login");
-  };
+ const logout = async () => {
+  await logoutApi(); // <-- NEW: clear cookie session on server
+  localStorage.removeItem("authToken");
+  sessionStorage.clear();
+  navigate("/login");
+};
 
   // Where the Inbox button should navigate if no explicit inboxPath is passed
   const inferredInboxPath =

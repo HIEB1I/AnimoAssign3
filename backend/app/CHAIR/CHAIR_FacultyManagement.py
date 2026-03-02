@@ -204,6 +204,41 @@ def _coerce_int(val: Any) -> Optional[int]:
     except (TypeError, ValueError):
         return None
 
+def _teaching_years_from_hire_date(hire_date_raw: Any) -> Optional[int]:
+    """Compute whole-year teaching years from a hire/start date.
+
+    Expected input: 'YYYY-MM-DD' (from HTML date input). Returns an int >= 0.
+    """
+    if hire_date_raw is None:
+        return None
+    s = str(hire_date_raw).strip()
+    if not s:
+        return None
+    try:
+        hire_dt = datetime.strptime(s, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    years = today.year - hire_dt.year
+    if (today.month, today.day) < (hire_dt.month, hire_dt.day):
+        years -= 1
+    return max(0, years)
+
+
+def _normalize_hire_date(hire_date_raw: Any) -> Optional[str]:
+    """Normalize a hire/start date into a YYYY-MM-DD string (or None)."""
+    if hire_date_raw is None:
+        return None
+    s = str(hire_date_raw).strip()
+    if not s:
+        return None
+    try:
+        dt = datetime.strptime(s, "%Y-%m-%d").date()
+        return dt.isoformat()
+    except Exception:
+        return None
+
 # ---------- Expression helpers ----------
 def _dept_name_expr():
     return {"$ifNull": ["$dept.department_name", "$dept.dept_name"]}
@@ -289,6 +324,7 @@ async def facultymanagement_handler(
     userId: Optional[str] = Query(None),
     department: Optional[str] = Query(None),
     facultyType: Optional[str] = Query(None),
+    status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     facultyId: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
@@ -564,6 +600,10 @@ async def facultymanagement_handler(
         if dept_filter.lower() == "all departments":
             dept_filter = ""
 
+        status_filter = (status or "").strip()
+        if status_filter.lower() in ["all status", "all", ""]:
+            status_filter = ""
+
         pipeline = [
             {"$match": early_match},
             {"$lookup": {
@@ -645,7 +685,11 @@ async def facultymanagement_handler(
             {"$match": {"$expr": {"$or": [
                 {"$eq": [dept_filter, ""]},
                 {"$eq": ["$department_display", dept_filter]}
-            ]}}}
+            ]}}},
+            {"$match": {"$expr": {"$or": [
+                {"$eq": [status_filter, ""]},
+                {"$eq": ["$status_display", status_filter]}
+            ]}}},
         ]
 
         if search and search.strip():
@@ -687,6 +731,7 @@ async def facultymanagement_handler(
                     }
                 },
                 "teaching_years": {"$ifNull": ["$teaching_years", None]},
+                "hire_date": {"$ifNull": ["$hire_date", None]},
             }},
             {"$sort": {"name": 1}},
         ])
@@ -1009,7 +1054,14 @@ async def facultymanagement_handler(
             "fac_position": "Lecturer",
             "max_preps": 3,
             "certifications": _normalize_certifications(payload.get("certifications")),
-            "teaching_years": _coerce_int(payload.get("teaching_years")),
+            # Store hire/start date and compute teaching years from it (if provided).
+            "hire_date": _normalize_hire_date(payload.get("hire_date")),
+            # Prefer hire_date if provided; otherwise accept teaching_years.
+            "teaching_years": (
+                _teaching_years_from_hire_date(payload.get("hire_date"))
+                if payload.get("hire_date")
+                else _coerce_int(payload.get("teaching_years"))
+            ),
         })
 
         return {"ok": True, "user_id": user_id, "faculty_id": faculty_id}
@@ -1038,6 +1090,7 @@ async def facultymanagement_handler(
             await db[COL_USERS].update_one({"user_id": user_id}, {"$set": user_update})
 
         fac_update = {}
+        fac_unset = {}
         if "employment_type" in payload:
             et = str(payload["employment_type"]).strip().upper()
             if et in {"FT", "PT"}: fac_update["employment_type"] = et
@@ -1052,13 +1105,33 @@ async def facultymanagement_handler(
 
         if "certifications" in payload:
             fac_update["certifications"] = _normalize_certifications(payload["certifications"])
-        if "teaching_years" in payload:
+
+        # Hire/start date can be saved and also used to compute teaching years.
+        if "hire_date" in payload:
+            if payload.get("hire_date"):
+                norm_hd = _normalize_hire_date(payload.get("hire_date"))
+                if norm_hd is not None:
+                    fac_update["hire_date"] = norm_hd
+
+                yrs = _teaching_years_from_hire_date(payload.get("hire_date"))
+                if yrs is not None:
+                    fac_update["teaching_years"] = yrs
+            else:
+                # Explicitly cleared
+                fac_unset["hire_date"] = ""
+        elif "teaching_years" in payload:
             fac_update["teaching_years"] = _coerce_int(payload["teaching_years"])
         if "email" in payload:
             fac_update["email"] = str(payload["email"]).strip().lower()
 
+        update_doc: Dict[str, Any] = {}
         if fac_update:
-            await db[COL_FACULTY].update_one({"faculty_id": facultyId}, {"$set": fac_update})
+            update_doc["$set"] = fac_update
+        if fac_unset:
+            update_doc["$unset"] = fac_unset
+
+        if update_doc:
+            await db[COL_FACULTY].update_one({"faculty_id": facultyId}, update_doc)
 
         return {"ok": True}
 

@@ -1,12 +1,63 @@
 // frontend/src/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_AvailabilityForecasting.tsx
 import { useEffect, useMemo, useState } from "react";
-import { AlertTriangle, ChevronLeft, Info, Search, TrendingUp } from "lucide-react";
+import { ChevronLeft, Info, Search } from "lucide-react";
 import { Link } from "react-router-dom";
 import SelectBox from "../../../component/SelectBox";
 import { fetchFacultyAvailabilityHeatmap } from "../../../api";
 
 /* ---------------- Small helpers ---------------- */
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
+
+function normalizeText(s: string) {
+  return (s || "")
+    .toLowerCase()
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[^a-z0-9\s@._-]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildNameVariants(name: string) {
+  const base = normalizeText(name);
+  const variants = new Set<string>();
+  if (base) variants.add(base);
+
+  // Support common display formats like "Last, First Middle".
+  if (name && name.includes(",")) {
+    const [aRaw, bRaw] = name.split(",", 2);
+    const a = normalizeText(aRaw);
+    const b = normalizeText(bRaw);
+    if (a && b) {
+      variants.add(`${a} ${b}`.trim());
+      variants.add(`${b} ${a}`.trim());
+    }
+  }
+
+  return Array.from(variants);
+}
+
+function matchesQuery({ name, email, q }: { name: string; email?: string; q: string }) {
+  const qq = normalizeText(q);
+  if (!qq) return true;
+
+  const tokens = qq.split(" ").filter(Boolean);
+  const emailN = normalizeText(email || "");
+  const nameVariants = buildNameVariants(name);
+
+  // Match if any variant contains the whole query OR all tokens are present.
+  for (const h of nameVariants) {
+    if (!h) continue;
+    if (h.includes(qq)) return true;
+    if (tokens.every((t) => h.includes(t))) return true;
+  }
+
+  if (emailN) {
+    if (emailN.includes(qq)) return true;
+    if (tokens.every((t) => emailN.includes(t))) return true;
+  }
+
+  return false;
+}
 
 function Card({ className = "", children }: { className?: string; children: any }) {
   return <div className={cls("bg-white rounded-xl border border-gray-200 shadow-sm", className)}>{children}</div>;
@@ -33,53 +84,6 @@ function WarningPanel({ warnings }: { warnings: string[] }) {
         {warnings.map((w, i) => (
           <div key={i}>⚠️ {w}</div>
         ))}
-      </div>
-    </Card>
-  );
-}
-
-
-function DataUsedCard({
-  denomIncluded,
-  totalScope,
-  exclusionLines,
-}: {
-  denomIncluded: number;
-  totalScope: number;
-  excludedCount: number;
-  exclusionLines: { k: string; v: number }[];
-}) {
-  return (
-    <Card className="p-3 border-emerald-200 bg-emerald-50">
-      <div className="flex items-center justify-between">
-        <div className="text-xs text-gray-500">Data used</div>
-        <div className="relative group">
-          <button
-            type="button"
-            className="inline-flex items-center gap-1 bg-white px-2 py-1 text-gray-600"
-          >
-            <Info className="h-3.5 w-3.5" />
-            
-          </button>
-          <div className="pointer-events-none absolute right-0 top-8 z-20 hidden w-[260px] rounded-lg border border-gray-200 bg-white p-2 text-[11px] text-gray-700 shadow-md group-hover:block">
-            <div className="font-medium mb-1">Exclusions (why some are not counted)</div>
-            {exclusionLines.length ? (
-              <div className="space-y-1">
-                {exclusionLines.map((x) => (
-                  <div key={x.k} className="flex items-center justify-between">
-                    <span>{x.k}</span>
-                    <span className="font-medium">{x.v}</span>
-                  </div>
-                ))}
-              </div>
-            ) : (
-              <div className="text-gray-500">No exclusions reported.</div>
-            )}
-          </div>
-        </div>
-      </div>
-      <div className="mt-2 text-3xl font-extrabold text-emerald-900">
-        {denomIncluded || 0}/{totalScope || 0}
       </div>
     </Card>
   );
@@ -126,7 +130,7 @@ type AvailabilityHeatmap = {
   total_faculty_considered: number;
   most_supported_slot_count: number;
 
-  counting_mode?: "top1" | "top5";
+  counting_mode?: "top1" | "top4";
   eligible_faculty_included?: number;
   faculty_total_in_scope?: number;
   excluded_breakdown?: {
@@ -158,34 +162,63 @@ const DAY_PAIRS: [DayCode, DayCode][] = [
 ];
 
 const DAY_FULL: Record<DayCode, string> = {
-  M: 'Monday',
-  T: 'Tuesday',
-  W: 'Wednesday',
-  H: 'Thursday',
-  F: 'Friday',
-  S: 'Saturday',
+  M: "Monday",
+  T: "Tuesday",
+  W: "Wednesday",
+  H: "Thursday",
+  F: "Friday",
+  S: "Saturday",
 };
 
-function dayPairFullName(d1: DayCode, d2: DayCode) {
-  return DAY_FULL[d1] + '-' + DAY_FULL[d2];
+const DAY_ABBR: Record<DayCode, string> = {
+  M: "Mon",
+  T: "Tue",
+  W: "Wed",
+  H: "Thu",
+  F: "Fri",
+  S: "Sat",
+};
+
+const DAY_PAIRS_LABELED: { d1: DayCode; d2: DayCode; label: string; title: string }[] = [
+  { d1: "M", d2: "H", label: "Mon-Thu", title: "Monday-Thursday" },
+  { d1: "T", d2: "F", label: "Tue-Fri", title: "Tuesday-Friday" },
+  { d1: "W", d2: "S", label: "Wed-Sat", title: "Wednesday-Saturday" },
+];
+
+function dayPairLabel(d1: DayCode, d2: DayCode) {
+  return `${DAY_ABBR[d1]}-${DAY_ABBR[d2]}`;
+}
+
+function dayPairTitle(d1: DayCode, d2: DayCode) {
+  return `${DAY_FULL[d1]}-${DAY_FULL[d2]}`;
 }
 
 function parsePairKey(pairKey: string): [DayCode, DayCode] {
-  const t = (pairKey || '').trim();
-  // Accept either code form (M-H) or full-name form (Monday-Thursday)
+  const t = (pairKey || "").trim();
+
+  // Accept code form (M-H)
   if (/^[MTWHFS]-[MTWHFS]$/.test(t)) {
-    const parts = t.split('-') as [DayCode, DayCode];
+    const parts = t.split("-") as [DayCode, DayCode];
     return [parts[0], parts[1]];
   }
+
+  // Accept short form (Mon-Thu)
   const lower = t.toLowerCase();
-  const inv: Record<string, DayCode> = Object.fromEntries(Object.entries(DAY_FULL).map(([k,v]) => [String(v).toLowerCase(), k as DayCode]));
-  const parts = lower.split('-');
+  const invShort: Record<string, DayCode> = Object.fromEntries(
+    Object.entries(DAY_ABBR).map(([k, v]) => [String(v).toLowerCase(), k as DayCode])
+  );
+  const invFull: Record<string, DayCode> = Object.fromEntries(
+    Object.entries(DAY_FULL).map(([k, v]) => [String(v).toLowerCase(), k as DayCode])
+  );
+
+  const parts = lower.split("-");
   if (parts.length === 2) {
-    const a = inv[parts[0]];
-    const b = inv[parts[1]];
+    const a = invShort[parts[0]] || invFull[parts[0]];
+    const b = invShort[parts[1]] || invFull[parts[1]];
     if (a && b) return [a, b];
   }
-  return ['M','H'];
+
+  return ["M", "H"];
 }
 
 const TIME_ROWS = [
@@ -199,7 +232,7 @@ const TIME_ROWS = [
   "19:45-21:15",
 ] as const;
 
-const DEFAULT_COUNTING_MODE: "top1" | "top5" = "top1";
+const DEFAULT_COUNTING_MODE: "top1" | "top4" = "top1";
 
 function pillLabelOf(t: TermLite) {
   const ayEnd = t.acad_year_start + 1;
@@ -253,36 +286,22 @@ function shouldUseDarkText(hex: string) {
   return yiq >= 140;
 }
 
-
-function nonZero(n?: number) {
-  return typeof n === "number" && n > 0;
-}
-
 /* ================= Main component ================= */
 
-type Mode = "slot" | "faculty";
 
 export default function OM_RP_AvailabilityForecasting() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [data, setData] = useState<AvailabilityHeatmap | null>(null);
 
-  const [copiedKey, setCopiedKey] = useState<string | null>(null);
-  const [suppressHoverKey, setSuppressHoverKey] = useState<string | null>(null);
-  // Hover/copy tooltip (rendered in a fixed layer so it won't be clipped by scroll/overflow containers)
-  const [copyHover, setCopyHover] = useState<null | {
-    keyId: string;
-    email: string;
-    rect: { left: number; top: number; right: number; bottom: number; width: number; height: number };
-  }>(null);
-
   const [termId, setTermId] = useState<string | null>(null);
-  const [countingMode, setCountingMode] = useState<"top1" | "top5">(DEFAULT_COUNTING_MODE);
+  const [countingMode, setCountingMode] = useState<"top1" | "top4">(DEFAULT_COUNTING_MODE);
 
-  const [mode, setMode] = useState<Mode>("slot");
+  // Users pick a primary workflow so the screen doesn't feel like "two tools".
+  const [startMode, setStartMode] = useState<"slot" | "faculty">("slot");
 
   // Slot-first controls
-  const [pairKey, setPairKey] = useState<string>('Monday-Thursday');
+  const [pairKey, setPairKey] = useState<string>('Mon-Thu');
   const [slotKey, setSlotKey] = useState<string>(TIME_ROWS[0]);
   const [candidateQuery, setCandidateQuery] = useState<string>("");
   const [userTouchedSlot, setUserTouchedSlot] = useState(false);
@@ -373,42 +392,7 @@ export default function OM_RP_AvailabilityForecasting() {
       </div>
     );
   }
-
-  function PersonSignalChips({ person }: { person: HeatPerson }) {
-    const sb = person.score_breakdown;
-    if (!sb) return null;
-
-    const tags: string[] = [];
-    if ((sb.pref_boost ?? 0) > 0) tags.push("Preferred last term");
-    if ((sb.history_boost ?? 0) > 0 || (sb.history_signal ?? 0) > 0) tags.push("Taught recently");
-
-    if (!tags.length) return null;
-    // Render inline so it can sit beside the name (less vertical space).
-    return (
-      <div className="flex flex-wrap gap-1">
-        {tags.map((label) => (
-          <Chip key={label} className="bg-white">
-            {label}
-          </Chip>
-        ))}
-      </div>
-    );
-  }
-
   const totalScope = data?.faculty_total_in_scope ?? 0;
-  const excludedCount = Math.max(0, totalScope - denomIncluded);
-
-  const exclusionLines = useMemo(() => {
-    const ex = data?.excluded_breakdown || {};
-    const lines: { k: string; v: number }[] = [];
-    if (nonZero(ex.no_submitted_preferences)) lines.push({ k: "No submitted preferences", v: ex.no_submitted_preferences! });
-    if (nonZero(ex.no_recent_history)) lines.push({ k: "No recent history", v: ex.no_recent_history! });
-    if (nonZero(ex.on_leave)) lines.push({ k: "On leave", v: ex.on_leave! });
-    if (nonZero(ex.preferred_units_zero)) lines.push({ k: "Preferred units = 0", v: ex.preferred_units_zero! });
-    if (nonZero(ex.not_qualified)) lines.push({ k: "Not qualified", v: ex.not_qualified! });
-    if (nonZero(ex.no_signal)) lines.push({ k: "No signal", v: ex.no_signal! });
-    return lines;
-  }, [data?.excluded_breakdown]);
 
   // Build a faculty directory from slot lists (no extra backend changes)
   const facultyDirectory = useMemo(() => {
@@ -425,9 +409,9 @@ export default function OM_RP_AvailabilityForecasting() {
 
   const facultySuggestions = useMemo(() => {
     // Show ALL matches (scrollable list) — not only top 12.
-    const q = facultyQuery.trim().toLowerCase();
+    const q = facultyQuery.trim();
     if (!q) return facultyDirectory;
-    return facultyDirectory.filter((f) => f.name.toLowerCase().includes(q) || (f.email || "").toLowerCase().includes(q));
+    return facultyDirectory.filter((f) => matchesQuery({ name: f.name, email: f.email, q }));
   }, [facultyDirectory, facultyQuery]);
 
   const selectedFaculty = useMemo(() => {
@@ -458,10 +442,10 @@ export default function OM_RP_AvailabilityForecasting() {
 
   // Heatmap highlight should reflect the current aggregation setting:
   // - top1 => highlight only the single best-fit block
-  // - top5 => highlight up to the top 5 best-fit blocks
+  // - top4 => highlight up to the top 4 best-fit blocks
   const highlightSet = useMemo(() => {
     const set = new Set<string>();
-    const limit = countingMode === "top5" ? 5 : 1;
+    const limit = countingMode === "top4" ? 4 : 1;
     for (const r of selectedFacultyBestPairs.slice(0, limit)) set.add(`${r.d1}-${r.d2}-${r.slot}`);
     return set;
   }, [selectedFacultyBestPairs, countingMode]);
@@ -471,155 +455,18 @@ export default function OM_RP_AvailabilityForecasting() {
     return `${d1}-${d2}-${slotKey}`;
   }, [pairKey, slotKey]);
 
-  function copyEmail(email: string | undefined, key: string) {
-    if (!email) return;
-
-    const done = () => {
-      setCopiedKey(key);
-      window.clearTimeout((window as any).__om_copy_to);
-      (window as any).__om_copy_to = window.setTimeout(() => {
-        setCopiedKey(null);
-        setCopyHover((h) => (h?.keyId === key ? null : h));
-      }, 1200);
-    };
-
-    // Try Clipboard API first
-    if (navigator?.clipboard?.writeText) {
-      navigator.clipboard.writeText(email).then(done).catch(() => {
-        try {
-          const ta = document.createElement("textarea");
-          ta.value = email;
-          ta.style.position = "fixed";
-          ta.style.opacity = "0";
-          document.body.appendChild(ta);
-          ta.select();
-          document.execCommand("copy");
-          document.body.removeChild(ta);
-          done();
-        } catch {
-          /* ignore */
-        }
-      });
-      return;
-    }
-
-    // Fallback
-    try {
-      const ta = document.createElement("textarea");
-      ta.value = email;
-      ta.style.position = "fixed";
-      ta.style.opacity = "0";
-      document.body.appendChild(ta);
-      ta.select();
-      document.execCommand("copy");
-      document.body.removeChild(ta);
-      done();
-    } catch {
-      /* ignore */
-    }
-  }
-
-  function CopyEmailName({
-    name,
-    email,
-    keyId,
-    className = "",
-    stopRowClick = false,
-  }: {
-    name: string;
-    email?: string;
-    keyId: string;
-    className?: string;
-    stopRowClick?: boolean;
-  }) {
-    const canCopy = !!email;
-    const isCopied = copiedKey === keyId;
-    const btnId = `copybtn-${keyId}`;
-    return (
-      <span className={cls("inline-flex min-w-0", className)}>
-        <button
-          id={btnId}
-          type="button"
-          className={cls(
-            // Keep name truncation, but allow a small inline confirmation label to show reliably
-            "min-w-0 text-left inline-flex items-center gap-2",
-            canCopy ? "cursor-pointer hover:underline" : "cursor-default"
-          )}
-          onMouseEnter={() => {
-            if (!email) return;
-            if (suppressHoverKey === keyId) return;
-            const el = document.getElementById(btnId);
-            const r = el?.getBoundingClientRect();
-            if (!r) return;
-            setCopyHover({
-              keyId,
-              email,
-              rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
-            });
-          }}
-          onMouseLeave={() => {
-            if (suppressHoverKey === keyId) setSuppressHoverKey(null);
-            setCopyHover((h) => (h?.keyId === keyId && !isCopied ? null : h));
-          }}
-          onClick={(e) => {
-            if (stopRowClick) e.stopPropagation();
-            if (!canCopy) return;
-            // After a click-to-copy, we auto-hide the tooltip even if the cursor is still on the name.
-            setSuppressHoverKey(keyId);
-            const el = document.getElementById(btnId);
-            const r = el?.getBoundingClientRect();
-            if (r && email) {
-              setCopyHover({
-                keyId,
-                email,
-                rect: { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height },
-              });
-            }
-            copyEmail(email, keyId);
-          }}
-        >
-          <span className="min-w-0 truncate">{name}</span>
-        </button>
-      </span>
-    );
-  }
-
-  const copyTooltip = useMemo(() => {
-    if (!copyHover?.email || !copyHover?.rect) return null;
-    const r = copyHover.rect;
-    const pad = 12;
-    const maxW = 420;
-    const ww = typeof window !== "undefined" ? window.innerWidth : 1024;
-    const wh = typeof window !== "undefined" ? window.innerHeight : 768;
-
-    const left = Math.max(pad, Math.min(r.left, ww - maxW - pad));
-    const preferTop = r.top - 12;
-    const top = preferTop < 60 ? Math.min(wh - 90, r.bottom + 10) : preferTop;
-
-    const isCopied = copiedKey === copyHover.keyId;
-
-    return (
-      <div
-        className="fixed z-[9999] pointer-events-none rounded-lg border border-gray-200 bg-white px-3 py-2 text-[11px] text-gray-700 shadow-lg"
-        style={{ left, top, maxWidth: maxW }}
-      >
-        <div className="flex items-center gap-2 whitespace-nowrap overflow-hidden">
-          <span className="font-medium text-gray-900 max-w-[260px] truncate">{copyHover.email}</span>
-          <span className={cls(isCopied ? "text-emerald-700 font-medium" : "text-gray-500")}>
-            {isCopied ? "Copied email" : "Click to copy"}
-          </span>
-        </div>
-      </div>
-    );
-  }, [copyHover, copiedKey]);
+  // When a faculty is chosen, switch to the faculty workflow (the user intent is clear).
+  useEffect(() => {
+    if (selectedFacultyId) setStartMode("faculty");
+  }, [selectedFacultyId]);
 
   const slotCandidates = useMemo(() => {
     if (!data) return [] as HeatPerson[];
     const [d1, d2] = parsePairKey(pairKey);
     const merged = mergePairCells(getSingleCell(data, d1, slotKey), getSingleCell(data, d2, slotKey));
-    const q = candidateQuery.trim().toLowerCase();
+    const q = candidateQuery.trim();
     if (!q) return merged.list;
-    return merged.list.filter((p) => p.name.toLowerCase().includes(q) || (p.email || "").toLowerCase().includes(q));
+    return merged.list.filter((p) => matchesQuery({ name: p.name, email: p.email, q }));
   }, [data, pairKey, slotKey, candidateQuery]);
 
   // Fetch
@@ -662,20 +509,10 @@ export default function OM_RP_AvailabilityForecasting() {
     }
 
     if (best) {
-      setMode("slot");
-      setPairKey(dayPairFullName(best.d1, best.d2));
+      setPairKey(dayPairLabel(best.d1, best.d2));
       setSlotKey(best.slot);
     }
   }, [data?.slots, userTouchedSlot]);
-
-  // When switching to faculty mode, clear slot candidate query; vice versa
-  useEffect(() => {
-    if (mode === "faculty") setCandidateQuery("");
-    if (mode === "slot") {
-      setFacultyQuery("");
-      setSelectedFacultyId(null);
-    }
-  }, [mode]);
 
   const hasAnyPredictions = useMemo(() => {
     if (!data?.slots) return false;
@@ -686,366 +523,422 @@ export default function OM_RP_AvailabilityForecasting() {
 
   return (
     <div className="p-4 md:p-6 space-y-4">
-      {copyTooltip}
+      {/* Top bar: Back • Term • Slots per faculty */}
+
       {/* Title + subtitle */}
       <div className="px-1">
-        <h1 className="text-2xl font-bold text-gray-900">Availability Forecasting</h1>
+        <h1 className="text-2xl font-bold text-gray-900">Time/Day Slot Availability Indicators</h1>
         <p className="mt-1 text-sm text-gray-600">
-          Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty
-          to time slots faster.
+          Predicts best-fit teaching blocks using submitted preferences and recent teaching patterns to help assign faculty to time slots faster.
         </p>
       </div>
-      {/* Top bar */}
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-2">
-          <Link
-            to="/om/reports-analytics"
-            className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
-          >
-            <ChevronLeft className="h-4 w-4" />
-            Back
-          </Link>
-        </div>
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Link
+          to="/om/reports-analytics"
+          className="inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-white px-2.5 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+        >
+          <ChevronLeft className="h-4 w-4" />
+          Back
+        </Link>
 
         {currentTermLabel ? (
           <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-1.5 text-sm font-semibold text-emerald-800">
             {currentTermLabel}
             {isActiveTerm ? (
-              <span className="rounded-full bg-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-900">Active</span>
+              <span className="rounded-full bg-emerald-200 px-2 py-0.5 text-xs font-semibold text-emerald-900">
+                Active
+              </span>
             ) : null}
           </div>
-        ) : null}
+        ) : (
+          <div />
+        )}
 
-        <div className="w-[160px]" />
+        <div />
       </div>
       <WarningPanel warnings={data?.warnings || []} />
 
-      {/* Primary decision tabs */}
+      {/* Controls (compact) */}
       <Card className="p-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="flex items-center gap-2">
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1">
+              <button
+                type="button"
+                onClick={() => setStartMode("slot")}
+                className={cls(
+                  "px-3 py-1.5 text-xs font-semibold rounded-md",
+                  startMode === "slot" ? "bg-emerald-600 text-white" : "text-gray-700 hover:bg-gray-50"
+                )}
+              >
+                Slot
+              </button>
+              <button
+                type="button"
+                onClick={() => setStartMode("faculty")}
+                className={cls(
+                  "px-3 py-1.5 text-xs font-semibold rounded-md",
+                  startMode === "faculty" ? "bg-emerald-600 text-white" : "text-gray-700 hover:bg-gray-50"
+                )}
+              >
+                Faculty
+              </button>
+            </div>
+
+              {totalScope ? (
+                <Chip className="shrink-0">Faculty considered: {denomIncluded}/{totalScope}</Chip>
+              ) : null}
+            </div>
+
             <button
               type="button"
-              onClick={() => setMode("slot")}
-              className={cls(
-                "rounded-lg px-3 py-1.5 text-sm border",
-                mode === "slot" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-              )}
+              className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
+              title="Prediction based on preferences + teaching history patterns. Not confirmed calendar availability."
             >
-              Assign a Slot
-            </button>
-            <button
-              type="button"
-              onClick={() => setMode("faculty")}
-              className={cls(
-                "rounded-lg px-3 py-1.5 text-sm border",
-                mode === "faculty" ? "bg-emerald-50 border-emerald-200 text-emerald-800" : "bg-white border-gray-200 text-gray-700 hover:bg-gray-50"
-              )}
-            >
-              Check a Faculty
+              <Info className="h-4 w-4" />
+              Info
             </button>
           </div>
 
-          {/* Slots per faculty (aggregation) */}
-          <div className="flex items-center gap-2">
-            <div className="relative flex items-center gap-1 group">
-              <span className="text-xs text-gray-500">Slots per faculty</span>
-              <Info className="w-3.5 h-3.5 text-gray-400" />
-              <div className="pointer-events-none absolute right-0 top-6 z-20 hidden w-[260px] rounded-lg border border-gray-200 bg-white p-2 text-[11px] text-gray-700 shadow-md group-hover:block">
-                <div className="space-y-1">
+          {startMode === "slot" ? (
+            // Match the Faculty tab layout: one line with Day + Schedule on the left
+            // and the same-width "Slots" dropdown on the right.
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
+              <div className="lg:col-span-7">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                   <div>
-                    <span className="font-medium">1:</span> each faculty is counted only in their single best-fit slot.
-                  </div>
-                  <div>
-                    <span className="font-medium">5:</span> each faculty is counted in their top 5 best-fit slots (counts will be higher).
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            <div className="w-[200px]">
-              {/* IMPORTANT: SelectBox expects string[] options */}
-              <SelectBox
-                value={countingMode === "top1" ? "1" : "5"}
-                options={["1", "5"]}
-                onChange={(v) => setCountingMode(v === "5" ? "top5" : "top1")}
-              />
-            </div>
-          </div>
-        </div>
-        {/* Mode panels */}
-        <div className="mt-3">
-          {mode === "slot" ? (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-              <div className="lg:col-span-1">
-                <DataUsedCard denomIncluded={denomIncluded} totalScope={totalScope} excludedCount={excludedCount} exclusionLines={exclusionLines} />
-
-                <div className="mt-3 text-sm font-semibold text-gray-800 flex items-center gap-2">
-                  <TrendingUp className="h-4 w-4 text-emerald-600" />
-                  Assign a Slot
-                </div>
-                <div className="mt-1 text-xs text-gray-500">Pick a time block to get ranked candidates instantly.</div>
-
-                <div className="mt-3 space-y-2">
-                  <div>
-                    <div className="text-xs text-gray-500 mb-1">Day pair</div>
+                    <div className="text-[11px] text-gray-500 mb-1">Day</div>
                     <SelectBox
                       value={pairKey}
-                      options={DAY_PAIRS.map(([a, b]) => dayPairFullName(a, b))}
+                      options={DAY_PAIRS_LABELED.map((p) => p.label)}
                       onChange={(v) => {
                         setUserTouchedSlot(true);
                         setPairKey(v);
+                        setStartMode("slot");
                       }}
                     />
                   </div>
 
                   <div>
-                    <div className="text-xs text-gray-500 mb-1">Time</div>
+                    <div className="text-[11px] text-gray-500 mb-1">Schedule</div>
                     <SelectBox
                       value={slotKey}
-                      options={[...TIME_ROWS]}
+                      options={[...TIME_ROWS] as unknown as string[]}
                       onChange={(v) => {
                         setUserTouchedSlot(true);
                         setSlotKey(v);
+                        setStartMode("slot");
                       }}
                     />
-                  </div>
-
-                  <div>
-                    <div className="text-xs text-gray-500 mb-1">Filter candidates</div>
-                    <div className="relative">
-                      <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
-                      <input
-                        value={candidateQuery}
-                        onChange={(e) => setCandidateQuery(e.target.value)}
-                        placeholder="Search by name…"
-                        className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-emerald-200"
-                      />
-                    </div>
                   </div>
                 </div>
               </div>
 
-              <div className="lg:col-span-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-gray-800">Top candidates</div>
-                </div>
-
-	                <div className="mt-2 border border-gray-200 rounded-xl overflow-hidden">
-	                  {slotCandidates.length ? (
-	                    <div className="divide-y divide-gray-200 max-h-[304px] overflow-auto">
-                      {slotCandidates.map((p) => (
-                        <div key={p.faculty_id} className="p-3 flex items-start justify-between gap-3 hover:bg-gray-50">
-                          <div className="min-w-0">
-                            <div className="flex items-center gap-2 min-w-0">
-                              <div className="font-medium text-gray-900 truncate">
-                                <CopyEmailName name={p.name} email={p.email} keyId={`slot-${p.faculty_id}`} />
-                              </div>
-                              <PersonSignalChips person={p} />
-                            </div>
-                            <ScoreBreakdownChips person={p} />
-                          </div>
-                          <div className="shrink-0 text-right">
-                            <div className="text-2xl font-extrabold text-emerald-800 leading-none">{Math.round(p.confidence_pct)}%</div>
-                            <div className="text-[11px] text-emerald-700 font-medium">fit score</div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-4 text-sm text-gray-500">No candidates found for this slot.</div>
-                  )}
-                </div>
-
-                <div className="mt-2 text-[11px] text-gray-500 flex items-center gap-2">
-                  <AlertTriangle className="h-3.5 w-3.5 text-amber-500" />
-                  This is predicted support (preferences + last 3 terms patterns), not confirmed calendar availability.
-                </div>
+              <div className="lg:col-span-5">
+                <div className="text-[11px] text-gray-500 mb-1">Slots</div>
+                <SelectBox
+                  value={countingMode === "top1" ? "1" : "4"}
+                  options={["1", "4"]}
+                  onChange={(v) => setCountingMode(v === "4" ? "top4" : "top1")}
+                />
               </div>
             </div>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-3">
-              <div className="lg:col-span-1">
-                <DataUsedCard denomIncluded={denomIncluded} totalScope={totalScope} excludedCount={excludedCount} exclusionLines={exclusionLines} />
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
+              <div className="lg:col-span-7">
+                <div className="text-[11px] text-gray-500 mb-1">Faculty</div>
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    value={facultyQuery}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setFacultyQuery(v);
+                      // If the user starts typing while a faculty is selected, treat it as a new search.
+                      if (!v.trim()) setSelectedFacultyId(null);
+                      else if (selectedFacultyId) setSelectedFacultyId(null);
+                      setStartMode("faculty");
+                    }}
+                    placeholder="Search by name…"
+                    className="w-full rounded-lg border border-gray-200 bg-white pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                  />
 
-                <div className="mt-3 text-sm font-semibold text-gray-800 flex items-center gap-2">
-                  <Search className="h-4 w-4 text-emerald-600" />
-                  Check a Faculty
+                  {facultyQuery.trim() && !selectedFacultyId ? (
+                    <div className="absolute z-20 mt-1 w-full max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white shadow-sm">
+                      {facultySuggestions.length ? (
+                        facultySuggestions.slice(0, 50).map((f) => (
+                          <button
+                            key={f.faculty_id}
+                            type="button"
+                            onClick={() => {
+                              setSelectedFacultyId(f.faculty_id);
+                              setFacultyQuery(f.name);
+                              setStartMode("faculty");
+                            }}
+                            className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                          >
+                            <div className="text-sm text-gray-900 truncate">{f.name}</div>
+                          </button>
+                        ))
+                      ) : (
+                        <div className="px-3 py-2 text-sm text-gray-500">No matches.</div>
+                      )}
+                    </div>
+                  ) : null}
                 </div>
-                <div className="mt-1 text-xs text-gray-500">Search a faculty to see their predicted best-fit blocks.</div>
+              </div>
 
-                <div className="mt-3">
-                  <div className="text-xs text-gray-500 mb-1">Faculty</div>
-                  <div className="relative">
-                    <Search className="absolute left-2 top-2.5 h-4 w-4 text-gray-400" />
-                    <input
-                      value={facultyQuery}
-                      onChange={(e) => {
-                        setFacultyQuery(e.target.value);
-                        setSelectedFacultyId(null);
-                      }}
-                      placeholder="Search by name or email…"
-                      className="w-full rounded-lg border border-gray-200 bg-white py-2 pl-8 pr-3 text-sm outline-none focus:ring-2 focus:ring-emerald-200"
-                    />
-                  </div>
+              <div className="lg:col-span-5">
+                <div className="text-[11px] text-gray-500 mb-1">Slots</div>
+                <SelectBox
+                  value={countingMode === "top1" ? "1" : "4"}
+                  options={["1", "4"]}
+                  onChange={(v) => setCountingMode(v === "4" ? "top4" : "top1")}
+                />
+              </div>
+            </div>
+          )}
+        </div>
+      </Card>
 
-                  {/* suggestions */}
-	                  {facultySuggestions.length ? (
-	                    <div className="mt-2 max-h-[132px] overflow-auto rounded-xl border border-gray-200 bg-white">
-                      {facultySuggestions.map((f) => (
+      {/* Main layout */}
+      <div className="grid grid-cols-1 lg:grid-cols-[420px_1fr] gap-4">
+        <div className="space-y-4">
+          {startMode === "slot" ? (
+            /* Ranked candidates */
+            <Card className="p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-gray-800">Top faculty for {pairKey} {slotKey}</div>
+                </div>
+              </div>
+
+              <div className="mt-3">
+                <div className="relative">
+                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                  <input
+                    value={candidateQuery}
+                    onChange={(e) => setCandidateQuery(e.target.value)}
+                    placeholder="Filter candidates by name…"
+                    className="w-full rounded-lg border border-gray-200 bg-white pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-200"
+                  />
+                </div>
+
+                <div className="mt-3 max-h-[420px] overflow-auto rounded-lg border border-gray-200">
+                  {slotCandidates.length ? (
+                    <div className="divide-y divide-gray-200">
+                      {slotCandidates.map((p, idx) => (
                         <button
-                          key={f.faculty_id}
+                          key={`${p.faculty_id}-${idx}`}
                           type="button"
                           onClick={() => {
-                            setSelectedFacultyId(f.faculty_id);
-                            setFacultyQuery(f.name);
+                            setSelectedFacultyId(p.faculty_id);
+                            setFacultyQuery(p.name);
                           }}
-                          className={cls(
-                            "w-full text-left px-3 py-2 hover:bg-gray-50",
-                            selectedFacultyId === f.faculty_id && "bg-emerald-50"
-                          )}
+                          className="w-full text-left p-3 hover:bg-gray-50"
                         >
-	                          <div className="text-sm text-gray-900 truncate">{f.name}</div>
+                          <div className="flex items-start justify-between gap-3">
+                            <div className="min-w-0">
+                              <div className="font-medium text-gray-900 truncate">{p.name}</div>
+                              <div className="mt-1 flex flex-wrap items-center gap-2">
+                                {/* signal chips removed */}
+                              </div>
+                              <ScoreBreakdownChips person={p} />
+                            </div>
+
+                            <div className="text-right shrink-0">
+                              <div className="text-lg font-extrabold text-emerald-700">{Math.round(p.confidence_pct || 0)}%</div>
+                              <div className="text-[10px] text-gray-500">fit score</div>
+                            </div>
+                          </div>
                         </button>
                       ))}
                     </div>
                   ) : (
-                    <div className="mt-2 text-sm text-gray-500">No matches.</div>
+                    <div className="p-3 text-sm text-gray-500">No candidates found for this slot.</div>
                   )}
                 </div>
               </div>
 
-              <div className="lg:col-span-2">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm font-semibold text-gray-800">Predicted best-fit blocks</div>
-                  {/* faculty_id hidden to reduce clutter */}
-                </div>
+              <div className="mt-2 text-[11px] text-red-500">
+                This report is predicted support (preferences + last 3 terms patterns), not confirmed availability.
+              </div>
+            </Card>
+          ) : null}
 
-                <div className="mt-2">
-                  {selectedFaculty ? (
-                    <Card className="p-3">
-                      <div className="flex items-center gap-2">
-	                        <div className="font-medium text-gray-900">
-	                          <CopyEmailName
-	                            name={selectedFaculty.name}
-	                            email={selectedFaculty.email}
-	                            keyId={`sel-${selectedFaculty.faculty_id}`}
-	                          />
-	                        </div>
-                        <PersonSignalChips person={selectedFaculty} />
+          {startMode === "faculty" ? (
+            /* Faculty best-fit slots */
+            <Card className="p-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm font-semibold text-gray-800">Best-fit slots for a faculty</div>
+                </div>
+              </div>
+
+              <div className="mt-3">
+                {selectedFaculty ? (
+                  <Card className="p-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="font-medium text-gray-900 min-w-0 truncate">{selectedFaculty.name}</div>
+                      {/* signal chips removed */}
+                    </div>
+
+                    <div className="mt-2">
+                      <div className="text-xs font-semibold text-gray-700 mb-1">
+                        Top {Math.min(selectedFacultyBestPairs.length, countingMode === "top4" ? 4 : 1)} slots
                       </div>
-                      <div className="text-xs text-gray-500">Highlighted on the heatmap below.</div>
+
+                      <div className="flex flex-wrap gap-2">
+                        {(selectedFacultyBestPairs.slice(0, countingMode === "top4" ? 4 : 1)).map((r) => {
+                          const label = dayPairLabel(r.d1, r.d2);
+                          return (
+                            <button
+                              key={`${r.d1}-${r.d2}-${r.slot}`}
+                              type="button"
+                              onClick={() => {
+                                setUserTouchedSlot(true);
+                                setPairKey(label);
+                                setSlotKey(r.slot);
+                              }}
+                              className="inline-flex items-center gap-2 rounded-full border border-gray-200 bg-white px-3 py-1 text-xs text-gray-700 hover:bg-gray-50"
+                              title={`${dayPairTitle(r.d1, r.d2)} • ${r.slot}`}
+                            >
+                              <span className="font-medium">{label}</span>
+                              <span className="text-gray-400">•</span>
+                              <span>{r.slot}</span>
+                              <span className="text-gray-400">•</span>
+                              <span className="font-semibold text-emerald-700">{Math.round(r.confidence)}%</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+
                       <ScoreBreakdownChips person={selectedFaculty} />
-                    </Card>
-                  ) : (
-                    <div className="text-sm text-gray-500">Search and select a faculty to view predictions.</div>
-                  )}
+                    </div>
+                  </Card>
+                ) : (
+                  <div className="text-sm text-gray-500">
+                    Search and select a faculty above to view predictions.
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-2 text-[11px] text-red-500">
+                Highlights show predicted best-fit slots, not guaranteed free time.
+              </div>
+            </Card>
+          ) : null}
+        </div>
+
+        <div>
+          <Card className="overflow-x-auto">
+            <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-gray-800">Heatmap: predicted faculty support</div>
+                <div className="text-xs text-gray-500 mt-0.5">
+                  {countingMode === "top1"
+                    ? "Counts show how many included faculty have this as their #1 best-fit slot."
+                    : "Counts show how many included faculty include this slot in their top 4 best-fit slots (each faculty may appear in up to 4 slots)."}
                 </div>
               </div>
+
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500">Low ({pairMin})</span>
+                <div className="h-3 w-28 rounded bg-gradient-to-r from-[#fca5a5] via-[#f2f2f2] to-[#059669]" />
+                <span className="text-xs text-gray-500">Peak ({pairMax})</span>
+              </div>
             </div>
-          )}
-        </div>
-      </Card>
 
-      {/* Heatmap (context) */}
-      <Card className="overflow-x-auto">
-        <div className="flex flex-wrap items-center justify-between gap-3 px-4 py-3 border-b border-gray-200">
-          <div className="min-w-0">
-            <div className="text-sm font-semibold text-gray-800">Predicted Faculty Support</div>
-            <div className="text-xs text-gray-500 mt-0.5">
-              {countingMode === "top1"
-                ? "Counts show how many included faculty have this as their #1 best-fit slot."
-                : "Counts show how many included faculty include this slot in their top 5 best-fit slots (each faculty may appear in up to 5 slots)."}
-            </div>
-          </div>
+            <div className="w-fit mx-auto px-4 pb-3">
+              {!loading && !hasAnyPredictions ? (
+                <div className="py-10 text-sm text-gray-500">No predictions available for this term.</div>
+              ) : (
+                <table className="w-fit table-auto border-separate border-spacing-[6px] text-sm">
+                  <colgroup>
+                    <col style={{ width: 170 }} />
+                    <col style={{ width: 72 }} />
+                    <col style={{ width: 72 }} />
+                    <col style={{ width: 72 }} />
+                  </colgroup>
 
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-500">Low ({pairMin})</span>
-            <div className="h-3 w-28 rounded bg-gradient-to-r from-[#fca5a5] via-[#f2f2f2] to-[#059669]" />
-            <span className="text-xs text-gray-500">Peak ({pairMax})</span>
-          </div>
-        </div>
-
-        <div className="w-fit mx-auto px-4 pb-3">
-          {!loading && !hasAnyPredictions ? (
-            <div className="py-10 text-sm text-gray-500">No predictions available for this term.</div>
-          ) : (
-            <table className="w-fit table-auto border-separate border-spacing-[6px] text-sm">
-              <colgroup>
-                <col style={{ width: 170 }} />
-                <col style={{ width: 72 }} />
-                <col style={{ width: 72 }} />
-                <col style={{ width: 72 }} />
-              </colgroup>
-
-              <thead className="sticky top-0 z-[1] bg-white">
-                <tr>
-                  <th className="text-center px-3 py-2 border-b border-gray-200 sticky left-0 bg-white align-middle whitespace-nowrap">Time</th>
-                  {DAY_PAIRS.map(([d1, d2]) => (
-                    <th key={`${d1}${d2}`} className="text-center py-2 border-b border-gray-200 text-gray-700">
-                      {dayPairFullName(d1, d2)}
-                    </th>
-                  ))}
-                </tr>
-              </thead>
-
-              <tbody>
-                {TIME_ROWS.map((slot) => (
-                  <tr key={slot}>
-                    <th className="text-center px-3 py-2 whitespace-nowrap sticky left-0 bg-white align-middle">{slot}</th>
-
-                    {DAY_PAIRS.map(([d1, d2]) => {
-                      const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
-                      const bg = colorForCount(merged.count, pairMin, pairMax);
-                      const darkText = shouldUseDarkText(bg);
-                      const denom = denomIncluded || 0;
-                      const title = `${dayPairFullName(d1, d2)} • ${slot} • ${merged.count}/${denom}`;
-
-                      // IMPORTANT: Only show one highlight intent at a time.
-                      // - In "Check a Faculty" mode, highlight the selected faculty's best-fit block(s).
-                      // - In "Assign a Slot" mode, highlight the currently selected slot.
-                      const isHighlighted = mode === "faculty" && highlightSet.has(`${d1}-${d2}-${slot}`);
-                      const isSelectedSlot = mode === "slot" && selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
-
-                      return (
-                        <td
-                          key={`${d1}${d2}-${slot}`}
-                          title={title}
-                          className={cls(
-                            "text-center align-middle select-none",
-                            "cursor-pointer",
-                            (isHighlighted || isSelectedSlot) && "ring-2 ring-red-500 ring-offset-2"
-                          )}
-                          style={{
-                            background: bg,
-                            color: darkText ? "#0b3d2e" : "white",
-                            fontWeight: 700,
-                            borderRadius: 0,
-                            padding: "10px 0",
-                          }}
-                          onClick={() => {
-                            // Click-to-set slot in Assign mode for quick drill
-                            setMode("slot");
-                            setUserTouchedSlot(true);
-                            setPairKey(dayPairFullName(d1, d2));
-                            setSlotKey(slot);
-                          }}
+                  <thead className="sticky top-0 z-[1] bg-white">
+                    <tr>
+                      <th className="text-center px-3 py-2 border-b border-gray-200 sticky left-0 bg-white align-middle whitespace-nowrap">
+                        Time
+                      </th>
+                      {DAY_PAIRS_LABELED.map((x) => (
+                        <th
+                          key={`${x.d1}${x.d2}`}
+                          className="text-center py-2 border-b border-gray-200 text-gray-700 whitespace-nowrap"
+                          title={x.title}
                         >
-                          {merged.count}
-                        </td>
-                      );
-                    })}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
+                          {x.label}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
 
-          <div className="mt-2 text-[11px] text-gray-500 text-center">
-            Click a slot to open it in <span className="font-medium">Assign a Slot</span> and see ranked candidates.
-          </div>
+                  <tbody>
+                    {TIME_ROWS.map((slot) => (
+                      <tr key={slot}>
+                        <th className="text-center px-3 py-2 whitespace-nowrap sticky left-0 bg-white align-middle">{slot}</th>
+
+                        {DAY_PAIRS_LABELED.map(({ d1, d2, label, title }) => {
+                          const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
+                          const bg = colorForCount(merged.count, pairMin, pairMax);
+                          const darkText = shouldUseDarkText(bg);
+                          const denom = denomIncluded || 0;
+                          const cellTitle = `${title} • ${slot} • ${merged.count}/${denom}`;
+
+                          // Only show ONE highlight style depending on the active mode.
+                          // - Slot mode: highlight the selected slot (green)
+                          // - Faculty mode: highlight the best-fit slots for the selected faculty (red)
+                          const isFacultyHighlight = startMode === "faculty" && highlightSet.has(`${d1}-${d2}-${slot}`);
+                          const isSelectedSlot = startMode === "slot" && selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
+
+                          return (
+                            <td
+                              key={`${d1}${d2}-${slot}`}
+                              title={cellTitle}
+                              className={cls(
+                                "text-center align-middle select-none cursor-pointer",
+                                isSelectedSlot && "ring-2 ring-emerald-500 ring-offset-2",
+                                // Use a red box for faculty highlights (requested).
+                                isFacultyHighlight && "ring-2 ring-red-500 ring-offset-2"
+                              )}
+                              style={{
+                                background: bg,
+                                color: darkText ? "#0b3d2e" : "white",
+                                fontWeight: 700,
+                                borderRadius: 0,
+                                padding: "10px 0",
+                              }}
+                              onClick={() => {
+                                setUserTouchedSlot(true);
+                                setStartMode("slot");
+                                setPairKey(label);
+                                setSlotKey(slot);
+                              }}
+                            >
+                              {merged.count}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+
+              <div className="mt-2 text-[11px] text-gray-500 text-center">
+                {startMode === "slot" ? "Click a slot to update the ranked list on the left." : "Click a slot to select it."}
+              </div>
+            </div>
+          </Card>
         </div>
-      </Card>
+      </div>
+
 
       {loading ? <div className="text-sm text-gray-500">Loading…</div> : null}
       {err ? <div className="text-sm text-red-600">{err}</div> : null}

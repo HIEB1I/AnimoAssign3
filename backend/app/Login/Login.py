@@ -7,7 +7,13 @@ from datetime import datetime, timezone
 from typing import List, Optional, Dict, Any
 
 import httpx
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response, Request
+from app.session import (
+    rotate_user_session, set_session_cookie,
+    clear_user_session, clear_session_cookie,
+    COOKIE_NAME, hash_session_token
+)
+from app.REALTIME.sio_server import force_disconnect_user
 from pydantic import BaseModel, EmailStr
 
 from app.main import db
@@ -88,33 +94,43 @@ def _fullname(user: Dict[str, Any]) -> str:
 
 
 @router.post("/login", response_model=LoginResponse)
-async def login(payload: LoginRequest):
+async def login(payload: LoginRequest, response: Response):
     user = await db["users"].find_one({"email": payload.email}, {"_id": 0})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
-    roles = await _roles_for_user(user["user_id"]) or ["user"]
+    user_id = user["user_id"]
+
+    await force_disconnect_user(user_id, reason="LOGGED_IN_ELSEWHERE")
+    token = await rotate_user_session(db, user_id)
+    set_session_cookie(response, token)
+
+    roles = await _roles_for_user(user_id) or ["user"]
 
     return LoginResponse(
-        userId=user["user_id"],
+        userId=user_id,
         email=user["email"],
         fullName=_fullname(user),
         roles=roles,
     )
 
 @router.post("/login/password", response_model=LoginResponseLoose)
-async def login_with_password(payload: PasswordLoginRequest):
+async def login_with_password(payload: PasswordLoginRequest, response: Response):
     email = payload.email.strip().lower()
 
     user = await db["users"].find_one(
-        {"$or": [{"email": email}, {"gmail": email}]},
-        {"_id": 0}
+        {"email": email},
+        {"_id": 0}  
     )
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
 
     if not _verify_password(user, payload.password):
         raise HTTPException(status_code=401, detail="Invalid password")
+
+    await force_disconnect_user(user["user_id"], reason="LOGGED_IN_ELSEWHERE")
+    token = await rotate_user_session(db, user["user_id"])
+    set_session_cookie(response, token)
 
     roles = await _roles_for_user(user["user_id"]) or ["user"]
 
@@ -124,7 +140,7 @@ async def login_with_password(payload: PasswordLoginRequest):
         fullName=_fullname(user),
         roles=roles,
     )
-
+    
 # ----------------------------
 # New Google auth-code login
 # ----------------------------
@@ -183,19 +199,7 @@ async def _google_email_from_access_token(access_token: str) -> str:
 
 
 @router.post("/auth/google/login", response_model=LoginResponse)
-async def google_login(payload: GoogleAuthCodeRequest):
-    """
-    Frontend sends:
-      POST /api/auth/google/login
-      { "code": "<auth_code>" }
-
-    Backend:
-      1) exchange code -> access_token (+ refresh_token sometimes)
-      2) userinfo -> google email
-      3) match email in users.gmail (fallback users.email)
-      4) upsert google_token into that user
-      5) return LoginResponse (same format as /login)
-    """
+async def google_login(payload: GoogleAuthCodeRequest, response: Response):
     tokens = await _exchange_code_for_tokens(payload.code)
 
     access_token = tokens.get("access_token")
@@ -214,23 +218,21 @@ async def google_login(payload: GoogleAuthCodeRequest):
         {"_id": 0}
     )
     if not user:
-        # Step 5: no match -> error
         raise HTTPException(
             status_code=403,
             detail="This Google account is not registered in AnimoAssign.",
         )
 
+    user_id = user["user_id"]
+
     # Update token fields
     now = datetime.now(timezone.utc)
 
-    # Keep any existing refresh_token if Google didn't return one this time
     existing = await db["users"].find_one(
-        {"user_id": user["user_id"]},
+        {"user_id": user_id},
         {"_id": 0, "google_token.refresh_token": 1}
     )
-    existing_refresh = (
-        (existing or {}).get("google_token", {}) or {}
-    ).get("refresh_token")
+    existing_refresh = ((existing or {}).get("google_token") or {}).get("refresh_token")
 
     token_doc: Dict[str, Any] = {
         "access_token": access_token,
@@ -245,19 +247,35 @@ async def google_login(payload: GoogleAuthCodeRequest):
     elif existing_refresh:
         token_doc["refresh_token"] = existing_refresh
 
-    # Step 3-4: insert/update under that user
     await db["users"].update_one(
-        {"user_id": user["user_id"]},
+        {"user_id": user_id},
         {"$set": {"google_token": token_doc}},
         upsert=False
     )
 
-    roles = await _roles_for_user(user["user_id"]) or ["user"]
+    # NEW: single-session enforcement (after user match)
+    await force_disconnect_user(user_id, reason="LOGGED_IN_ELSEWHERE")
+    token = await rotate_user_session(db, user_id)
+    set_session_cookie(response, token)
 
-    # Return same response model
+    roles = await _roles_for_user(user_id) or ["user"]
+
     return LoginResponse(
-        userId=user["user_id"],
+        userId=user_id,
         email=user.get("email") or google_email,
         fullName=_fullname(user),
         roles=roles,
     )
+    
+@router.post("/logout")
+async def logout(request: Request, response: Response):
+    token = request.cookies.get(COOKIE_NAME)
+    if token:
+        sess_hash = hash_session_token(token)
+        user = await db["users"].find_one({"session.hash": sess_hash}, {"_id": 0, "user_id": 1})
+        if user and user.get("user_id"):
+            await clear_user_session(db, user["user_id"])
+            await force_disconnect_user(user["user_id"], reason="LOGOUT")
+
+    clear_session_cookie(response)
+    return {"ok": True}

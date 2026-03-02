@@ -156,6 +156,7 @@ export default function OM_CourseManagement() {
   const searchRef = useRef<HTMLInputElement | null>(null);
 
   const [rows, setRows] = useState<CMCourseRow[]>([]);
+  const [totalAll, setTotalAll] = useState<number>(0);
   const [err, setErr] = useState("");
   const [loading, setLoading] = useState(false);
 
@@ -196,9 +197,18 @@ export default function OM_CourseManagement() {
     (async () => {
       try {
         setLoading(true); setErr("");
-        const { ok, rows } = await listCMCourses({ userEmail, userId, cluster, search });
+        const { ok, rows: fetchedRows, total_all } = await listCMCourses({ userEmail, userId, cluster, search });
         if (!ok) throw new Error("Failed to load courses.");
-        setRows(rows);
+        setRows(fetchedRows);
+        // Denominator should be TOTAL courses in the dept (even when cluster/search filtered).
+        // Safe fallback so UI doesn't show a misleading "of <filtered>" if backend omits total_all.
+        const isAll = !cluster || cluster.trim().toLowerCase() === "all clusters";
+        const hasSearch = !!(search || "").trim();
+        setTotalAll((prev) => {
+          if (typeof total_all === "number") return total_all;
+          if (isAll && !hasSearch) return fetchedRows.length;
+          return prev || fetchedRows.length;
+        });
       } catch (e: any) {
         setRows([]);
         setErr(e?.response?.data?.detail || e?.message || "Failed to load courses.");
@@ -218,17 +228,17 @@ export default function OM_CourseManagement() {
       </header>
 
       {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
-
-      <div className="sticky top-0 z-10 mb-6 -mx-8 px-8 pt-2">
-        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white/90 p-4 shadow-sm backdrop-blur">
-        <div className="relative flex-1 min-w-[240px]">
+      {/* Filters (match Faculty Directory look, but NOT sticky/floating) */}
+      <div className="mb-6 -mx-8 px-8 pt-2">
+        <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="relative flex-1 min-w-[240px]">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
             ref={searchRef}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
             placeholder="Search by course code, title, coordinator, or teaching composition…"
-            className="w-full rounded-lg border border-gray-300 pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            className="w-full rounded-lg border border-gray-300 bg-white pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
 
           {searchInput.trim().length > 0 && (
@@ -246,10 +256,16 @@ export default function OM_CourseManagement() {
               <XIcon className="h-4 w-4" />
             </button>
           )}
-        </div>
-        <SelectBox value={cluster} onChange={setCluster} options={clusters} />
+          </div>
+
+          <SelectBox value={cluster} onChange={setCluster} options={clusters} />
         </div>
       </div>
+
+
+
+
+
 
       {/* Modern card layout (keeps all data, reduces “information dump”) */}
       <section className="space-y-6">
@@ -276,8 +292,8 @@ export default function OM_CourseManagement() {
             <div key={kac} className="space-y-3">
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
-                  <h2 className="text-sm font-semibold text-gray-900">{kac}</h2>
-                  <Badge tone="blue">{items.length} course{items.length === 1 ? "" : "s"}</Badge>
+                  <h2 className="text-base font-semibold text-gray-800">{kac}</h2>
+                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${totalAll > 0 ? totalAll : "—"}`}</span>
                 </div>
               </div>
 
@@ -321,15 +337,7 @@ export default function OM_CourseManagement() {
                             <Badge tone="emerald">{r.units ?? "—"} unit{Number(r.units) === 1 ? "" : "s"}</Badge>
                           </div>
                           <div className="mt-1 text-sm text-gray-800">{r.title || "—"}</div>
-                          <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-gray-500">
-                            <span className="inline-flex items-center gap-1">
-                              <Users className="h-3.5 w-3.5" />
-                              {sortedComposition.length
-                                ? `${sortedComposition.length} instructor${sortedComposition.length === 1 ? "" : "s"}`
-                                : "No teaching composition"}
-                            </span>
-                          </div>
-                        </button>
+</button>
 
                         <div className="flex items-center justify-between gap-2 sm:flex-col sm:items-end">
                           <ViewSyllabusButton

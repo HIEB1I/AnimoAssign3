@@ -1,14 +1,13 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2 } from "lucide-react";
+import { Search, Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2, MessageSquareText } from "lucide-react";
 import {
   getFSOptions,
   listFacultyService,
   createFacultyService,
   sendFacultyService,
-  respondFacultyService,
-  rejectFacultyService,
-  restoreFacultyService,
+  getOmLoadAssignmentRfc,
+  respondOmLoadAssignmentRfc,
   type FacultyServiceRow,
   type DayShort,
   getChairHeader,
@@ -21,7 +20,9 @@ const eqDept = (a?: string, b?: string) => norm(a) === norm(b);
 
 /* ---------------- received-tab new indicator (client-side) ----------------
    We mark requests as "seen" once the chair opens the Received Requests tab.
-   Any unseen fs_id will trigger a red-dot indicator on the tab label.
+   Any unseen fs_id will trigger a "New" badge on the section header.
+
+   IMPORTANT: This is separate from RFC unread indicators.
 */
 
 /* ---------------- Toasts (in-file, no external libs) ---------------- */
@@ -111,26 +112,264 @@ function ToastViewport({
   );
 }
 
+/* ---------------- RFC Modal (mirrors OM Load Assignment) ---------------- */
+function ServiceRfcModal({
+  open,
+  onClose,
+  userId,
+  termId,
+  facultyId,
+  facultyName,
+  sectionId,
+  onAfterUpdate,
+  onToast,
+}: {
+  open: boolean;
+  onClose: () => void;
+  userId: string;
+  termId: string;
+  facultyId?: string;
+  facultyName?: string;
+  sectionId?: string;
+  onAfterUpdate: (decision: "reply" | "approve" | "reject") => Promise<void> | void;
+  onToast: (input: ToastInput) => void;
+}) {
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [messages, setMessages] = useState<any[]>([]);
+  const [status, setStatus] = useState<string | null>(null);
+  const [locked, setLocked] = useState<boolean>(false);
+  const [reply, setReply] = useState("");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) {
+      setLoading(false);
+      setError(null);
+      setMessages([]);
+      setStatus(null);
+      setLocked(false);
+      setReply("");
+      return;
+    }
+
+    (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+        setMessages([]);
+        setStatus(null);
+        setLocked(false);
+
+        if (!facultyId) {
+          setError("No faculty selected for this service class.");
+          return;
+        }
+        if (!sectionId) {
+          setError("Missing section id.");
+          return;
+        }
+
+        const res = await getOmLoadAssignmentRfc(userId, {
+          term_id: termId,
+          faculty_id: facultyId,
+          section_id: sectionId,
+        });
+
+        if (!res?.ok || !res?.rfc) {
+          setMessages([]);
+          setStatus(null);
+          return;
+        }
+
+        const rfc = res.rfc;
+        setStatus(rfc.status || null);
+        setLocked(Boolean(rfc.locked));
+        setMessages(rfc.messages || rfc.thread || []);
+      } catch (e: any) {
+        setError(e?.message || "Failed to load RFC.");
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+  }, [messages, open]);
+
+  if (!open) return null;
+
+  const isTerminal = Boolean(locked);
+
+  const respond = async (decision: "reply" | "approve" | "reject") => {
+    if (!userId || !termId || !facultyId) {
+      onToast({ type: "error", message: "Missing context." });
+      return;
+    }
+    if (isTerminal) {
+      onToast({ type: "error", message: "RFC is already locked." });
+      return;
+    }
+    if (decision === "reply" && !reply.trim()) {
+      onToast({ type: "info", message: "Please type a reply message." });
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await respondOmLoadAssignmentRfc(userId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        section_id: sectionId,
+        action: decision,
+        message: reply.trim() || undefined,
+      });
+
+      await onAfterUpdate(decision);
+
+      const msg =
+        decision === "reply"
+          ? "Reply sent to faculty."
+          : decision === "approve"
+          ? "RFC approved."
+          : "RFC rejected.";
+      onToast({ type: "success", message: msg });
+      onClose();
+    } catch (e: any) {
+      onToast({ type: "error", title: "Failed", message: e?.message || "Failed to send response." });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-[120] grid place-items-center bg-black/40 p-4">
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl relative max-h-[92vh] flex flex-col overflow-hidden">
+        <button
+          aria-label="Close"
+          className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
+          onClick={onClose}
+        >
+          <X className="h-5 w-5 text-gray-500" />
+        </button>
+
+        <div className="p-6 pb-4">
+          <h3 className="text-lg font-semibold text-emerald-700 mb-2">Request for Change</h3>
+          <div className="text-sm text-gray-600 mb-1">
+            From: <span className="font-semibold">{facultyName || "Faculty"}</span>
+          </div>
+
+          {loading && <div className="mb-4 text-sm text-gray-600">Loading…</div>}
+          {error && <div className="mb-4 text-sm text-red-600">{error}</div>}
+        </div>
+
+        <div
+          ref={scrollRef}
+          className="mx-6 mb-4 flex-1 min-h-0 overflow-auto rounded-lg border border-gray-200 bg-gray-50 p-3"
+        >
+          {messages.length ? (
+            <div className="space-y-2">
+              {messages.map((m: any, idx: number) => {
+                const whoRaw = (m.sender_role || m.from || "").toString();
+                const who = whoRaw.toUpperCase();
+                const ts = m.created_at ? new Date(m.created_at).toLocaleString() : "";
+                const isFaculty = /FACULTY/i.test(whoRaw) || who === "F";
+                const bubble = m.message || m.text || "";
+
+                return (
+                  <div key={idx} className={cls("flex", isFaculty ? "justify-start" : "justify-end")}>
+                    <div className={cls("max-w-[85%]", isFaculty ? "text-left" : "text-right")}>
+                      <div className={cls("mb-1 text-[11px] text-gray-500", isFaculty ? "pl-1" : "pr-1")}>
+                        {who || (isFaculty ? (facultyName || "FACULTY").toUpperCase() : "OM")}
+                        {ts ? ` • ${ts}` : ""}
+                      </div>
+                      <div
+                        className={cls(
+                          "inline-block rounded-2xl px-3 py-2 text-sm whitespace-pre-wrap",
+                          isFaculty
+                            ? "bg-white text-gray-800 border border-gray-200"
+                            : "bg-emerald-700 text-white"
+                        )}
+                      >
+                        {bubble}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-600">No messages yet.</div>
+          )}
+        </div>
+
+        <div className="mx-6">
+          <label className="block text-sm font-medium mb-1">Reply</label>
+          <textarea
+            className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30 mb-6"
+            rows={4}
+            placeholder={isTerminal ? "This RFC is locked." : "Type your reply…"}
+            value={reply}
+            disabled={loading || !status || isTerminal}
+            onChange={(e) => setReply(e.target.value)}
+          />
+        </div>
+
+        <div className="mx-6 pb-6 flex justify-end gap-2">
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-red-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("reject")}
+          >
+            Reject
+          </button>
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-emerald-700 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("approve")}
+          >
+            Approve
+          </button>
+          <button
+            disabled={loading || !status || isTerminal}
+            className={cls(
+              "px-4 py-2 rounded-lg bg-blue-600 text-white text-sm",
+              (loading || !status || isTerminal) && "opacity-60 cursor-not-allowed"
+            )}
+            onClick={() => void respond("reply")}
+          >
+            Reply
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** unify control heights */
 const CONTROL =
-  "h-10 w-full rounded-md border border-gray-300 px-3 text-[13px] shadow-sm focus:ring-2 focus:ring-emerald-500/30";
+  "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm " +
+  "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
 
 /* ---------------- Plantilla table design system (source of truth) ---------------- */
 const PLANTILLA_TABLE_WRAP =
-  "rounded-xl border border-gray-200 bg-white shadow-sm overflow-x-auto overflow-y-auto";
+  "rounded-xl border border-gray-200 bg-white shadow-sm";
 
 const PLANTILLA_TABLE =
   "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-middle [&_td]:whitespace-normal [&_td]:break-words";
-
-// NOTE: keep sticky headers *below* global overlays (e.g., topbar notifications)
-const PLANTILLA_THEAD = "bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs";
-const PLANTILLA_HEAD_TR = "whitespace-nowrap text-[13px] font-semibold";
-
-const PLANTILLA_TH = "px-3 py-2 text-center border border-gray-300";
-const PLANTILLA_TD = "px-3 py-2 text-center";
-const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200";
-const PLANTILLA_SECTION_TITLE =
-  "px-5 py-3 text-sm font-semibold text-white text-center bg-emerald-600";
+const PLANTILLA_TH = "px-4 py-2 text-left";
+const PLANTILLA_TD = "px-4 py-3 text-center";
+const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border-b [&>td]:border-gray-200";
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -142,6 +381,7 @@ function Dropdown({
   searchable = false,
   align = "left",
   onOpen,
+  disabled = false,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -151,6 +391,7 @@ function Dropdown({
   searchable?: boolean;
   align?: "left" | "right";
   onOpen?: () => void;
+  disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState("");
@@ -177,20 +418,20 @@ function Dropdown({
     const r = el.getBoundingClientRect();
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const estMenuH = Math.min(48 + shown.length * 36, Math.floor(vh * 0.6));
-    const roomBelow = vh - r.bottom;
-    const place: "down" | "up" = roomBelow >= estMenuH || r.top < estMenuH ? "down" : "up";
-    const width = Math.max(r.width, 220);
-    const left = Math.max(
-      8,
-      Math.min(vw - width - 8, align === "right" ? r.right - width : r.left)
-    );
-    const top = place === "down" ? Math.min(vh - 8, r.bottom + 8) : Math.max(8, r.top - 8);
+
+    // Always open downward.
+    const place: "down" | "up" = "down";
+
+    const width = Math.max(r.width, 180);
+    const left = Math.max(8, Math.min(vw - width - 8, align === "right" ? r.right - width : r.left));
+    const top = Math.min(vh - 8, r.bottom + 6);
+
     setMenuRect({ left, top, width, place });
   };
 
   const menuId = useMemo(() => `dd-${Math.random().toString(36).slice(2)}`, []);
 
+  // Close on outside click
   useEffect(() => {
     const onDoc = (e: MouseEvent) => {
       if (!open) return;
@@ -210,9 +451,7 @@ function Dropdown({
     const onScroll = () => compute();
     window.addEventListener("resize", onResize);
     window.addEventListener("scroll", onScroll, true);
-    if (searchable) {
-      inputRef.current?.focus();
-    }
+    if (searchable) inputRef.current?.focus();
     return () => {
       window.removeEventListener("resize", onResize);
       window.removeEventListener("scroll", onScroll, true);
@@ -221,6 +460,7 @@ function Dropdown({
   }, [open, term, align, shown.length, searchable]);
 
   const openFresh = () => {
+    if (disabled) return;
     if (searchable) setTerm("");
     onOpen?.();
     setOpen(true);
@@ -236,28 +476,38 @@ function Dropdown({
     setOpen(false);
   };
 
+  const baseBtn = cls(
+    "w-full h-10 rounded-lg border px-3 text-left text-sm outline-none pr-8 flex items-center",
+    "border-gray-300 bg-white shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
+    disabled && "cursor-not-allowed bg-gray-100 text-gray-400"
+  );
+
   return (
     <div className={cls("relative", className)} ref={boxRef}>
       <div className="relative">
         {searchable ? (
-          // SEARCHABLE MODE: input acts like typeahead
           <input
             ref={inputRef}
             value={open ? term : value}
+            disabled={disabled}
             onMouseDown={(e) => {
+              if (disabled) return;
               if (!open) {
                 e.preventDefault();
                 openFresh();
               }
             }}
             onFocus={() => {
+              if (disabled) return;
               if (!open) openFresh();
             }}
             onChange={(e) => {
+              if (disabled) return;
               setTerm(e.target.value);
               if (!open) setOpen(true);
             }}
             onKeyDown={(e) => {
+              if (disabled) return;
               if (e.key === "ArrowDown" && !open) {
                 openFresh();
                 e.preventDefault();
@@ -266,25 +516,24 @@ function Dropdown({
               if (e.key === "Escape") setOpen(false);
             }}
             placeholder={placeholder}
-            className={cls(CONTROL, "pr-16 truncate")}
-            title={value || undefined}
+            className={cls(baseBtn, "truncate")}
           />
         ) : (
-          // NON-SEARCHABLE MODE: plain button shows selected value
           <button
             type="button"
-            className={cls(CONTROL, "pr-8 text-left truncate", !value && "text-neutral-400")}
+            disabled={disabled}
+            className={cls(baseBtn, !value && "text-gray-400")}
             onClick={() => {
+              if (disabled) return;
               if (open) setOpen(false);
               else openFresh();
             }}
-            title={value || placeholder}
           >
-            {value || placeholder}
+            {value ? value : <span className="text-gray-400">{placeholder}</span>}
           </button>
         )}
 
-        {searchable && open && term && (
+        {searchable && open && term && !disabled && (
           <button
             type="button"
             onClick={() => {
@@ -296,30 +545,27 @@ function Dropdown({
             }}
             className="absolute right-8 top-1/2 -translate-y-1/2 p-0.5 rounded hover:bg-neutral-100"
             aria-label="Clear"
-            title="Clear"
           >
             <X className="h-4 w-4 text-neutral-500" />
           </button>
         )}
 
-        {/* Chevron icon (purely visual) */}
-        <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+        <ChevronDown className="pointer-events-none absolute right-2 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
       </div>
 
-      {open && menuRect && (
+      {open && menuRect && !disabled && (
         <div
           id={menuId}
           style={{
             position: "fixed",
             left: menuRect.left,
-            top: menuRect.place === "down" ? menuRect.top : undefined,
-            bottom: menuRect.place === "up" ? window.innerHeight - menuRect.top : undefined,
+            top: menuRect.top,
             width: menuRect.width,
             maxHeight: "60vh",
           }}
           className={cls(
-            "z-[9999] overflow-auto rounded-xl border border-neutral-300 bg-white",
-            "shadow-[0_8px_24px_rgba(0,0,0,0.15)] overscroll-contain py-1"
+            "z-[100000] overflow-auto rounded-xl border border-gray-300 bg-white shadow-xl",
+            "overscroll-contain py-1"
           )}
         >
           {shown.map((opt) => (
@@ -327,15 +573,14 @@ function Dropdown({
               key={opt}
               onClick={() => onPick(opt)}
               className={cls(
-                "block w-full truncate px-3 py-2 text-left text-[13px] hover:bg-emerald-50/60 transition-colors",
+                "block w-full h-10 truncate px-4 text-left text-sm hover:bg-emerald-50 transition-colors flex items-center",
                 value === opt && "bg-emerald-100 text-emerald-800 font-medium"
               )}
-              title={opt}
             >
               {opt}
             </button>
           ))}
-          {shown.length === 0 && <div className="px-3 py-2 text-[13px] text-neutral-500">No results</div>}
+          {shown.length === 0 && <div className="px-4 h-10 flex items-center text-sm text-neutral-500">No results</div>}
         </div>
       )}
     </div>
@@ -343,6 +588,7 @@ function Dropdown({
 }
 
 /* ---------------- Spec constants ---------------- */
+
 const BEGIN_OPTIONS = ["07:30", "09:15", "11:00", "12:45", "14:30", "16:15", "18:00", "19:45"] as const;
 const END_BY_BEGIN: Record<(typeof BEGIN_OPTIONS)[number], string> = {
   "07:30": "09:00",
@@ -381,7 +627,7 @@ const COLS_14 = [
   "16ch", // Begin2
   "16ch", // End2
   "28ch", // Remarks
-  "16ch", // Status
+  "30ch", // Status (wider for message + status control)
 ];
 
 function ColGroup14() {
@@ -439,6 +685,39 @@ function facultyLabel(f?: { first_name?: string; last_name?: string; email?: str
   return L || F ? `${L}, ${F}` : "";
 }
 
+
+/* ---------------- RFC schedule helpers ---------------- */
+const normalizeDayShort = (d?: string): DayShort | "" => {
+  const raw = (d || "").trim().toUpperCase();
+  if (!raw) return "";
+  // accept "TH" / "TTh" variants for Thursday
+  if (raw.startsWith("TH") || raw === "H") return "H";
+  const c = raw[0];
+  if (c === "M") return "M";
+  if (c === "T") return "T";
+  if (c === "W") return "W";
+  if (c === "F") return "F";
+  if (c === "S") return "S";
+  return "";
+};
+
+const splitTimeRange = (range?: string): { begin?: string; end?: string } => {
+  const s = (range || "").trim();
+  if (!s) return {};
+  // common formats:
+  //  - "07:30 - 09:00"
+  //  - "07:30-09:00"
+  //  - "07:30–09:00" (en-dash from backend)
+  //  - "07:30—09:00" (em-dash)
+  //  - "7:30 AM - 9:00 AM"
+  const parts = s
+    .split(/\s*[-–—]\s*/g)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  if (parts.length >= 2) return { begin: parts[0], end: parts[1] };
+  return {};
+};
+
 /* ---------------- Departments ---------------- */
 // NOTE: Faculty Service is bi-directional. "From" is always the logged-in chair's department.
 
@@ -464,9 +743,16 @@ type ChairFacultyServiceProps = {
    * to "Department of Software Technology" for backwards compatibility.
    */
   chairDepartmentName?: string;
+
+  /**
+   * UI rendering mode.
+   * - page: full-page layout (default for CHAIR route)
+   * - embedded: render without page shell/sticky header so OM pages can wrap it
+   */
+  variant?: "page" | "embedded";
 };
 
-export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacultyServiceProps) {
+export default function CHAIR_FacultyService({ chairDepartmentName, variant = "page" }: ChairFacultyServiceProps) {
   /**
    * Bi-directional behavior:
    * - Any department can create and send requests to any other department.
@@ -508,6 +794,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
   // Working / planning term coming from backend activeTerm
   const [termLabel, setTermLabel] = useState<string>("");
+  const [termId, setTermId] = useState<string>("");
 
   // Start empty; we derive from props or chair header.
   // Fallback to ST only if we truly can't derive a department.
@@ -519,12 +806,37 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const updateTermLabelFromOptions = (o: any) => {
     const ay = o?.activeTerm?.acad_year_start;
     const tn = o?.activeTerm?.term_number;
+    const tid = o?.activeTerm?.term_id || o?.activeTerm?.id || o?.activeTerm?._id;
+    if (tid) setTermId(String(tid));
     if (ay) {
       setTermLabel(`Term ${tn ?? "—"} · AY ${ay}-${ay + 1}`);
     } else {
       setTermLabel("");
     }
   };
+
+  const meUserId = useMemo(() => {
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : {};
+      return String(u?.userId || u?.user_id || u?.id || "");
+    } catch {
+      return "";
+    }
+  }, []);
+
+  const [rfcModal, setRfcModal] = useState<null | {
+    open: boolean;
+    facultyId: string;
+    facultyName: string;
+    sectionId: string;
+    fsId?: string;
+  }>(null);
+
+  // RFC presence/status cache for Faculty Service rows (used in Received Requests table)
+  const [rfcPendingByKey, setRfcPendingByKey] = useState<Record<string, boolean>>({});
+  const rfcKey = (sectionId?: string | null, facultyId?: string | null) =>
+    `${String(sectionId || "")}::${String(facultyId || "")}`;
 
   // If parent doesn’t pass chairDepartmentName, derive it from the chair header.
   useEffect(() => {
@@ -808,6 +1120,66 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [receivedRows]);
 
+  /* --------- RFC unread indicator (persisted locally per chair user) ---------
+     We show a red dot on the message icon when:
+       - there is an active RFC (pending), AND
+       - the RFC has been updated since the chair last opened the thread.
+
+     Key is section_id::faculty_id (same as rfcKey()).
+  */
+
+  const [rfcUpdatedAtByKey, setRfcUpdatedAtByKey] = useState<Record<string, string>>({});
+  const seenRfcRef = useRef<Record<string, string>>({});
+
+  const rfcSeenKey = useMemo(() => {
+    let uid = "anon";
+    try {
+      const raw = localStorage.getItem("animo.user");
+      const u = raw ? JSON.parse(raw) : null;
+      uid = (u?.userId ?? u?.id ?? "anon") as string;
+    } catch {
+      // ignore
+    }
+    return `animo.fs.rfc.seen.${uid}`;
+  }, []);
+
+  const loadSeenRfc = () => {
+    try {
+      const raw = localStorage.getItem(rfcSeenKey);
+      const obj = raw ? JSON.parse(raw) : {};
+      seenRfcRef.current = obj && typeof obj === "object" ? obj : {};
+    } catch {
+      seenRfcRef.current = {};
+    }
+  };
+
+  const saveSeenRfc = () => {
+    try {
+      localStorage.setItem(rfcSeenKey, JSON.stringify(seenRfcRef.current || {}));
+    } catch {
+      // ignore
+    }
+  };
+
+  useEffect(() => {
+    loadSeenRfc();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const isRfcUnseen = (key: string) => {
+    const upd = rfcUpdatedAtByKey[key];
+    if (!upd) return false;
+    const seen = seenRfcRef.current?.[key];
+    if (!seen) return true;
+    return new Date(seen).getTime() < new Date(upd).getTime();
+  };
+
+  const markRfcSeen = (key: string) => {
+    const upd = rfcUpdatedAtByKey[key] || new Date().toISOString();
+    seenRfcRef.current = { ...(seenRfcRef.current || {}), [key]: upd };
+    saveSeenRfc();
+  };
+
   // Options for creating requests: departments list + working term.
   useEffect(() => {
     if (!activeDeptName) return;
@@ -847,6 +1219,125 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     }
   }
 
+  // Determine if a row has an active (non-terminal) RFC thread.
+  const computeRfcPending = (rfc: any): boolean => {
+    if (!rfc) return false;
+    if (Boolean(rfc.locked)) return false;
+    const st = norm(String(rfc.status || ""));
+    if (st === "approved" || st === "rejected") return false;
+    // Any existing unlocked RFC is treated as pending.
+    return true;
+  };
+
+  // Best-effort "last updated" timestamp for RFC threads.
+  // Used to drive the red-dot unread indicator.
+  const getRfcUpdatedAt = (rfc: any): string => {
+    if (!rfc) return "";
+    const cand =
+      rfc.updated_at ||
+      rfc.updatedAt ||
+      rfc.updated ||
+      rfc.last_updated_at ||
+      rfc.lastUpdatedAt ||
+      rfc.last_message_at ||
+      rfc.lastMessageAt;
+    if (cand) {
+      try {
+        // handle both Date objects and ISO strings
+        const d = cand instanceof Date ? cand : new Date(String(cand));
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      } catch {
+        // ignore
+      }
+    }
+
+    const msgs = (rfc.messages || rfc.thread || []) as any[];
+    const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
+    const lastAt = last?.created_at || last?.createdAt;
+    if (lastAt) {
+      try {
+        const d = lastAt instanceof Date ? lastAt : new Date(String(lastAt));
+        if (!Number.isNaN(d.getTime())) return d.toISOString();
+      } catch {
+        // ignore
+      }
+    }
+
+    return "";
+  };
+
+  async function hydrateRfcPendingForReceived(receivedList: FacultyServiceRow[]) {
+    if (!meUserId || !termId) return;
+    const targets = (receivedList || [])
+      .map((r) => {
+        const sid = String((r as any)?.section_id || "").trim();
+        const fid = String((r as any)?.faculty?.faculty_id || (r as any)?.faculty_id || "").trim();
+        if (!sid || !fid) return null;
+        return { sid, fid };
+      })
+      .filter(Boolean) as Array<{ sid: string; fid: string }>;
+
+    if (!targets.length) return;
+
+    // Always re-check RFC status for current Received rows so
+    // new RFCs (false -> true) are reflected without requiring a full page refresh.
+    const need = targets;
+
+    // Small concurrency limiter to avoid spamming the backend.
+    const limit = 6;
+    const nextMap: Record<string, boolean> = {};
+    const nextUpdated: Record<string, string> = {};
+
+    for (let i = 0; i < need.length; i += limit) {
+      const chunk = need.slice(i, i + limit);
+      const results = await Promise.all(
+        chunk.map(async ({ sid, fid }) => {
+          try {
+            const res = await getOmLoadAssignmentRfc(meUserId, {
+              term_id: termId,
+              faculty_id: fid,
+              section_id: sid,
+            });
+            const pending = computeRfcPending(res?.rfc);
+            const key = rfcKey(sid, fid);
+            const upd = getRfcUpdatedAt(res?.rfc);
+            return { key, pending, updatedAt: upd };
+          } catch {
+            return { key: rfcKey(sid, fid), pending: false, updatedAt: "" };
+          }
+        })
+      );
+      for (const r of results) {
+        nextMap[r.key] = r.pending;
+        if (r.updatedAt) nextUpdated[r.key] = r.updatedAt;
+      }
+    }
+
+    if (Object.keys(nextMap).length) {
+      setRfcPendingByKey((prev) => ({ ...prev, ...nextMap }));
+    }
+    if (Object.keys(nextUpdated).length) {
+      setRfcUpdatedAtByKey((prev) => ({ ...prev, ...nextUpdated }));
+    }
+  }
+
+  async function refreshSingleRfcPending(sectionId: string, facultyId: string) {
+    if (!meUserId || !termId || !sectionId || !facultyId) return;
+    try {
+      const res = await getOmLoadAssignmentRfc(meUserId, {
+        term_id: termId,
+        faculty_id: facultyId,
+        section_id: sectionId,
+      });
+      const pending = computeRfcPending(res?.rfc);
+      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: pending }));
+      const upd = getRfcUpdatedAt(res?.rfc);
+      if (upd) setRfcUpdatedAtByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: upd }));
+    } catch {
+      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: false }));
+    }
+  }
+
   /**
    * Fetch BOTH boxes for the logged-in CHAIR's department.
    * - sent:   from_department === myDept
@@ -865,6 +1356,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
 
       setSentRows(sentList);
       setReceivedRows(receivedList);
+
+      // Populate RFC pending status for Received rows (Approve/Pending indicator).
+      hydrateRfcPendingForReceived(receivedList).catch(() => {});
 
       // Prefill receiver-side edits from the latest server values so fields stay editable across status changes.
       setEdits((prev) => {
@@ -903,6 +1397,14 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
       setLoadingList(false);
     }
   }
+
+  // If termId arrives after the initial list load, we still need to hydrate RFC state.
+  useEffect(() => {
+    if (!termId || !meUserId) return;
+    if (!receivedRows || receivedRows.length === 0) return;
+    hydrateRfcPendingForReceived(receivedRows).catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [termId, meUserId, receivedRows]);
 
   // Course suggestions (Software Tech as requester)
   const [courseTerm, setCourseTerm] = useState("");
@@ -988,6 +1490,101 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     return typeof m === "string" ? m : JSON.stringify(m);
   }
 
+  /* ---------------- Minimal local POST helper (keeps this page self-contained) ----------------
+     We intentionally use a relative '/api' prefix which matches the rest of the app's API
+     calls (via '@/api') under typical dev/prod proxy setups.
+  */
+  async function apiPostJSON(path: string, body?: any) {
+    const res = await fetch(path, {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {
+      // ignore
+    }
+    if (!res.ok || (data && data.ok === false)) {
+      const msg = data?.detail || data?.message || `Request failed (${res.status})`;
+      throw new Error(typeof msg === "string" ? msg : JSON.stringify(msg));
+    }
+    return data;
+  }
+
+  const FS_STATUS_OPTIONS = ["Pending", "Approved", "Rejected"] as const;
+  const toFsStatusLabel = (s?: string) => (s === "responded" ? "Approved" : s === "rejected" ? "Rejected" : "Pending");
+  const labelToFsStatus = (label: string) => (label === "Approved" ? "responded" : label === "Rejected" ? "rejected" : "sent");
+
+  async function changeReceivedStatus(fsid: string, label: string, row: FacultyServiceRow) {
+    try {
+      const st = labelToFsStatus(label);
+      const e = getEdit(fsid);
+
+      if (st === "responded") {
+        const facId = String(e?.faculty?.faculty_id || (row as any)?.faculty?.faculty_id || "").trim();
+        if (!facId) {
+          showToast({ type: "info", title: "Missing faculty", message: "Select a faculty before approving." });
+          return;
+        }
+
+        // Require schedule fields before approving (matches UI asterisks)
+        const missing: string[] = [];
+        if (!e.day1) missing.push("Day1");
+        if (!e.begin1) missing.push("Begin1");
+        if (!e.end1) missing.push("End1");
+        if (!e.day2) missing.push("Day2");
+        if (!e.begin2) missing.push("Begin2");
+        if (!e.end2) missing.push("End2");
+        if (missing.length) {
+          showToast({
+            type: "info",
+            title: "Missing schedule",
+            message: `Fill required fields: ${missing.join(", ")}.`,
+          });
+          return;
+        }
+
+        await apiPostJSON(`/api/chair/faculty-service/respond/${encodeURIComponent(fsid)}?userId=${encodeURIComponent(meUserId)}`, {
+          faculty: {
+            faculty_id: facId,
+            first_name: e?.faculty?.first_name || (row as any)?.faculty?.first_name,
+            last_name: e?.faculty?.last_name || (row as any)?.faculty?.last_name,
+            email: e?.faculty?.email || (row as any)?.faculty?.email,
+          },
+          day1: e.day1,
+          begin1: e.begin1,
+          end1: e.end1,
+          day2: e.day2,
+          begin2: e.begin2,
+          end2: e.end2,
+          remarks: e.remarks,
+        });
+
+        showToast({ type: "success", message: "Request approved." });
+      } else if (st === "rejected") {
+        await apiPostJSON(`/api/chair/faculty-service/reject/${encodeURIComponent(fsid)}?userId=${encodeURIComponent(meUserId)}`, {
+          remarks: e.remarks,
+        });
+        showToast({ type: "success", message: "Request rejected." });
+      } else {
+        // Pending (sent) — allow reverting anytime.
+        await apiPostJSON(`/api/chair/faculty-service/restore/${encodeURIComponent(fsid)}`, {
+          status: "sent",
+        });
+        showToast({ type: "success", message: "Status set to pending." });
+      }
+
+      await refresh();
+    } catch (err: any) {
+      showToast({ type: "error", title: "Update failed", message: friendlyError(err) });
+    }
+  }
+
   async function handleCreateAndSend() {
     try {
       const selected = draftRows.filter((r) => (selectedDraftIds[r._tmpId] ?? true));
@@ -1048,47 +1645,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
     refresh().catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeDeptName]);
-
-  async function handleSendBack(fs_id: string, dept: string) {
-    const e = getEdit(fs_id);
-    try {
-      if (!e.faculty?.faculty_id && !e.faculty?.email) {
-        showToast({ type: "info", title: "Select a faculty", message: "Please select a faculty to proceed." });
-        return;
-      }
-      await respondFacultyService(fs_id, {
-        faculty: e.faculty || {},
-        day1: e.day1,
-        begin1: e.begin1,
-        end1: e.end1,
-        day2: e.day2,
-        begin2: e.begin2,
-        end2: e.end2,
-        remarks: e.remarks,
-      });
-
-      setEdits((p) => ({
-        ...p,
-        [fs_id]: { ...EMPTY_EDIT },
-      }));
-      await refresh();
-      ensureFacultyForDept(dept);
-      showToast({ type: "success", message: "Request Accepted." });
-    } catch (err: any) {
-      showToast({ type: "error", title: "Send failed", message: friendlyError(err) });
-    }
-  }
-
-  async function handleReject(fs_id: string) {
-    try {
-      await rejectFacultyService(fs_id, { remarks: getEdit(fs_id).remarks || "" });
-      await refresh();
-      showToast({ type: "error", message: "Request rejected." });
-    } catch (err: any) {
-      showToast({ type: "error", title: "Reject failed", message: friendlyError(err) });
-    }
-  }
-
   
   // Sent list: keep "most recent" at the bottom (oldest -> newest)
   const mySentRows = useMemo(() => {
@@ -1100,318 +1656,411 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
   const canUndoReceived = historyTick >= 0 && undoRef.current.length > 0;
   const canRedoReceived = historyTick >= 0 && redoRef.current.length > 0;
 
+  // Shared search across Sent + Received lists (draft row stays visible)
+  const [tableSearch, setTableSearch] = useState("");
+  const [debouncedTableSearch, setDebouncedTableSearch] = useState("");
+
+  useEffect(() => {
+    const t = window.setTimeout(() => setDebouncedTableSearch(tableSearch.trim()), 250);
+    return () => window.clearTimeout(t);
+  }, [tableSearch]);
+
+  const q = useMemo(() => norm(debouncedTableSearch), [debouncedTableSearch]);
+
+  const rowMatches = (r: FacultyServiceRow) => {
+    if (!q) return true;
+    const fac: any = (r as any)?.faculty || {};
+    const parts = [
+      r.course_code,
+      r.course_title,
+      r.section,
+      r.from_department,
+      r.to_department,
+      facultyLabel(fac),
+      fac.email,
+      (r as any)?.faculty_name,
+      (r as any)?.remarks,
+    ];
+    return parts.some((p) => norm(String(p || "")).includes(q));
+  };
+
+  const filteredSentRows = useMemo(() => (q ? mySentRows.filter(rowMatches) : mySentRows), [mySentRows, q]);
+  const filteredReceivedRows = useMemo(
+    () => (q ? receivedRows.filter(rowMatches) : receivedRows),
+    [receivedRows, q]
+  );
+
+
 /* ---------------- UI ---------------- */
   return (
-    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+    <div
+      className={cls(
+        "w-full text-slate-900",
+        variant !== "embedded" && "min-h-screen bg-gray-50"
+      )}
+    >
       <ToastViewport items={toasts} onClose={closeToast} />
 
-      <div className="sticky top-0 z-10 bg-white px-8 pt-8">
-        <header className="mb-2">
+      {variant !== "embedded" ? (
+        <div className="bg-white px-8 pt-8">
+          <header className="mb-4">
+            <h1 className="text-2xl font-bold">Faculty Service</h1>
+            <p className="text-sm text-gray-600">
+              Create &amp; send faculty service requests, track request status, and respond to received requests.
+              {termLabel ? ` for ${termLabel}` : ""}
+            </p>
+          </header>
+        </div>
+      ) : (
+        <header className="mb-6">
           <h1 className="text-2xl font-bold">Faculty Service</h1>
           <p className="text-sm text-gray-600">
             Create &amp; send faculty service requests, track request status, and respond to received requests.
             {termLabel ? ` for ${termLabel}` : ""}
           </p>
         </header>
-      </div>
+      )}
 
-      <main className="w-full px-8 pb-24 space-y-10">
-        {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
-        <div className={cls(PLANTILLA_TABLE_WRAP, "overflow-y-visible")}>
-          <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}>
-            <span>Sent Requests</span>
+      <main className={cls("w-full pb-24 space-y-8", variant !== "embedded" && "px-8")}>
+        {/* Search + actions (shared) */}
+        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+            <div className="relative flex-1">
+              <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+              <input
+                className={cls(
+                  "w-full h-10 rounded-lg border border-gray-300 bg-white pl-9 pr-3 text-sm shadow-sm",
+                  "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
+                )}
+                placeholder="Search by course code or faculty…"
+                value={tableSearch}
+                onChange={(e) => setTableSearch(e.target.value)}
+              />
+            </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex items-center justify-end gap-2">
               <button
                 type="button"
                 onClick={addDraftRow}
                 className={cls(
-                  "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-[13px] font-medium shadow-sm",
-                  "bg-white text-emerald-800 border border-white/40 hover:bg-white/10"
+                  "inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm"
                 )}
                 title="Add another request row"
               >
                 <Plus className="h-4 w-4" />
-                Add Row
+                Add Class
               </button>
 
               <button
                 type="button"
                 onClick={handleCreateAndSend}
                 className={cls(
-                  "inline-flex items-center justify-center gap-2 rounded-md px-3 py-1.5 text-[13px] font-medium shadow-sm",
-                  "bg-blue-600 text-white hover:bg-blue-700"
+                "inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
                 )}
                 title="Send selected requests"
               >
                 <Send className="h-4 w-4" />
                 Send
               </button>
-
             </div>
-          </div>
-
-          <div className="overflow-x-auto">
-            <table className={PLANTILLA_TABLE}>
-              <ColGroupCombined />
-              <thead className={PLANTILLA_THEAD}>
-                <tr className={PLANTILLA_HEAD_TR}>
-                  <th className={PLANTILLA_TH}>
-                    <span className="sr-only">Select</span>
-                  </th>
-                  <th className={PLANTILLA_TH}>Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
-                  <th className={PLANTILLA_TH}>Section<span className="text-red-600 ml-0.5">*</span></th>
-                  <th className={PLANTILLA_TH}>Units</th>
-                  <th className={PLANTILLA_TH}>To<span className="text-red-600 ml-0.5">*</span></th>
-                  <th className={PLANTILLA_TH}>Faculty</th>
-                  <th className={PLANTILLA_TH}>Day1</th>
-                  <th className={PLANTILLA_TH}>Begin1</th>
-                  <th className={PLANTILLA_TH}>End1</th>
-                  <th className={PLANTILLA_TH}>Day2</th>
-                  <th className={PLANTILLA_TH}>Begin2</th>
-                  <th className={PLANTILLA_TH}>End2</th>
-                  <th className={PLANTILLA_TH}>Remarks</th>
-                  <th className={PLANTILLA_TH}>Status</th>
-                </tr>
-              </thead>
-
-              <tbody className="text-gray-800">
-                {/* Draft rows (editable before sending) */}
-                {draftRows.map((r) => {
-                  const checked = selectedDraftIds[r._tmpId] ?? true;
-                  const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
-                  const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
-                  return (
-                    <tr key={r._tmpId} className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        <input
-                          type="checkbox"
-                          className="h-4 w-4 accent-emerald-600"
-                          checked={checked}
-                          onChange={(e) => {
-                            const v = e.target.checked;
-                            setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
-                          }}
-                          aria-label="Select row to send"
-                        />
-                      </td>
-
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
-                        <Dropdown
-                          value={r.course_code}
-                          onChange={(code) => {
-                            const hit = courseSuggestions.find((c) => c.code === code);
-                            updateDraftRow(r._tmpId, {
-                              course_code: code,
-                              section_id: "",
-                              section: "",
-                              course_title: hit?.title ?? "",
-                              units: hit?.units ?? null,
-                            });
-                            setCourseTerm("");
-                          }}
-                          options={codeOptions}
-                          placeholder="Select code…"
-                          searchable
-                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
-                          onOpen={() => setCourseTerm("")}
-                        />
-                        <div className="mt-1 text-[12px] text-neutral-600 leading-tight">{r.course_title || ""}</div>
-                      </td>
-
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        <Dropdown
-                          value={r.section}
-                          onChange={(sec) => {
-                            const hit = secs.find((s) => s.section_code === sec);
-                            updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
-                          }}
-                          options={sectionCodes}
-                          placeholder={r.course_code ? "Select section…" : "Select course first"}
-                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
-                        />
-                      </td>
-
-                      <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}>
-                        <span className="inline-block leading-6">{r.units ?? "—"}</span>
-                      </td>
-
-                      <td className={cls(PLANTILLA_TD, "align-middle")}>
-                        <Dropdown
-                          value={r.to_department}
-                          onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
-                          options={toDepts}
-                          placeholder="Select department…"
-                          className="block w-full [&_button]:h-9 [&_button]:px-2 [&_input]:h-9 [&_input]:px-2"
-                        />
-                      </td>
-
-                      {/* disabled fields until receiver responds */}
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-                      <td className={PLANTILLA_TD}>—</td>
-
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
-                        <input
-                          className={cls(CONTROL, "h-9 px-2")}
-                          value={r.remarks}
-                          onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
-                          placeholder="Remarks…"
-                        />
-                      </td>
-
-                      <td className={PLANTILLA_TD}>
-                        <div className="flex items-center justify-center gap-2">
-                          <span className="inline-block rounded-full px-2 py-[2px] text-[12px] bg-neutral-200 text-neutral-700">
-                            Draft
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => removeDraftRow(r._tmpId)}
-                            className={cls(
-                              "inline-flex items-center justify-center rounded-md p-1.5",
-                              "hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500/30"
-                            )}
-                            title="Delete draft row"
-                            aria-label="Delete draft row"
-                          >
-                            <Trash2 className="h-4 w-4 text-red-600" />
-                          </button>
-                        </div>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {/* Sent rows (read-only) */}
-                {mySentRows.map((r) => {
-                  const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
-                  const badge =
-                    r.status === "responded"
-                      ? "bg-emerald-100 text-emerald-700"
-                      : r.status === "rejected"
-                      ? "bg-red-100 text-red-700"
-                      : "bg-amber-100 text-amber-700";
-
-                  return (
-                    <tr key={r.fs_id || r.id} className={PLANTILLA_ROW}>
-                      <td className={PLANTILLA_TD}>
-                        <input type="checkbox" className="h-4 w-4" disabled />
-                      </td>
-
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
-                        <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                        <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
-                      </td>
-
-                      <td className={PLANTILLA_TD}>{r.section || "—"}</td>
-                      <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? "—"}</td>
-                      <td className={cls(PLANTILLA_TD, "truncate")} title={r.to_department}>
-                        {r.to_department}
-                      </td>
-                      <td className={cls(PLANTILLA_TD, "truncate")} title={facultyLabel(r.faculty)}>
-                        {facultyLabel(r.faculty) || "—"}
-                      </td>
-                      <td className={PLANTILLA_TD}>{r.day1 || "—"}</td>
-                      <td className={PLANTILLA_TD}>{r.begin1 || "—"}</td>
-                      <td className={PLANTILLA_TD}>{r.end1 || "—"}</td>
-                      <td className={PLANTILLA_TD}>{r.day2 || "—"}</td>
-                      <td className={PLANTILLA_TD}>{r.begin2 || "—"}</td>
-                      <td className={PLANTILLA_TD}>{r.end2 || "—"}</td>
-                      <td className={cls(PLANTILLA_TD, "text-left")}>
-                        <span className="block whitespace-normal break-words" title={r.remarks || ""}>
-                          {r.remarks || "—"}
-                        </span>
-                      </td>
-                      <td className={PLANTILLA_TD}>
-                        <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
-                      </td>
-                    </tr>
-                  );
-                })}
-
-                {mySentRows.length === 0 && !loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                      No sent requests yet.
-                    </td>
-                  </tr>
-                )}
-
-                {loadingList && (
-                  <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                      Loading…
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
           </div>
         </div>
 
+        {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
+        <section className="space-y-2">
+          <h2 className="text-base font-semibold text-gray-800">Sent Requests</h2>
+
+          <div className={PLANTILLA_TABLE_WRAP}>
+            <div className="overflow-x-auto rounded-xl">
+              <table className={PLANTILLA_TABLE}>
+                <ColGroupCombined />
+                <thead className="bg-gray-50 border-b text-gray-900">
+                <tr>
+                    <th className={PLANTILLA_TH}>
+                      <span className="sr-only">Select</span>
+                    </th>
+                    <th className="px-4 py-2 text-left">Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
+                    <th className="px-4 py-2 text-left">Section<span className="text-red-600 ml-0.5">*</span></th>
+                    <th className="px-4 py-2 text-left">Units</th>
+                    <th className="px-4 py-2 text-left">To<span className="text-red-600 ml-0.5">*</span></th>
+                    <th className="px-4 py-2 text-left">Faculty</th>
+                    <th className="px-4 py-2 text-left">Day1</th>
+                    <th className="px-4 py-2 text-left">Begin1</th>
+                    <th className="px-4 py-2 text-left">End1</th>
+                    <th className="px-4 py-2 text-left">Day2</th>
+                    <th className="px-4 py-2 text-left">Begin2</th>
+                    <th className="px-4 py-2 text-left">End2</th>
+                    <th className="px-4 py-2 text-left">Remarks</th>
+                    <th className="px-4 py-2 text-left">Status</th>
+                  </tr>
+                </thead>
+
+                <tbody className="text-gray-800">
+                  {/* Draft rows (editable before sending) */}
+                  {draftRows.map((r) => {
+                    const checked = selectedDraftIds[r._tmpId] ?? true;
+                    const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
+                    const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
+                    const sectionDisabled = !r.course_code || sectionCodes.length === 0;
+
+                    return (
+                      <tr key={r._tmpId} className={PLANTILLA_ROW}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          <input
+                            type="checkbox"
+                            className="h-4 w-4 accent-emerald-600"
+                            checked={checked}
+                            onChange={(e) => {
+                              const v = e.target.checked;
+                              setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
+                            }}
+                            aria-label="Select row to send"
+                          />
+                        </td>
+
+                        <td className={cls(PLANTILLA_TD, "text-left")}> 
+                          <Dropdown
+                            value={r.course_code}
+                            onChange={(code) => {
+                              const hit = courseSuggestions.find((c) => c.code === code);
+                              updateDraftRow(r._tmpId, {
+                                course_code: code,
+                                section_id: "",
+                                section: "",
+                                course_title: hit?.title ?? "",
+                                units: hit?.units ?? null,
+                              });
+                              setCourseTerm("");
+                            }}
+                            options={codeOptions}
+                            placeholder="— Select Course —"
+                            searchable
+                            className="w-full"
+                            onOpen={() => setCourseTerm("")}
+                          />
+                          <div className="mt-1 text-[12px] text-neutral-600 leading-tight">{r.course_title || ""}</div>
+                        </td>
+
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          <Dropdown
+                            value={r.section}
+                            onChange={(sec) => {
+                              const hit = secs.find((s) => s.section_code === sec);
+                              updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
+                            }}
+                            options={sectionCodes}
+                            placeholder={r.course_code ? "— Select —" : "— Select —"}
+                            className="w-full"
+                            searchable={false}
+                            disabled={sectionDisabled}
+                          />
+                        </td>
+
+                        <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}> 
+                          <span className="inline-block leading-6">{r.units ?? "—"}</span>
+                        </td>
+
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          <Dropdown
+                            value={r.to_department}
+                            onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
+                            options={toDepts}
+                            placeholder="— Select Department —"
+                            className="w-full"
+                            searchable={false}
+                          />
+                        </td>
+
+                        {/* disabled fields until receiver responds */}
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+                        <td className={PLANTILLA_TD}>—</td>
+
+                        <td className={cls(PLANTILLA_TD, "text-left")}> 
+                          <input
+                            className={CONTROL}
+                            value={r.remarks}
+                            onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
+                            placeholder="Remarks…"
+                          />
+                        </td>
+
+                        <td className={PLANTILLA_TD}>
+                          <div className="flex items-center justify-center gap-2">
+                            <span className="inline-block rounded-full px-2 py-[2px] text-[12px] bg-neutral-200 text-neutral-700">
+                              Draft
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => removeDraftRow(r._tmpId)}
+                              className={cls(
+                                "inline-flex items-center justify-center rounded-md p-1.5",
+                                "hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500/30"
+                              )}
+                              title="Delete draft row"
+                              aria-label="Delete draft row"
+                            >
+                              <Trash2 className="h-4 w-4 text-red-600" />
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {/* Sent rows (read-only) */}
+                  {filteredSentRows.map((r) => {
+                    const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
+                    const badge =
+                      r.status === "responded"
+                        ? "bg-emerald-100 text-emerald-700"
+                        : r.status === "rejected"
+                        ? "bg-red-100 text-red-700"
+                        : "bg-amber-100 text-amber-700";
+
+                    return (
+                      <tr key={r.fs_id} className={PLANTILLA_ROW}>
+                        <td className={PLANTILLA_TD} />
+
+                        <td className={cls(PLANTILLA_TD, "text-left")}> 
+                          <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
+                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title || "—"}</div>
+                        </td>
+
+                        <td className={PLANTILLA_TD}>{r.section || "—"}</td>
+                        <td className={PLANTILLA_TD}>{r.units ?? "—"}</td>
+                        <td className={PLANTILLA_TD}>{r.to_department || "—"}</td>
+
+                        <td className={PLANTILLA_TD}>{facultyLabel((r as any)?.faculty) || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.day1 || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.begin1 || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.end1 || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.day2 || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.begin2 || "—"}</td>
+                        <td className={PLANTILLA_TD}>{(r as any)?.end2 || "—"}</td>
+                        <td className={cls(PLANTILLA_TD, "text-left")}>{r.remarks || "—"}</td>
+
+                        <td className={PLANTILLA_TD}>
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              type="button"
+                              aria-label="Message"
+                              disabled={!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)}
+                              onClick={() => {
+                                const fid = String((r as any)?.faculty?.faculty_id || "");
+                                const sid = String((r as any)?.section_id || "");
+                                if (!fid || !sid) return;
+                                setRfcModal({
+                                  open: true,
+                                  facultyId: fid,
+                                  facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
+                                  sectionId: sid,
+                                });
+                              }}
+                              className={cls(
+                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+                                (!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) &&
+                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
+                              )}
+                              title={(!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) ? "Assign a faculty first to open conversation" : "Message"}
+                            >
+                              <MessageSquareText className="h-4 w-4" />
+                            </button>
+
+                            <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {mySentRows.length === 0 && !loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                        No sent requests yet.
+                      </td>
+                    </tr>
+                  )}
+
+                  {mySentRows.length > 0 && filteredSentRows.length === 0 && !!q && !loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                        No matches found.
+                      </td>
+                    </tr>
+                  )}
+
+                  {loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                        Loading…
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+
         {/* 2) RECEIVED REQUESTS (To = activeDeptName) */}
-          <div className={cls(PLANTILLA_TABLE_WRAP, "mt-3 flex-1 min-h-[320px] overflow-y-auto")}>
-            <div className={cls(PLANTILLA_SECTION_TITLE, "w-full flex items-center justify-between gap-3")}
-            >
-				  <span className="inline-flex items-center gap-2">
-				    Received Requests
-				    {hasNewReceived && (
-				      <span
-				        className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
-				        title="New requests received"
-				      >
-				        New
-				      </span>
-				    )}
-				  </span>
-
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    undoEdit();
-                  }}
-                  disabled={!canUndoReceived}
-                  className={cls(
-                    "inline-flex items-center justify-center rounded-md px-2 py-1",
-                    "border border-white/30",
-                    canUndoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
-                  )}
-                  title="Undo (Ctrl/Cmd+Z)"
-                  aria-label="Undo"
+        <section className="space-y-2">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <h2 className="text-base font-semibold text-gray-800">Received Requests</h2>
+              {hasNewReceived && (
+                <span
+                  className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+                  title="New requests received"
                 >
-                  <Undo2 className="h-4 w-4" />
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    redoEdit();
-                  }}
-                  disabled={!canRedoReceived}
-                  className={cls(
-                    "inline-flex items-center justify-center rounded-md px-2 py-1",
-                    "border border-white/30",
-                    canRedoReceived ? "hover:bg-white/10" : "opacity-50 cursor-not-allowed"
-                  )}
-                  title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
-                  aria-label="Redo"
-                >
-                  <Redo2 className="h-4 w-4" />
-                </button>
-              </div>
+                  New
+                </span>
+              )}
             </div>
 
-            <div className="overflow-x-auto">
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => undoEdit()}
+                disabled={!canUndoReceived}
+                className={cls(
+                  "inline-flex items-center justify-center rounded-md p-2",
+                  "border border-gray-200 bg-white hover:bg-gray-50",
+                  !canUndoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
+                )}
+                title="Undo (Ctrl/Cmd+Z)"
+                aria-label="Undo"
+              >
+                <Undo2 className="h-4 w-4" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => redoEdit()}
+                disabled={!canRedoReceived}
+                className={cls(
+                  "inline-flex items-center justify-center rounded-md p-2",
+                  "border border-gray-200 bg-white hover:bg-gray-50",
+                  !canRedoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
+                )}
+                title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
+                aria-label="Redo"
+              >
+                <Redo2 className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+
+          <div className={PLANTILLA_TABLE_WRAP}>
+            <div className="overflow-x-auto rounded-xl">
               <table className={PLANTILLA_TABLE}>
                 <ColGroup14 />
-                <thead className={PLANTILLA_THEAD}>
-                  <tr className={PLANTILLA_HEAD_TR}>
+                <thead className="bg-gray-50 border-b text-gray-900">
+                <tr>
                     <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
                     <th className={PLANTILLA_TH}>Section</th>
                     <th className={PLANTILLA_TH}>Units</th>
@@ -1429,71 +2078,31 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                 </thead>
 
                 <tbody className="text-gray-800">
-                  {receivedRows.map((r) => {
+                  {filteredReceivedRows.map((r) => {
                     const fsid = r.fs_id!;
                     const dept = r.to_department || "";
                     const e = getEdit(fsid);
                     const facultyOptions = facultyCache[dept] || [];
 
-                    const statusLabel =
-                      r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
-
-                    const setStatus = async (nextLabel: string) => {
-                      if (nextLabel === statusLabel) return;
-
-                      if (nextLabel === "Approved") {
-                        const missing: string[] = [];
-                        if (!e.faculty?.faculty_id && !e.faculty?.email) missing.push("Faculty");
-                        if (!e.day1) missing.push("Day1");
-                        if (!e.begin1) missing.push("Begin1");
-                        if (!e.end1) missing.push("End1");
-                        if (!e.day2) missing.push("Day2");
-                        if (!e.begin2) missing.push("Begin2");
-                        if (!e.end2) missing.push("End2");
-
-                        if (missing.length) {
-                          showToast({
-                            type: "info",
-                            title: "Missing details",
-                            message: `Please complete: ${missing.join(", ")}.`,
-                          });
-                          return;
-                        }
-
-                        await handleSendBack(fsid, dept);
-                        return;
-                      }
-
-                      if (nextLabel === "Rejected") {
-                        await handleReject(fsid);
-                        return;
-                      }
-
-                      try {
-                        await restoreFacultyService(fsid, { status: "sent" as any });
-                        await refresh();
-                        showToast({ type: "info", message: "Status set to Pending." });
-                      } catch (err: any) {
-                        showToast({ type: "error", title: "Update failed", message: friendlyError(err) });
-                      }
-                    };
+                    // RFC status (Approve/Pending) for Faculty Service rows
+                    const sid = String((r as any)?.section_id || "").trim();
+                    const fid = String((r as any)?.faculty?.faculty_id || (e.faculty as any)?.faculty_id || "").trim();
+                    const rkey = sid && fid ? rfcKey(sid, fid) : "";
+                    const pendingRfc = rkey ? Boolean(rfcPendingByKey[rkey]) : false;
+                    const curStatusLabel = toFsStatusLabel((r as any)?.status);
 
                     return (
                       <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
-                        <td className={cls(PLANTILLA_TD, "text-left align-top")}>
+                        <td className={cls(PLANTILLA_TD, "text-left align-top")}> 
                           <div className="font-semibold text-emerald-700">{r.course_code}</div>
                           <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
                         </td>
 
                         <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.section || "—"}</td>
-
                         <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
+                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>{r.from_department}</td>
 
-                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>
-                          {r.from_department}
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={
                               e.faculty?.faculty_id
@@ -1514,12 +2123,12 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                               }
                             }}
                             options={facultyOptions.map((f) => f.label).filter(Boolean)}
-                            placeholder={facultyOptions.length ? "Select faculty…" : "Loading…"}
+                            placeholder={facultyOptions.length ? "— Select Faculty —" : "Loading…"}
                             searchable
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.day1 || ""}
                             onChange={(val) => {
@@ -1531,12 +2140,12 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                             }}
                             options={[...DAY1_OPTIONS]}
                             placeholder=""
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.begin1 || ""}
                             onChange={(val) => {
@@ -1548,34 +2157,34 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                             }}
                             options={timeBegins}
                             placeholder=""
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.end1 || ""}
                             onChange={(v) => patchEdit(fsid, { end1: v })}
                             options={timeBegins}
                             placeholder="—"
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.day2 || ""}
                             onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
                             options={[...DAY1_OPTIONS]}
                             placeholder="—"
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.begin2 || ""}
                             onChange={(val) => {
@@ -1587,23 +2196,23 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                             }}
                             options={timeBegins}
                             placeholder=""
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <Dropdown
                             value={e.end2 || ""}
                             onChange={(v) => patchEdit(fsid, { end2: v })}
                             options={timeBegins}
                             placeholder="—"
-                            className="max-w-[90px] mx-auto"
+                            className="max-w-[110px] mx-auto"
                             searchable={false}
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
                           <input
                             value={e.remarks}
                             onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
@@ -1612,27 +2221,68 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                           />
                         </td>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}>
-                          <Dropdown
-                            value={statusLabel}
-                            onChange={(v) => {
-                              setStatus(v).catch(() => {});
-                            }}
-                            options={["Pending", "Approved", "Rejected"]}
-                            placeholder="Pending"
-                            className={cls(
-                              "max-w-[140px] mx-auto",
-                              // color-coordinate statuses (Approved=green, Pending=yellow, Rejected=red)
-                              "[&>div>button]:border",
-                              statusLabel === "Approved" &&
-                                "[&>div>button]:bg-emerald-100 [&>div>button]:text-emerald-800 [&>div>button]:border-emerald-300",
-                              statusLabel === "Rejected" &&
-                                "[&>div>button]:bg-red-100 [&>div>button]:text-red-800 [&>div>button]:border-red-300",
-                              statusLabel === "Pending" &&
-                                "[&>div>button]:bg-amber-100 [&>div>button]:text-amber-800 [&>div>button]:border-amber-300"
-                            )}
-                            searchable={false}
-                          />
+                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          <div className="flex items-center justify-center gap-2">
+                            <button
+                              type="button"
+                              aria-label="Message"
+                              disabled={!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)}
+                              onClick={() => {
+                                const fid = String(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id || "");
+                                const sid2 = String(r.section_id || "");
+                                if (!fid || !sid2) return;
+
+                                try {
+                                  markRfcSeen(rfcKey(sid2, fid));
+                                } catch {}
+
+                                try {
+                                  if (fsid) {
+                                    seenReceivedRef.current.add(String(fsid));
+                                    saveSeenReceived();
+                                    setHasNewReceived(receivedRows.some((x) => {
+                                      const id = x?.fs_id || (x as any)?.id;
+                                      return !!id && !seenReceivedRef.current.has(String(id));
+                                    }));
+                                  }
+                                } catch {}
+
+                                setRfcModal({
+                                  open: true,
+                                  facultyId: fid,
+                                  facultyName: facultyLabel(e.faculty) || facultyLabel((r as any)?.faculty) || "Faculty",
+                                  sectionId: sid2,
+                                  fsId: String(fsid),
+                                });
+                              }}
+                              className={cls(
+                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+                                (!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) &&
+                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
+                              )}
+                              title={(!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) ? "— Select —" : "Message"}
+                            >
+                              <span className="relative inline-flex">
+                                <MessageSquareText className="h-4 w-4" />
+                                {pendingRfc && rkey && isRfcUnseen(rkey) && (
+                                  <span
+                                    className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white"
+                                    aria-label="New RFC"
+                                    title="New RFC"
+                                  />
+                                )}
+                              </span>
+                            </button>
+                            {/* Faculty Service request status (clickable) */}
+                            <Dropdown
+                              value={curStatusLabel}
+                              onChange={(v) => void changeReceivedStatus(fsid, String(v), r)}
+                              options={[...FS_STATUS_OPTIONS] as any}
+                              placeholder="Pending"
+                              className="min-w-[140px]"
+                              searchable={false}
+                            />
+                          </div>
                         </td>
                       </tr>
                     );
@@ -1646,9 +2296,17 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
                     </tr>
                   )}
 
+                  {receivedRows.length > 0 && filteredReceivedRows.length === 0 && !!q && !loadingList && (
+                    <tr className={PLANTILLA_ROW}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
+                        No matches found.
+                      </td>
+                    </tr>
+                  )}
+
                   {loadingList && (
                     <tr className={PLANTILLA_ROW}>
-                    <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
+                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
                         Loading…
                       </td>
                     </tr>
@@ -1657,6 +2315,52 @@ export default function CHAIR_FacultyService({ chairDepartmentName }: ChairFacul
               </table>
             </div>
           </div>
+        </section>
+
+        {/* RFC / Message thread (mirrors OM Load Assignment) */}
+        <ServiceRfcModal
+          open={!!rfcModal?.open}
+          onClose={() => setRfcModal(null)}
+          userId={meUserId}
+          termId={termId}
+          facultyId={rfcModal?.facultyId}
+          facultyName={rfcModal?.facultyName}
+          sectionId={rfcModal?.sectionId}
+          onAfterUpdate={async (decision) => {
+            await refresh();
+            if (rfcModal?.sectionId && rfcModal?.facultyId) {
+              await refreshSingleRfcPending(rfcModal.sectionId, rfcModal.facultyId);
+            }
+
+            // If approved, apply the RFC's requested schedule to the Received row immediately
+            // (backend already reflects it on the FACULTY side; this keeps the mirror table in sync).
+            if (decision === "approve" && rfcModal?.sectionId && rfcModal?.facultyId && rfcModal?.fsId) {
+              try {
+                const res = await getOmLoadAssignmentRfc(meUserId, {
+                  term_id: termId,
+                  faculty_id: rfcModal.facultyId,
+                  section_id: rfcModal.sectionId,
+                });
+                const req = (res as any)?.rfc?.requested;
+                if (req && typeof req === "object") {
+                  const t1 = splitTimeRange(String(req.time1 || ""));
+                  const t2 = splitTimeRange(String(req.time2 || ""));
+                  patchEdit(String(rfcModal.fsId), {
+                    day1: normalizeDayShort(String(req.day1 || "")) as any,
+                    begin1: (t1.begin || "") as any,
+                    end1: (t1.end || "") as any,
+                    day2: normalizeDayShort(String(req.day2 || "")) as any,
+                    begin2: (t2.begin || "") as any,
+                    end2: (t2.end || "") as any,
+                  });
+                }
+              } catch {
+                // ignore (best-effort UI sync)
+              }
+            }
+          }}
+          onToast={showToast}
+        />
       </main>
     </div>
   );

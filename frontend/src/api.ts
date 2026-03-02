@@ -38,7 +38,7 @@ export const ANALYTICS_BASE = resolveBase(
 );
 
 // Optional axios instance if you use axios elsewhere
-export const api = axios.create({ baseURL: API_BASE });
+export const api = axios.create({ baseURL: API_BASE, withCredentials: true });
 
 // DONT REMOVE ABOVE
 
@@ -65,6 +65,15 @@ export async function loginWithPassword(email: string, password: string): Promis
   });
   if (!r.ok) throw new Error(await r.text());
   return r.json();
+}
+
+// frontend/src/api.ts
+export async function logoutApi(): Promise<void> {
+  // ignore errors (user might already be logged out)
+  await fetch(join(API_BASE, "logout"), {
+    method: "POST",
+    credentials: "include", // important if backend is not same-origin
+  }).catch(() => {});
 }
 
 /* =========================================================
@@ -157,7 +166,7 @@ export async function fetchFacultyAvailabilityHeatmap<T = unknown>(params?: {
   threshold?: number; // default handled server-side (e.g., 0.50)
   term_id?: string;
   direction?: "current" | "prev" | "next";
-  counting_mode?: "top1" | "top5";
+  counting_mode?: "top1" | "top4";
 }): Promise<T> {
   const qs = new URLSearchParams();
   if (params?.course_id) qs.set("course_id", params.course_id);
@@ -2083,6 +2092,7 @@ export async function getOmHeader(userEmail?: string, userId?: string): Promise<
    ========================================================= */
 export type FacultyRow = {
   faculty_id: string;
+  user_id?: string;
   name: string;
   email: string;
   department: string;
@@ -2092,6 +2102,7 @@ export type FacultyRow = {
   status: string; // Active | On Leave
   // Optional fields used by Edit Faculty Details
   certifications?: string[];
+  hire_date?: string | null;
   teaching_years?: number | null;
 };
 
@@ -2174,36 +2185,102 @@ export async function getFacultyProfile(facultyId: string) {
   };
 }
 
+export type FacultyDetailsResponse = {
+  ok: boolean;
+  faculty_id: string;
+  details: {
+    first_name: string;
+    last_name: string;
+    email: string;
+    department: string;
+    faculty_type: string;
+    certifications: string[];
+    hire_date: string | null;
+    teaching_years: number | null;
+  };
+  deloading: null | {
+    type_id: string | null;
+    deloading_type: string | null;
+    units_deloaded: number | null;
+    notes: string | null;
+    term_id: string;
+    term_label?: string | null;
+    updated_at?: string | null;
+  };
+};
+
+export async function getFacultyDetails(facultyId: string): Promise<FacultyDetailsResponse> {
+  const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, {
+    params: { action: "details", facultyId },
+  });
+  return data as FacultyDetailsResponse;
+}
+
 export async function getFacultySchedule(
   facultyId: string,
   termId?: string
-): Promise<{ ok: boolean; term_id: string | null; teaching_load: Array<{
-  course_code: string;
-  course_title: string;
-  section: string;
-  units: number;
-  mode: string;
-  day1: string;
-  begin1: string;
-  end1: string;
-  day2: string;
-  begin2: string;
-  end2: string;
-}> }> {
+): Promise<{
+  ok: boolean;
+  term_id: string | null;
+  term?: { term_id: string; acad_year_start?: number; term_number?: number } | null;
+  active_term_id?: string | null;
+  terms?: Array<{ term_id: string; acad_year_start?: number; term_number?: number; is_active?: boolean }>;
+  term_index?: number;
+  teaching_load: Array<{
+    course_code: string;
+    course_title: string;
+    section: string;
+    units: number;
+    mode: string;
+    day1: string;
+    begin1: string;
+    end1: string;
+    day2: string;
+    begin2: string;
+    end2: string;
+  }>;
+}> {
   const { data } = await axios.post(
     `${API_BASE}/om/facultymanagement`,
     {},
     { params: { action: "schedule", facultyId, termId } }
   );
-  // Normalize to always provide teaching_load array
+
   const tl = Array.isArray(data?.teaching_load) ? data.teaching_load : [];
-  return { ok: !!data?.ok, term_id: data?.term_id ?? null, teaching_load: tl };
+  const termsRaw = Array.isArray(data?.terms) ? data.terms : [];
+
+  const terms = termsRaw.map((t: any) => ({
+    term_id: String(t?.term_id ?? ""),
+    acad_year_start: typeof t?.acad_year_start === "number" ? t.acad_year_start : t?.acad_year_start != null ? Number(t.acad_year_start) : undefined,
+    term_number: typeof t?.term_number === "number" ? t.term_number : t?.term_number != null ? Number(t.term_number) : undefined,
+    is_active: !!t?.is_active,
+  })).filter((t: any) => t.term_id);
+
+  const term = data?.term
+    ? {
+        term_id: String(data.term.term_id ?? data?.term_id ?? ""),
+        acad_year_start: typeof data.term.acad_year_start === "number" ? data.term.acad_year_start : data.term.acad_year_start != null ? Number(data.term.acad_year_start) : undefined,
+        term_number: typeof data.term.term_number === "number" ? data.term.term_number : data.term.term_number != null ? Number(data.term.term_number) : undefined,
+      }
+    : null;
+
+  const term_index = typeof data?.term_index === "number" ? data.term_index : undefined;
+
+  return {
+    ok: !!data?.ok,
+    term_id: data?.term_id ?? null,
+    term,
+    active_term_id: data?.active_term_id ?? null,
+    terms,
+    term_index,
+    teaching_load: tl,
+  };
 }
 
 export async function getFacultyHistory(
   facultyId: string,
   termOrAy?: string | number
-): Promise<{ ok: boolean; term_id: string | null; teaching_history: Array<{
+): Promise<{ ok: boolean; acad_year_start: number | null; academicYears: number[]; teaching_history: Array<{
   code: string;
   title: string;
   section: string;
@@ -2221,6 +2298,16 @@ export async function getFacultyHistory(
   else if (typeof termOrAy === "string" && termOrAy) params.termId = termOrAy;
 
   const { data } = await axios.post(`${API_BASE}/om/facultymanagement`, {}, { params });
+
+  const academicYears: number[] = Array.isArray(data?.academicYears)
+    ? data.academicYears.map((x: any) => Number(x)).filter((n: any) => Number.isFinite(n))
+    : [];
+  const acad_year_start: number | null =
+    typeof data?.acad_year_start === "number"
+      ? data.acad_year_start
+      : data?.acad_year_start != null && String(data.acad_year_start).trim() !== ""
+        ? Number(data.acad_year_start)
+        : null;
 
   // Normalize backend response ({ terms: Record<string, any[]> }) to teaching_history[]
   const teaching_history: Array<any> = [];
@@ -2251,7 +2338,8 @@ export async function getFacultyHistory(
 
   return {
     ok: !!data?.ok,
-    term_id: (data?.term_id ?? null) as string | null,
+    acad_year_start,
+    academicYears,
     teaching_history,
   };
 }
@@ -2296,7 +2384,7 @@ export async function listCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/om/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getCMHeader(userEmail?: string, userId?: string) {
@@ -2321,7 +2409,7 @@ export async function listChairCMCourses(params: {
   const { data } = await axios.post(`${API_BASE}/chair/course-management`, {}, {
     params: { action: "list", userEmail, userId, cluster, search },
   });
-  return data as { ok: boolean; rows: CMCourseRow[]; term?: any };
+  return data as { ok: boolean; rows: CMCourseRow[]; term?: any; total_all?: number };
 }
 
 export async function getChairCMHeader(userEmail?: string, userId?: string) {
@@ -2448,9 +2536,13 @@ export async function listOMSP(params: { status?: string; search?: string }) {
   return data as { ok: boolean; rows: OMPetitionRow[]; term_id: string };
 }
 
-export async function updateOMSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
+export async function updateOMSPCourse(
+  course_id: string,
+  payload: { status?: string; remarks?: string },
+  userId?: string | null
+) {
   const { data } = await axios.post(`${API_BASE}/om/student-petition`, payload, {
-    params: { action: "update", courseId: course_id },
+    params: { action: "update", courseId: course_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
@@ -2552,6 +2644,9 @@ export type OMSpecialClassRow = {
 
   submitted_at?: string;
 
+  // timestamps (DB snake_case)
+  updated_at?: string;
+
   schedule_id1?: string | null;
   schedule_id2?: string | null;
   assignment_id?: string | null;
@@ -2613,10 +2708,11 @@ export async function getOMSC_SchedulePresets(
 
 export async function updateOMSC(
   special_id: string,
-  payload: Partial<OMSpecialClassRow>
+  payload: Partial<OMSpecialClassRow>,
+  userId?: string | null
 ): Promise<{ ok: boolean; matched: number; modified: number }> {
   const { data } = await api.post(`/om/specialclass`, payload, {
-    params: { action: "update", specialId: special_id },
+    params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
@@ -2917,7 +3013,7 @@ export async function sendFacultyLoadAssignmentRfcMessage(
 
 export async function acceptFacultyLoadAssignment(
   userId: string,
-  payload: { term_id?: string; send_to_gcal?: boolean }
+  payload: { term_id?: string; send_to_gcal?: boolean; gcal_action?: "sync" | "cleanup" | "reset" }
 ) {
   const base = (typeof API_BASE !== "undefined" ? API_BASE : "").replace(/\/+$/, "");
   const url = `${base}/faculty/load-assignment/accept?userId=${encodeURIComponent(userId)}`;
@@ -3636,6 +3732,112 @@ export async function restoreFacultyService(
   >>
 ) {
   const { data } = await api.post(`/chair/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+// -----------------------------------------------------------------------------
+// OM mirror endpoints for Faculty Service
+// -----------------------------------------------------------------------------
+
+export async function getOMFSOptions(params?: {
+  q?: string;
+  toDepartment?: ToDept;
+  requesterDepartment?: string;
+  courseCode?: string;
+}) {
+  const sp = new URLSearchParams();
+  if (params?.q) sp.set("q", params.q);
+  if (params?.toDepartment) sp.set("toDepartment", params.toDepartment);
+  if (params?.requesterDepartment) sp.set("requesterDepartment", params.requesterDepartment);
+  if (params?.courseCode) sp.set("courseCode", params.courseCode);
+  const { data } = await api.get(`/om/faculty-service/options?${sp.toString()}`);
+  return data as {
+    ok: boolean;
+    courses: Array<{ code: string; title: string; units?: number }>;
+    sections?: Array<{ section_id: string; section_code: string }>;
+    departments: ToDept[];
+    timeBegins: string[];
+    days: DayShort[];
+    facultyOptions?: Array<{ faculty_id: string; first_name: string; last_name: string; email?: string; label: string }>;
+    activeTerm?: any;
+  };
+}
+
+export async function listOMFacultyService(params?: {
+  status?: string;
+  dept?: string;
+  search?: string;
+  box?: "sent" | "received";
+}) {
+  const sp = new URLSearchParams();
+  if (params?.status) sp.set("status", params.status);
+  if (params?.dept) sp.set("dept", params.dept);
+  if (params?.search) sp.set("search", params.search);
+  if (params?.box) sp.set("box", params.box);
+
+  const { data } = await api.get(`/om/faculty-service/list?${sp.toString()}`);
+  return data as { ok: boolean; rows: FacultyServiceRow[] };
+}
+
+export async function createOMFacultyService(payload: {
+  course_code: string;
+  section_id: string;
+  section?: string;
+  course_title?: string;
+  units?: number | null;
+  to_department: ToDept;
+  remarks?: string;
+  from_department?: string;
+}) {
+  const { data } = await api.post(`/om/faculty-service/create`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function sendOMFacultyService(fs_id: string) {
+  const { data } = await api.post(`/om/faculty-service/send/${encodeURIComponent(fs_id)}`);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function respondOMFacultyService(
+  fs_id: string,
+  payload: {
+    faculty: FacultyLite;
+    day1?: DayShort | "";
+    begin1?: string | "";
+    end1?: string | "";
+    day2?: DayShort | "";
+    begin2?: string | "";
+    end2?: string | "";
+    remarks?: string;
+  }
+) {
+  const { data } = await api.post(`/om/faculty-service/respond/${encodeURIComponent(fs_id)}`, payload);
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function rejectOMFacultyService(fs_id: string, payload?: { remarks?: string }) {
+  const { data } = await api.post(`/om/faculty-service/reject/${encodeURIComponent(fs_id)}`, payload || {});
+  return data as { ok: boolean; row: FacultyServiceRow };
+}
+
+export async function restoreOMFacultyService(
+  fs_id: string,
+  payload: Partial<
+    Pick<
+      FacultyServiceRow,
+      | "status"
+      | "faculty"
+      | "day1"
+      | "begin1"
+      | "end1"
+      | "day2"
+      | "begin2"
+      | "end2"
+      | "remarks"
+    >
+  >
+) {
+  const { data } = await api.post(`/om/faculty-service/restore/${encodeURIComponent(fs_id)}`, payload || {});
   return data as { ok: boolean; row: FacultyServiceRow };
 }
 

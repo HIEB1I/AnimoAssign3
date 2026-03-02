@@ -4,6 +4,8 @@ import re
 import asyncio
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, List
+from http.cookies import SimpleCookie
+from ..session import COOKIE_NAME, hash_session_token
 
 from pymongo import DESCENDING
 import socketio
@@ -72,6 +74,24 @@ _conv_user_counts: Dict[str, Dict[str, int]] = {}
 # - This is intentionally IN-MEMORY only. It does NOT persist drafts/changes.
 # - The existing Save/Approve flows remain the source of truth in Mongo.
 # ----------------------------
+def _find_user_by_session_hash(session_hash: str) -> Optional[Dict[str, Any]]:
+    col = get_collection("users")
+    session_hash = (session_hash or "").strip()
+    if not session_hash:
+        return None
+
+    now = datetime.utcnow()
+    return col.find_one(
+        {
+            "session.hash": session_hash,
+            "$or": [
+                {"session.expires_at": {"$gt": now}},
+                {"session.expires_at": {"$exists": False}},
+            ],
+        },
+        {"_id": 0, "user_id": 1, "email": 1, "gmail": 1, "session": 1},
+    )
+    
 LA_ROOM_PREFIX = "la:"
 _la_room_users: Dict[str, Dict[str, Dict[str, Any]]] = {}  # room -> user_id -> info
 _sid_la_rooms: Dict[str, set] = {}  # sid -> set(room)
@@ -796,29 +816,38 @@ async def connect(sid: str, environ: Dict[str, Any], auth: Optional[Dict[str, An
     """
     try:
         auth = auth or {}
-        user_id = str(auth.get("userId") or "").strip()
-        email = str(auth.get("email") or "").strip().lower()
 
-        if not user_id:
-            raise ConnectionRefusedError("Missing userId")
+        cookie_header = environ.get("HTTP_COOKIE", "") or ""
+        c = SimpleCookie()
+        c.load(cookie_header)
 
-        user = await run_in_threadpool(_find_user, user_id, email)
+        token = (c[COOKIE_NAME].value or "").strip() if COOKIE_NAME in c else ""
+        if not token:
+            raise ConnectionRefusedError("Missing session cookie")
+
+        sess_hash = hash_session_token(token)
+        user = await run_in_threadpool(_find_user_by_session_hash, sess_hash)
         if not user:
-            raise ConnectionRefusedError("Invalid userId")
+            raise ConnectionRefusedError("Invalid/expired session")
 
-        await sio.save_session(sid, {"userId": user_id})
+        user_id = str(user.get("user_id") or "").strip()
+        if not user_id:
+            raise ConnectionRefusedError("Invalid session user")
+
+        # optional: if client sends userId, it must match
+        client_user_id = str(auth.get("userId") or "").strip()
+        if client_user_id and client_user_id != user_id:
+            raise ConnectionRefusedError("User mismatch")
+
+        await sio.save_session(sid, {"userId": user_id, "sessionHash": sess_hash})
         await sio.enter_room(sid, f"{USER_ROOM_PREFIX}{user_id}")
 
-        # Track online presence (for Delivered status)
         _track_user_connect(user_id, sid)
-
-        logger.info(f"[socket] connect sid={sid} userId={user_id}")
         await sio.emit("socket:ready", {"ok": True, "userId": user_id}, to=sid)
 
     except ConnectionRefusedError:
         raise
-    except Exception as e:
-        logger.exception(f"[socket] connect failed sid={sid}: {e}")
+    except Exception:
         raise ConnectionRefusedError("Socket auth failed")
 
 
@@ -1404,3 +1433,19 @@ async def loadassignment_bulk_update(sid: str, data: Dict[str, Any]):
     payload = {"roomId": room_id, "rows": rows, "senderId": str(user_id)}
     await sio.emit("loadassignment_bulk_update", payload, room=room_id, skip_sid=sid)
     return {"ok": True}
+
+async def force_disconnect_user(user_id: str, reason: str = "SESSION_REVOKED") -> None:
+    user_id = (user_id or "").strip()
+    if not user_id:
+        return
+
+    sids = list(_user_sids.get(user_id, set()))
+    for sid in sids:
+        try:
+            await sio.emit("session_revoked", {"ok": True, "reason": reason}, to=sid)
+        except Exception:
+            pass
+        try:
+            await sio.disconnect(sid)
+        except Exception:
+            pass
