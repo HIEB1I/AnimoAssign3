@@ -7704,7 +7704,7 @@ async def post_course_offerings(
             "accepted_course_target_total": int(existing_total or 0),
             "preen_hash": preen_hash,
             "cohort_hash": cohort_hash,
-            "accepted_by": user_id,
+            "accepted_by": userId,
             "accepted_at": now(),
         }
 
