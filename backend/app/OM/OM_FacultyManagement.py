@@ -1,6 +1,7 @@
 # backend/app/OM/facultymanagement.py
 from typing import Any, Dict, List, Optional
-from datetime import datetime, timezone
+import re
+from datetime import datetime, timezone, date
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
 
@@ -159,22 +160,46 @@ def _normalize_certifications(raw: Any) -> List[str]:
 
 
 def _normalize_hire_date(hire_date_raw: Any) -> Optional[str]:
-    """Normalize hire/start date into YYYY-MM-DD string (or None)."""
+    """Normalize hire/start date into YYYY-MM-DD string (or None).
+
+    Accepts:
+      - datetime / date objects
+      - Mongo-style dicts like {"$date": "..."} or {"$date": 1710000000000}
+      - ISO strings like "2022-05-05T00:00:00+08:00" or "2022-05-05T00:00:00Z"
+      - Plain "YYYY-MM-DD" strings
+    """
     if hire_date_raw is None:
         return None
-    # already a datetime
+
+    # Mongo export patterns
+    if isinstance(hire_date_raw, dict) and "$date" in hire_date_raw:
+        hire_date_raw = hire_date_raw.get("$date")
+
+    # already a datetime/date
     if isinstance(hire_date_raw, datetime):
         return hire_date_raw.date().isoformat()
+    if isinstance(hire_date_raw, date):
+        return hire_date_raw.isoformat()
+
     s = str(hire_date_raw).strip()
     if not s:
         return None
+
+    # Fast path: take the date portion of ISO-like strings
+    m = re.match(r"^(\d{4}-\d{2}-\d{2})", s)
+    if m:
+        try:
+            return datetime.strptime(m.group(1), "%Y-%m-%d").date().isoformat()
+        except Exception:
+            pass
+
+    # Try to parse as ISO8601 datetime
     try:
-        dt = datetime.strptime(s, '%Y-%m-%d').date()
-        return dt.isoformat()
+        iso = s.replace("Z", "+00:00")  # Python fromisoformat doesn't accept 'Z'
+        dt = datetime.fromisoformat(iso)
+        return dt.date().isoformat()
     except Exception:
         return None
-
-
 def _teaching_years_from_hire_date(hire_date_str: Optional[str]) -> Optional[int]:
     """Compute whole-year teaching years from a YYYY-MM-DD hire date string."""
     if not hire_date_str:

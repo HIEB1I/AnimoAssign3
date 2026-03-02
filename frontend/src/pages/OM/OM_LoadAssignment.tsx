@@ -72,7 +72,6 @@ import {
   Play,
   RefreshCcw,
   Send,
-  CheckCheck,
   AlertTriangle,
   CalendarClock,
   Info,
@@ -2728,13 +2727,103 @@ export type OMLoadAssignmentProps = {
   embedded?: boolean;
   /** Hide the "Forward to Chair" workflow (used by CHAIR mirror). */
   hideForwardToChair?: boolean;
-  /** Show a Chair-only action button to send to Plantilla (used by CHAIR mirror). */
-  showToPlantilla?: boolean;
+  /** CHAIR-only: show "Export Excel" (Plantilla preview) action. */
+  chairExportExcel?: boolean;
+};
+
+/* ---------------- CHAIR: Plantilla preview/export (modal) ---------------- */
+type ChairPlantillaRow = {
+  rank?: string;
+  faculty_name: string;
+  course_code: string;
+  section_code: string;
+  day_text: string;
+  time_text: string;
+  room_text: string;
+  student_count: number | null;
+  lec_hours: number | null;
+  lab_hours: number | null;
+  student_units: number | null;
+  on_leave: string;
+  course_type: string;
+  nature_teaching: number | null;
+  nature_admin: number | null;
+  nature_research: number | null;
+  nature_faculty_units: number | null;
+  premium_grad: number | null;
+  premium_4th_prep: number | null;
+  premium_overload: number | null;
+  remarks: string;
+  source?: string | null; // e.g., "SPECIALCLASS"
+  source_id?: string | null;
+};
+
+type ChairPlantillaHeaderResp = {
+  ok: boolean;
+  term_label?: string;
+  dept_label?: string;
+  plantilla_file?: string;
+};
+
+const chairNormalizeDayLines = (s: string) => {
+  const toks = (s || "")
+    .toUpperCase()
+    .split(/[^A-Z]/g)
+    .filter(Boolean);
+
+  const map: Record<string, string> = {
+    M: "M",
+    T: "T",
+    W: "W",
+    H: "H",
+    TH: "H",
+    F: "F",
+    S: "S",
+    SU: "Su",
+    SUN: "Su",
+    SAT: "S",
+  };
+
+  const lines = toks.map((t) => map[t] ?? t.charAt(0));
+  return lines.filter((v, idx) => v && (idx === 0 || v !== lines[idx - 1]));
+};
+
+const ChairMultiLineCell: React.FC<{ lines: string[]; raw?: string }> = ({ lines, raw }) => {
+  const safe = (lines || []).map((l) => String(l || "").trim()).filter(Boolean);
+  if (safe.length === 0) return <span data-raw={raw}>—</span>;
+
+  return (
+    <span data-raw={raw} className="inline-block leading-tight">
+      {safe.map((l, idx) => (
+        <div key={idx}>{l}</div>
+      ))}
+    </span>
+  );
+};
+
+const ChairDayCell: React.FC<{ raw: string }> = ({ raw }) => (
+  <ChairMultiLineCell raw={raw} lines={chairNormalizeDayLines(raw)} />
+);
+
+const ChairTimeCell: React.FC<{ raw: string }> = ({ raw }) => {
+  const parts = String(raw || "")
+    .split("/")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return <ChairMultiLineCell raw={raw} lines={parts} />;
+};
+
+const ChairRoomCell: React.FC<{ raw: string }> = ({ raw }) => {
+  const parts = String(raw || "")
+    .split("/")
+    .map((p) => p.trim())
+    .filter(Boolean);
+  return <ChairMultiLineCell raw={raw} lines={parts} />;
 };
 
 export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
-  const { embedded = false, hideForwardToChair = false, showToPlantilla = false } = props;
+  const { embedded = false, hideForwardToChair = false, chairExportExcel = false } = props;
 
   const [onLeaveFacultyIds, setOnLeaveFacultyIds] = useState<string[]>([]);
   const onLeaveSet = useMemo(() => new Set(onLeaveFacultyIds), [onLeaveFacultyIds]);
@@ -2810,49 +2899,6 @@ export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   // In-app toast (styled to match Faculty pages)
   const { toast, show: showToast, clear: clearToast } = useToast();
 
-  // Custom confirm modal (replaces browser window.confirm for Forward/Re-forward)
-  const [confirmModal, setConfirmModal] = useState<{
-    open: boolean;
-    title: string;
-    variant?: "info" | "warning" | "danger";
-    message: React.ReactNode;
-    confirmText?: string;
-    cancelText?: string;
-    resolve?: (value: boolean) => void;
-  }>({ open: false, title: "", message: "" });
-
-  const openConfirm = useCallback(
-    (opts: {
-      title: string;
-      variant?: "info" | "warning" | "danger";
-      message: React.ReactNode;
-      confirmText?: string;
-      cancelText?: string;
-    }) =>
-      new Promise<boolean>((resolve) => {
-        setConfirmModal({
-          open: true,
-          title: opts.title,
-          variant: opts.variant ?? "info",
-          message: opts.message,
-          confirmText: opts.confirmText ?? "Continue",
-          cancelText: opts.cancelText ?? "Cancel",
-          resolve,
-        });
-      }),
-    []
-  );
-
-  const closeConfirm = useCallback((result: boolean) => {
-    setConfirmModal((prev) => {
-      try {
-        prev.resolve?.(result);
-      } finally {
-        return { open: false, title: "", message: "" };
-      }
-    });
-  }, []);
-
   // Session (same pattern as APO: localStorage["animo.user"])
   const session = useMemo(() => {
     try {
@@ -2868,6 +2914,306 @@ export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
     (session as any)?.user_id ||
     (session as any)?.id ||
     "";
+
+
+/* ---------------- CHAIR: Plantilla preview/export ---------------- */
+const [chairPlantillaOpen, setChairPlantillaOpen] = useState(false);
+const [chairPlantillaLoading, setChairPlantillaLoading] = useState(false);
+const [chairPlantillaHeader, setChairPlantillaHeader] = useState<ChairPlantillaHeaderResp | null>(null);
+const [chairPlantillaRows, setChairPlantillaRows] = useState<ChairPlantillaRow[]>([]);
+const chairPlantillaTableRef = useRef<HTMLTableElement | null>(null);
+
+const [chairPlantillaSearchInput, setChairPlantillaSearchInput] = useState("");
+const [chairPlantillaSearch, setChairPlantillaSearch] = useState("");
+
+useEffect(() => {
+  const t = setTimeout(() => setChairPlantillaSearch(chairPlantillaSearchInput.trim()), 250);
+  return () => clearTimeout(t);
+}, [chairPlantillaSearchInput]);
+
+const chairPlantillaFilteredRows = useMemo(() => {
+  const q = (chairPlantillaSearch || "").toLowerCase();
+  // "without the special class" => exclude SPECIALCLASS rows.
+  const base = (chairPlantillaRows || []).filter((r) => r?.source !== "SPECIALCLASS");
+  if (!q) return base;
+  return base.filter((r) => {
+    const name = String(r.faculty_name || "").toLowerCase();
+    const course = String(r.course_code || "").toLowerCase();
+    const section = String(r.section_code || "").toLowerCase();
+    return name.includes(q) || course.includes(q) || section.includes(q);
+  });
+}, [chairPlantillaRows, chairPlantillaSearch]);
+
+const chairPlantillaFilename =
+  (chairPlantillaHeader?.plantilla_file && String(chairPlantillaHeader.plantilla_file).replace(/\.pdf$/i, ".xls")) ||
+  "Faculty_Plantilla.xls";
+
+const openChairPlantillaPreview = useCallback(() => {
+  if (!userId) {
+    alert("Missing user session.");
+    return;
+  }
+  setChairPlantillaOpen(true);
+}, [userId]);
+
+const closeChairPlantillaPreview = useCallback(() => {
+  if (chairPlantillaLoading) return;
+  setChairPlantillaOpen(false);
+}, [chairPlantillaLoading]);
+
+// Fetch plantilla data when modal opens (copied from CHAIR_Plantilla; no dependency on that page).
+useEffect(() => {
+  if (!chairPlantillaOpen) return;
+
+  (async () => {
+    try {
+      setChairPlantillaLoading(true);
+
+      const hdrParams = new URLSearchParams();
+      hdrParams.set("userId", userId);
+      hdrParams.set("action", "header");
+      const rh = await fetch(`/api/chair/plantilla?${hdrParams.toString()}`);
+      const hdr = (await rh.json()) as ChairPlantillaHeaderResp;
+      if (hdr?.ok) setChairPlantillaHeader(hdr);
+      else setChairPlantillaHeader(null);
+
+      const rowsParams = new URLSearchParams();
+      rowsParams.set("userId", userId);
+      rowsParams.set("action", "fetch");
+      const rr = await fetch(`/api/chair/plantilla?${rowsParams.toString()}`);
+      const data = await rr.json();
+      if (data?.ok && Array.isArray(data.rows)) setChairPlantillaRows(data.rows as ChairPlantillaRow[]);
+      else setChairPlantillaRows([]);
+    } catch {
+      setChairPlantillaHeader(null);
+      setChairPlantillaRows([]);
+    } finally {
+      setChairPlantillaLoading(false);
+    }
+  })();
+}, [chairPlantillaOpen, userId]);
+
+const chairHandleExportExcel = useCallback(() => {
+  if (!chairPlantillaFilteredRows || chairPlantillaFilteredRows.length === 0) {
+    alert("No plantilla rows to export.");
+    return;
+  }
+
+  const headers = [
+    "Rank",
+    "Faculty",
+    "Course",
+    "Section",
+    "Day",
+    "Time",
+    "Room",
+    "No. of Students",
+    "Lecture Hours",
+    "Lab Hours",
+    "Student Unit(s)",
+    "On Leave",
+    "Type of Course",
+    "Teaching",
+    "Admin",
+    "Research",
+    "Faculty Unit(s)",
+    "Grad Load",
+    "Premium 4th Prep",
+    "Overload (NCA)",
+    "Remarks",
+  ];
+
+  const dataRows = (() => {
+    const table = chairPlantillaTableRef.current;
+    const bodyRows = table?.querySelectorAll("tbody tr") ?? [];
+
+    const visible: string[][] = [];
+    bodyRows.forEach((tr) => {
+      const tds = Array.from(tr.querySelectorAll("td"));
+      if (tds.length < headers.length) return;
+      visible.push(
+        tds.slice(0, headers.length).map((td, idx) => {
+          const el = td as HTMLElement;
+          const raw =
+            idx === 4 || idx === 5 || idx === 6
+              ? (el.innerText || el.textContent || "")
+              : (td.textContent || "");
+          return String(raw || "").trim();
+        })
+      );
+    });
+
+    if (visible.length > 0) return visible;
+
+    return chairPlantillaFilteredRows.map((r) => [
+      String(r.rank ?? ""),
+      String(r.faculty_name || ""),
+      String(r.course_code || ""),
+      String(r.section_code || ""),
+      chairNormalizeDayLines(String(r.day_text || "")).join("\n"),
+      String(r.time_text || "")
+        .split("/")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .join("\n"),
+      String(r.room_text || "")
+        .split("/")
+        .map((p) => p.trim())
+        .filter(Boolean)
+        .join("\n"),
+      String(r.student_count ?? ""),
+      String(r.lec_hours ?? ""),
+      String(r.lab_hours ?? ""),
+      String(r.student_units ?? ""),
+      String(r.on_leave || ""),
+      String(r.course_type || ""),
+      String(r.nature_teaching ?? ""),
+      String(r.nature_admin ?? ""),
+      String(r.nature_research ?? ""),
+      String(r.nature_faculty_units ?? ""),
+      String(r.premium_grad ?? ""),
+      String(r.premium_4th_prep ?? ""),
+      String(r.premium_overload ?? ""),
+      String(r.remarks || ""),
+    ]);
+  })();
+
+  const normalizeForExcel = (value: string, preserveNewlines: boolean) => {
+    let v = value ?? "";
+    if (v === "—") v = "";
+    v = v
+      .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
+      .replace(/[\u2018\u2019]/g, "'")
+      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/\u00A0/g, " ");
+
+    if (preserveNewlines) {
+      v = v.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, " ");
+      v = v
+        .split("\n")
+        .map((line) => line.replace(/\s+/g, " ").trim())
+        .filter(Boolean)
+        .join("\n");
+      return v;
+    }
+
+    v = v.replace(/[\r\n\t]/g, " ");
+    v = v.replace(/\s+/g, " ").trim();
+    return v;
+  };
+
+  const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+  const excelCss = `
+    table{border-collapse:collapse;}
+    th{border:2px solid #000;padding:4px;font-weight:700;text-align:center;vertical-align:top;}
+    td{padding:4px;vertical-align:top;border-left:1px solid #000;border-right:1px solid #000;}
+  `;
+
+  const facultyKeyByRow: string[] = [];
+  let lastFaculty = "";
+  dataRows.forEach((r) => {
+    const rawFaculty = String((r?.[1] ?? "") as string).trim();
+    if (rawFaculty) lastFaculty = rawFaculty;
+    facultyKeyByRow.push(lastFaculty);
+  });
+
+  const isGroupStart = (rowIdx: number) => rowIdx === 0 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx - 1];
+  const isGroupEnd = (rowIdx: number) =>
+    rowIdx === facultyKeyByRow.length - 1 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx + 1];
+
+  const groupRowSpan = (startIdx: number) => {
+    const key = facultyKeyByRow[startIdx];
+    let span = 1;
+    for (let i = startIdx + 1; i < facultyKeyByRow.length; i++) {
+      if (facultyKeyByRow[i] !== key) break;
+      span++;
+    }
+    return span;
+  };
+
+  const cellBorderStyle = (rowIdx: number, colIdx: number, colCount: number) => {
+    const start = isGroupStart(rowIdx);
+    const end = isGroupEnd(rowIdx);
+    const firstCol = colIdx === 0;
+    const lastCol = colIdx === colCount - 1;
+
+    const parts: string[] = [];
+    if (start) parts.push("border-top:2px solid #000");
+    if (end) parts.push("border-bottom:2px solid #000");
+    if (firstCol) parts.push("border-left:2px solid #000");
+    if (lastCol) parts.push("border-right:2px solid #000");
+
+    return parts.join(";");
+  };
+
+  let html =
+    '<html><head><meta charset="utf-8" />' + `<style>${excelCss}</style>` + '</head><body><table><thead><tr>';
+  headers.forEach((h) => {
+    html += `<th>${esc(String(h))}</th>`;
+  });
+  html += "</tr></thead><tbody>";
+
+  for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
+    const row = dataRows[rowIdx];
+    const start = isGroupStart(rowIdx);
+
+    html += "<tr>";
+
+    if (start) {
+      const span = groupRowSpan(rowIdx);
+
+      // Rank
+      {
+        const idx = 0;
+        const raw = row?.[idx] == null ? "" : String(row[idx]);
+        const normalized = normalizeForExcel(raw, false);
+        const safe = esc(normalized);
+        const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000", "border-left:2px solid #000"];
+        html += `<td rowspan="${span}" style="${parts.join(";")};">${safe}</td>`;
+      }
+
+      // Faculty
+      {
+        const idx = 1;
+        const raw = row?.[idx] == null ? "" : String(row[idx]);
+        const normalized = normalizeForExcel(raw, false);
+        const safe = esc(normalized);
+        const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000"];
+        html += `<td rowspan="${span}" style="${parts.join(";")};">${safe}</td>`;
+      }
+    }
+
+    for (let idx = 2; idx < headers.length; idx++) {
+      const cell = row?.[idx];
+      const raw = cell == null ? "" : String(cell);
+      const preserveNewlines = idx === 4 || idx === 5 || idx === 6;
+      const normalized = normalizeForExcel(raw, preserveNewlines);
+      const safe = preserveNewlines ? esc(normalized).replace(/\n/g, "<br/>") : esc(normalized);
+
+      const borderStyle = cellBorderStyle(rowIdx, idx, headers.length);
+      const extraStyle = borderStyle ? `${borderStyle};` : "";
+
+      html += preserveNewlines
+        ? `<td style="white-space:pre-wrap;${extraStyle}">${safe}</td>`
+        : `<td style="${extraStyle}">${safe}</td>`;
+    }
+
+    html += "</tr>";
+  }
+
+  html += "</tbody></table></body></html>";
+
+  const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = chairPlantillaFilename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}, [chairPlantillaFilteredRows, chairPlantillaFilename]);
 
 
 // Local tick for countdown display.
@@ -2914,36 +3260,17 @@ useEffect(() => {
       "Mode",
       "Campus",
     ];
-    const sample = [
-      [
-        "SHS-ENG1 - English 1",
-        3,
-        "A",
-        "M",
-        "08:00",
-        "09:30",
-        "R101",
-        "W",
-        "08:00",
-        "09:30",
-        "R101",
-        40,
-        "F2F",
-        "Manila",
-      ],
-    ];
-    const csv = [
-      headers.map(esc).join(","),
-      ...sample.map((r) => r.map(esc).join(",")),
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "om_shs_import_TEMPLATE.csv";
-    a.click();
-    URL.revokeObjectURL(url);
-  };
+
+  const csv = headers.map(esc).join(",") + "\n";
+
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "om_shs_import_TEMPLATE.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+};
 
   const splitCsvLine = (line: string): string[] => {
     const out: string[] = [];
@@ -4657,24 +4984,6 @@ const handleApplyPendingDrafts = useCallback(
     }
   };
 
-  // Chair-only action: send the current approved recommendations to Plantilla.
-  // Uses the same persistence flow as the OM forward action, but without chair notification.
-  const handleToPlantilla = async () => {
-    if (!userId) return;
-    try {
-      await submitOmLoadAssignment(
-        userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
-        "approve"
-      );
-      showToast("Sent to Plantilla.", "success");
-      await loadFromServer();
-      setApproved(true);
-    } catch (e: any) {
-      showToast(e?.message || "Failed to send to Plantilla.", "error");
-    }
-  };
-
   useEffect(() => {
     if (initialLoaded) return; // prevent double loading
     setInitialLoaded(true);
@@ -6171,127 +6480,43 @@ const courseCodeToInfo = useMemo(() => {
                 </div>
 
                 <div className="ml-auto flex items-center gap-2">
-                  {/* To Faculty button moved here (beside Refresh) */}
+                  {/* Forward to Chair removed; Save Draft shown here instead */}
                   <button
-                    disabled={!anySelected || !isRunning || isArchiveView}
-                    onClick={() => {
-                      if (isArchiveView) return;
-                      const preview = buildSendRowsForPreview();
-                      if (!preview.length) {
-                        showToast(
-                          "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
-                          "error"
-                        );
-                        return;
-                      }
-
-                      const missing = validateRowsCompleteForSend(preview);
-                      if (missing.length) {
-                        // Hard validation: block sending until required fields are filled
-                        setSendBlocked({ open: true, missing });
-                        showToast(
-                          "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
-                          "error"
-                        );
-                        return;
-                      }
-
-                      setSendRowsPreview(preview.map((r) => ({ ...r })));
-                      setShowSend(true);
-                    }}
+                    disabled={!hasReco || isArchiveView || omDeadlinePassed || isAssigning}
+                    onClick={handleSaveDraft}
                     className={cls(
-                      "inline-flex h-10 min-w-[110px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                      anySelected && isRunning && !isArchiveView
-                        ? "bg-blue-600 text-white hover:brightness-110"
-                        : "bg-gray-200 text-gray-500 cursor-not-allowed"
+                      "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      !(!hasReco || isArchiveView || omDeadlinePassed || isAssigning)
+                        ? "bg-gray-800 text-white hover:brightness-110"
+                        : "bg-gray-200 text-gray-400 cursor-not-allowed"
                     )}
                     title={
                       isArchiveView
-                        ? "Archived view: sending is disabled"
-                        : anySelected
-                        ? "Send to selected faculty"
-                        : "Select at least one row"
+                        ? "Archived view: saving is disabled"
+                        : omDeadlinePassed
+                        ? "Locked: deadline has passed"
+                        : !hasReco
+                        ? "No recommendations to save yet"
+                        : "Save current assignments to the database"
                     }
                   >
-                    <Send className="h-4 w-4" />
-                    To Faculty
+                    <Save className="h-4 w-4" />
+                    Save Draft
                   </button>
-                                    {(!hideForwardToChair || showToPlantilla) && (
+
+
+{chairExportExcel && (
   <button
-    // NOTE: `loading` is scoped to RequestChangeModal; use `isAssigning` + row states here.
-    disabled={!hasReco || isArchiveView || omDeadlinePassed || isAssigning}
+    type="button"
+    onClick={openChairPlantillaPreview}
     className={cls(
-      // Match the typography/size of the other toolbar controls
       "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-      !(!hasReco || isArchiveView || omDeadlinePassed || isAssigning)
-        ? "bg-emerald-600 text-white hover:bg-emerald-700" // enabled (GREEN)
-        : "bg-gray-200 text-gray-400 cursor-not-allowed" // disabled
+      "bg-blue-600 text-white hover:brightness-110"
     )}
-    title={
-      isArchiveView
-        ? "Archived view: sending is disabled"
-        : omDeadlinePassed
-        ? "Locked: deadline has passed"
-        : !hasReco
-        ? "No recommendations to send"
-        : hideForwardToChair
-        ? "Send to Plantilla"
-        : "Forward to Chair"
-    }
-    onClick={async () => {
-      if (isArchiveView) return;
-      if (omDeadlinePassed) return;
-
-      const targetLabel = hideForwardToChair ? "Plantilla" : "Chair";
-
-      // Soft-check only: allow sending even if some rows are incomplete.
-      const incomplete = rows.filter(isRowIncompleteForApproval);
-      if (incomplete.length > 0) {
-        const proceed = await openConfirm({
-          title: "Incomplete rows",
-          message: (
-            <div className="space-y-2 text-sm text-gray-700">
-              <p>
-                There are{" "}
-                <span className="font-semibold">{incomplete.length}</span>{" "}
-                row(s) with missing required fields (including{" "}
-                <span className="font-semibold">Mode</span>).
-              </p>
-              <p>
-                You can still send to the {targetLabel}, but incomplete rows may
-                not be actionable.
-              </p>
-            </div>
-          ),
-          confirmText: "Continue",
-          variant: "warning",
-        });
-        if (!proceed) return;
-      }
-
-      // Final confirm (keeps parity with existing forward flow)
-      const finalProceed = await openConfirm({
-        title: hideForwardToChair ? "Send to Plantilla?" : "Forward to Chair?",
-        message: (
-          <div className="space-y-2 text-sm text-gray-700">
-            <p>This will submit the current load recommendations for this term.</p>
-            <p className="font-medium">Continue?</p>
-          </div>
-        ),
-        confirmText: hideForwardToChair ? "Send" : "Forward",
-        variant: "info",
-      });
-      if (!finalProceed) return;
-
-      if (hideForwardToChair) {
-        void handleToPlantilla();
-      } else {
-        void handleForwardToChair();
-      }
-    }}
+    title="Preview the plantilla (regular classes only) then export as Excel (.xls)"
   >
-    <CheckCheck className="h-4 w-4" />
-    {hideForwardToChair ? "To Plantilla" : "Forward to Chair"}
+    <Download className="h-4 w-4" />
+    Export Excel
   </button>
 )}
 
@@ -6397,26 +6622,48 @@ const courseCodeToInfo = useMemo(() => {
                     )}
 
                     <button
-                      disabled={!hasReco || isArchiveView || allCampusesDeadlinePassed}
-                      onClick={handleSaveDraft}
+                      disabled={!anySelected || !isRunning || isArchiveView}
+                      onClick={() => {
+                        if (isArchiveView) return;
+                        const preview = buildSendRowsForPreview();
+                        if (!preview.length) {
+                          showToast(
+                            "No new or edited rows to send for the selected faculty. (Previously sent rows are excluded unless edited.)",
+                            "error"
+                          );
+                          return;
+                        }
+
+                        const missing = validateRowsCompleteForSend(preview);
+                        if (missing.length) {
+                          // Hard validation: block sending until required fields are filled
+                          setSendBlocked({ open: true, missing });
+                          showToast(
+                            "Cannot send to faculty: please complete all required fields in the selected faculty’s rows.",
+                            "error"
+                          );
+                          return;
+                        }
+
+                        setSendRowsPreview(preview.map((r) => ({ ...r })));
+                        setShowSend(true);
+                      }}
                       className={cls(
                         "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
-                        hasReco
-                          ? isArchiveView
-                            ? "bg-gray-200 text-gray-500 cursor-not-allowed"
-                            : "bg-gray-800 text-white hover:brightness-110"
+                        anySelected && isRunning && !isArchiveView
+                          ? "bg-blue-600 text-white hover:brightness-110"
                           : "bg-gray-200 text-gray-500 cursor-not-allowed"
                       )}
                       title={
                         isArchiveView
-                          ? "Archived view: saving is disabled"
-                          : !hasReco
-                          ? "No recommendations to save yet"
-                          : "Save current assignments to the database"
+                          ? "Archived view: sending is disabled"
+                          : anySelected
+                          ? "Send to selected faculty"
+                          : "Select at least one row"
                       }
                     >
-                      <Save className="h-4 w-4" />
-                      Save Draft
+                      <Send className="h-4 w-4" />
+                      To Faculty
                     </button>
 
                     {/* Original Import CSV block removed */}
@@ -8121,66 +8368,186 @@ const courseCodeToInfo = useMemo(() => {
           </div>
         </div>
       )}
-
-      {/* Custom confirmation modal (replaces browser confirm dialogs) */}
-      {confirmModal.open && (
-        <div
-          className="fixed inset-0 z-[9999] grid place-items-center bg-black/40 p-4"
-          role="dialog"
-          aria-modal="true"
-        >
-          <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl">
-            <div
-              className={cls(
-                "mx-auto mb-4 grid h-16 w-16 place-items-center rounded-full border-2",
-                confirmModal.variant === "danger"
-                  ? "border-rose-600 text-rose-700"
-                  : confirmModal.variant === "warning"
-                  ? "border-amber-600 text-amber-700"
-                  : "border-emerald-600 text-emerald-700"
-              )}
-            >
-              {confirmModal.variant === "info" ? (
-                <Send className="h-8 w-8" strokeWidth={2.5} />
-              ) : (
-                <AlertTriangle className="h-8 w-8" strokeWidth={2.5} />
-              )}
-            </div>
-
-            <h3 className="mb-2 text-center text-2xl font-semibold">
-              {confirmModal.title}
-            </h3>
-
-            <div className="mx-auto max-w-md text-center">
-              {confirmModal.message}
-            </div>
-
-            <div className="mt-6 flex justify-end gap-2">
-              <button
-                type="button"
-                onClick={() => closeConfirm(false)}
-                className="rounded-lg border border-neutral-300 bg-neutral-100 px-4 py-2 text-sm hover:bg-neutral-200"
-              >
-                {confirmModal.cancelText ?? "Cancel"}
-              </button>
-              <button
-                type="button"
-                onClick={() => closeConfirm(true)}
-                className={cls(
-                  "rounded-lg px-4 py-2 text-sm font-medium text-white hover:brightness-110",
-                  confirmModal.variant === "danger"
-                    ? "bg-rose-700"
-                    : confirmModal.variant === "warning"
-                    ? "bg-amber-700"
-                    : "bg-emerald-700"
-                )}
-              >
-                {confirmModal.confirmText ?? "Continue"}
-              </button>
-            </div>
-          </div>
+{chairExportExcel && chairPlantillaOpen && (
+  <div className="fixed inset-0 z-[95] flex items-center justify-center bg-black/50 px-3 py-6">
+    <div className="w-full max-w-screen-2xl h-[85vh] rounded-2xl bg-white shadow-2xl flex flex-col overflow-hidden">
+      <div className="flex items-start justify-between gap-4 border-b border-gray-200 px-5 py-4">
+        <div>
+          <h3 className="text-lg font-semibold text-gray-900">Confirm Export: Faculty Plantilla</h3>
+          <p className="mt-0.5 text-sm text-gray-600">
+            {chairPlantillaHeader?.dept_label ? chairPlantillaHeader.dept_label : "Department"}
+            {chairPlantillaHeader?.term_label ? ` · ${chairPlantillaHeader.term_label}` : ""}
+          </p>
         </div>
-      )}
+
+        <button
+          type="button"
+          onClick={closeChairPlantillaPreview}
+          className="inline-flex h-9 w-9 items-center justify-center bg-white text-sm font-semibold text-gray-700 hover:bg-gray-50"
+          title="Close"
+          aria-label="Close"
+        >
+          X
+        </button>
+      </div>
+
+      <div className="px-5 py-4 border-b border-gray-200 flex flex-wrap items-center gap-3">
+        <div className="relative flex-1 min-w-[240px]">
+          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+          <input
+            value={chairPlantillaSearchInput}
+            onChange={(e) => setChairPlantillaSearchInput(e.target.value)}
+            placeholder="Search faculty, course, or section…"
+            className="w-full rounded-lg border border-gray-300 pl-9 pr-10 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+          />
+          {chairPlantillaSearchInput.trim().length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                setChairPlantillaSearchInput("");
+                setChairPlantillaSearch("");
+              }}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded-md p-1 text-neutral-500 hover:bg-neutral-100 hover:text-neutral-700"
+              aria-label="Clear search"
+              title="Clear"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          )}
+        </div>
+
+        <button
+          type="button"
+          onClick={chairHandleExportExcel}
+          disabled={chairPlantillaLoading || chairPlantillaFilteredRows.length === 0}
+          className={cls(
+            "inline-flex items-center gap-2 rounded-lg px-5 py-2 text-sm font-medium text-white",
+            !(chairPlantillaLoading || chairPlantillaFilteredRows.length === 0)
+              ? "bg-blue-600 hover:brightness-110"
+              : "bg-gray-300 cursor-not-allowed"
+          )}
+          title="Export plantilla as Excel (.xls)"
+        >
+          <Download className="h-4 w-4" />
+          Export Excel
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 overflow-hidden px-5 py-4">
+        <div className="h-full w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+          <table
+            ref={chairPlantillaTableRef}
+            className="min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-top [&_td]:whitespace-normal [&_td]:break-words"
+          >
+            <colgroup>
+              <col className="w-[5rem]" />
+              <col className="w-[14rem]" />
+              <col className="w-[7.5rem]" />
+              <col className="w-[6rem]" />
+              <col className="w-[6.5rem]" />
+              <col className="w-[8rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[8rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[6.5rem]" />
+              <col className="w-[8rem]" />
+              <col className="w-[6.5rem]" />
+              <col className="w-[8rem]" />
+              <col className="w-[6.5rem]" />
+              <col className="w-[6.5rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[8rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[9rem]" />
+              <col className="w-[9rem]" />
+              <col className="w-[28rem]" />
+            </colgroup>
+
+            <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs">
+              <tr className="whitespace-nowrap text-[13px] font-semibold">
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Rank</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Faculty</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Course</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Section</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Day</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Time</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Room</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">No. of Students</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Lecture Hours</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Lab Hours</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Student Unit(s)</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">On Leave</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Type of Course</th>
+                <th colSpan={4} className="px-3 py-2 text-center border border-gray-300">NATURE OF LOAD</th>
+                <th colSpan={3} className="px-3 py-2 text-center border border-gray-300">PREMIUMS</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Remarks</th>
+              </tr>
+              <tr className="whitespace-nowrap text-[13px] font-semibold">
+                <th className="px-3 py-2 text-center border border-gray-300">Teaching</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Admin</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Research</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Faculty Unit(s)</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Grad Load</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Premium 4th Prep</th>
+                <th className="px-3 py-2 text-center border border-gray-300">Overload (NCA)</th>
+              </tr>
+            </thead>
+
+            <tbody>
+              {chairPlantillaLoading ? (
+                <tr>
+                  <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">Loading plantilla…</td>
+                </tr>
+              ) : chairPlantillaFilteredRows.length === 0 ? (
+                <tr>
+                  <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">
+                    {chairPlantillaRows.length === 0 ? "No plantilla to display." : "No matching results."}
+                  </td>
+                </tr>
+              ) : (
+                chairPlantillaFilteredRows.map((r, i) => (
+                  <tr key={i} className="hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200">
+                    <td className="px-3 py-2 text-center">{r.rank ?? ""}</td>
+                    <td className="px-3 py-2 text-left font-semibold text-emerald-700">
+                      {(() => {
+                        const prev = chairPlantillaFilteredRows[i - 1];
+                        const prevName = String(prev?.faculty_name || "").trim().toLowerCase();
+                        const curName = String(r.faculty_name || "").trim().toLowerCase();
+                        const show = i === 0 || prevName !== curName;
+                        if (!curName) return "—";
+                        return show ? r.faculty_name : "";
+                      })()}
+                    </td>
+                    <td className="px-3 py-2 text-center">{r.course_code || "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.section_code || "—"}</td>
+                    <td className="px-3 py-2 text-center whitespace-nowrap"><ChairDayCell raw={r.day_text || "—"} /></td>
+                    <td className="px-3 py-2 text-center whitespace-nowrap"><ChairTimeCell raw={r.time_text || "—"} /></td>
+                    <td className="px-3 py-2 text-center"><ChairRoomCell raw={r.room_text || ""} /></td>
+                    <td className="px-3 py-2 text-center">{r.student_count ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.lec_hours ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.lab_hours ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.student_units ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.on_leave || "N/A"}</td>
+                    <td className="px-3 py-2 text-center">{r.course_type || "N/A"}</td>
+                    <td className="px-3 py-2 text-center">{r.nature_teaching ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.nature_admin ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.nature_research ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.nature_faculty_units ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.premium_grad ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.premium_4th_prep ?? "—"}</td>
+                    <td className="px-3 py-2 text-center">{r.premium_overload ?? "—"}</td>
+                    <td className="px-3 py-2 text-left">{r.remarks || ""}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+)}
+
 
       {!hideForwardToChair && (
       <>

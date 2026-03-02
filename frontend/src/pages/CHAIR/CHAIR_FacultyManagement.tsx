@@ -243,6 +243,39 @@ function summarizeCertifications(certs: any): { display: string; full: string } 
   return { display: `${arr.slice(0, 2).join(", ")} +${arr.length - 2}`, full };
 }
 
+/**
+ * Display hire dates as: "January 1, 2008".
+ *
+ * Backend typically returns YYYY-MM-DD; we parse the date portion and format
+ * in a timezone-safe way (avoids UTC shifting).
+ */
+function formatHireDateDisplay(raw: any): string {
+  if (raw === null || raw === undefined) return "—";
+  const s = String(raw).trim();
+  if (!s) return "—";
+
+  // Prefer parsing the date-only portion to avoid timezone shifts.
+  const m = /^\d{4}-\d{2}-\d{2}/.exec(s);
+  let dt: Date | null = null;
+  if (m) {
+    const [y, mo, d] = m[0].split("-").map((n) => Number(n));
+    if (Number.isFinite(y) && Number.isFinite(mo) && Number.isFinite(d)) {
+      dt = new Date(y, mo - 1, d);
+    }
+  } else {
+    const t = Date.parse(s);
+    if (!Number.isNaN(t)) dt = new Date(t);
+  }
+
+  if (!dt || Number.isNaN(dt.getTime())) return s; // fallback keeps legacy values visible
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(dt);
+}
+
 /* ---------------- Add/Edit forms (CHAIR) ---------------- */
 type AddFacultyForm = {
   first_name: string;
@@ -779,13 +812,13 @@ try {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
-                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
-                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[10%] text-center px-4 py-2">Status</th>
-                  <th className="w-16 text-center px-2 py-2">Actions</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -802,13 +835,13 @@ try {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[30%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[22%] text-left px-4 py-2">Certifications</th>
-                  <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
-                  <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[10%] text-center px-4 py-2">Status</th>
-                  <th className="w-16 text-center px-2 py-2">Actions</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -835,13 +868,13 @@ try {
                   <table className="w-full table-fixed text-sm">
                     <thead className="bg-gray-50 border-b text-gray-900">
                       <tr>
-                        <th className="w-[30%] text-left px-4 py-2">Faculty</th>
-                        <th className="w-[12%] text-center px-4 py-2">Faculty Type</th>
-                        <th className="w-[22%] text-left px-4 py-2">Certifications</th>
-                        <th className="w-[12%] text-center px-4 py-2">Hire Date</th>
-                        <th className="w-[10%] text-center px-4 py-2">Teaching Years</th>
-                        <th className="w-[10%] text-center px-4 py-2">Status</th>
-                        <th className="w-16 text-center px-2 py-2">Actions</th>
+                        <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                        <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                        <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                       </tr>
                     </thead>
 
@@ -856,7 +889,7 @@ try {
                               : "bg-gray-100 text-gray-700";
 
                         const cert = summarizeCertifications((r as any).certifications);
-                        const hireDate = (r as any)?.hire_date ? String((r as any).hire_date) : "—";
+                        const hireDate = formatHireDateDisplay((r as any)?.hire_date);
 
                         return (
                           <tr key={r.faculty_id} className="hover:bg-gray-50">

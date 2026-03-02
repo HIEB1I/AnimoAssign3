@@ -7,6 +7,8 @@ from ..Notifications import create_notification
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import re
+import json
+import hashlib
 
 from html import escape as _html_escape
 
@@ -107,6 +109,41 @@ async def _room_label(room_id: str) -> str:
     return str(r.get("room_number") or r.get("room_name") or rid).strip() or rid
 
 
+def _room_signature_from_rows(rows: List[Dict[str, Any]]) -> str:
+    """Deterministic signature for the *room assignment* of a schedule.
+
+    Used to detect "rooms changed after acceptance" scenarios.
+    We only sign stable, relevant fields and return a short sha256 hex.
+    """
+
+    def _norm(v: Any) -> str:
+        return re.sub(r"\s+", "", str(v or "").strip().upper())
+
+    items: List[Dict[str, str]] = []
+    for rr in rows or []:
+        r = rr or {}
+        if bool(r.get("is_special_class")):
+            continue
+
+        sid = str(r.get("section_id") or r.get("sectionId") or "").strip()
+        items.append(
+            {
+                "section": _norm(sid),
+                "d1": _norm(r.get("day1")),
+                "t1": _norm(r.get("time1")),
+                "r1": _norm(r.get("room1")),
+                "d2": _norm(r.get("day2")),
+                "t2": _norm(r.get("time2")),
+                "r2": _norm(r.get("room2")),
+            }
+        )
+
+    # Stable ordering
+    items.sort(key=lambda x: (x.get("section") or "", x.get("d1") or "", x.get("t1") or "", x.get("d2") or "", x.get("t2") or ""))
+    payload = json.dumps(items, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def _overlaps(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
     """All args are HHMM strings."""
     try:
@@ -124,65 +161,6 @@ def _gcal_events_insert_url(calendar_id: str = "primary") -> str:
 def _gcal_event_url(event_id: str, calendar_id: str = "primary") -> str:
     return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events/{quote(str(event_id), safe='')}"
 
-# --- AnimoAssign GCal Sync tags (idempotent + cleanup) ---
-AA_APP_KEY = "aa_app"
-AA_APP_VAL = "animoassign"
-AA_TERM_KEY = "aa_term_id"
-AA_EVENT_KEY = "aa_event_key"
-AA_HASH_KEY = "aa_hash"
-
-AA_DESC_BEGIN = "<!-- ANIMOASSIGN BEGIN -->"
-AA_DESC_END = "<!-- ANIMOASSIGN END -->"
-
-import json
-import hashlib
-
-def _payload_bool(v: Any, default: bool) -> bool:
-    if v is None:
-        return default
-    if isinstance(v, bool):
-        return v
-    if isinstance(v, (int, float)):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in {"1", "true", "yes", "y", "on"}:
-            return True
-        if s in {"0", "false", "no", "n", "off"}:
-            return False
-    return bool(v)
-
-def _aa_event_key(course_code: str, section: str, meeting_idx: Optional[int] = None) -> str:
-    code = (course_code or "").strip()
-    sec = (section or "").strip()
-    if meeting_idx in (1, 2):
-        return f"|{code}|{sec}|M{int(meeting_idx)}|"
-    return f"|{code}|{sec}|"
-
-def _aa_managed_block(event_key: str, mode: str, room: str) -> str:
-    return (
-        f"{AA_DESC_BEGIN}\n"
-        f"AnimoAssign Calendar Sync\n"
-        f"Event: {event_key}\n"
-        f"Mode: {(mode or '').strip()}\n"
-        f"Room: {(room or '').strip()}\n"
-        f"{AA_DESC_END}"
-    )
-
-def _merge_description(existing: str, managed_block: str) -> str:
-    existing = existing or ""
-    if AA_DESC_BEGIN in existing and AA_DESC_END in existing:
-        pre = existing.split(AA_DESC_BEGIN, 1)[0]
-        post = existing.split(AA_DESC_END, 1)[1]
-        return (pre.rstrip() + "\n\n" + managed_block + "\n" + post.lstrip()).strip() + "\n"
-    return (existing.rstrip() + "\n\n" + managed_block).strip() + "\n"
-
-def _sync_hash(managed_fields: Dict[str, Any]) -> str:
-    s = json.dumps(managed_fields, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
-def _dt_to_rfc3339z(dt: datetime) -> str:
-    return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def _rfc3339(dt: datetime) -> str:
     """Convert datetime to RFC3339 string (UTC, with 'Z')."""
@@ -562,93 +540,6 @@ async def _insert_gcal_event(token: str, event_body: Dict[str, Any]) -> httpx.Re
         r = await client.post(url, headers=headers, json=event_body)
     return r
 
-def _gcal_events_url(calendar_id: str = "primary") -> str:
-    return f"https://www.googleapis.com/calendar/v3/calendars/{quote(calendar_id, safe='')}/events"
-
-def _gcal_event_url(event_id: str, calendar_id: str = "primary") -> str:
-    return f"{_gcal_events_url(calendar_id)}/{quote(event_id, safe='')}"
-
-async def _gcal_list_term_tagged_events(
-    token: str,
-    *,
-    term_id: str,
-    time_min: datetime,
-    time_max: datetime,
-    calendar_id: str = "primary",
-) -> List[Dict[str, Any]]:
-    url = _gcal_events_url(calendar_id)
-    headers = {"Authorization": f"Bearer {token}"}
-    params = [
-        ("timeMin", _dt_to_rfc3339z(time_min)),
-        ("timeMax", _dt_to_rfc3339z(time_max)),
-        ("singleEvents", "false"),
-        ("showDeleted", "false"),
-        ("maxResults", "2500"),
-        ("privateExtendedProperty", f"{AA_APP_KEY}={AA_APP_VAL}"),
-        ("privateExtendedProperty", f"{AA_TERM_KEY}={term_id}"),
-    ]
-
-    out: List[Dict[str, Any]] = []
-    page_token = None
-    async with httpx.AsyncClient(timeout=25) as client:
-        while True:
-            p = params + ([("pageToken", page_token)] if page_token else [])
-            r = await client.get(url, headers=headers, params=p)
-            if r.status_code >= 400:
-                raise Exception(r.text)
-            j = r.json()
-            out.extend(j.get("items") or [])
-            page_token = j.get("nextPageToken")
-            if not page_token:
-                break
-    return out
-
-async def _gcal_list_app_tagged_events(
-    token: str,
-    *,
-    time_min: datetime,
-    time_max: datetime,
-    calendar_id: str = "primary",
-) -> List[Dict[str, Any]]:
-    """Lists AnimoAssign-managed events in the time window even if they lack aa_term_id.
-    Used to migrate older events so future sync becomes true patch/update.
-    """
-    url = _gcal_events_url(calendar_id)
-    headers = {"Authorization": f"Bearer {token}"}
-    params = [
-        ("timeMin", _dt_to_rfc3339z(time_min)),
-        ("timeMax", _dt_to_rfc3339z(time_max)),
-        ("singleEvents", "false"),
-        ("showDeleted", "false"),
-        ("maxResults", "2500"),
-        ("privateExtendedProperty", f"{AA_APP_KEY}={AA_APP_VAL}"),
-    ]
-
-    out: List[Dict[str, Any]] = []
-    page_token = None
-    async with httpx.AsyncClient(timeout=25) as client:
-        while True:
-            p = params + ([("pageToken", page_token)] if page_token else [])
-            r = await client.get(url, headers=headers, params=p)
-            if r.status_code >= 400:
-                raise Exception(r.text)
-            j = r.json()
-            out.extend(j.get("items") or [])
-            page_token = j.get("nextPageToken")
-            if not page_token:
-                break
-    return out
-
-async def _gcal_patch_event(token: str, event_id: str, patch_body: Dict[str, Any]) -> httpx.Response:
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=25) as client:
-        return await client.patch(_gcal_event_url(event_id), headers=headers, json=patch_body)
-
-async def _gcal_delete_event(token: str, event_id: str) -> httpx.Response:
-    headers = {"Authorization": f"Bearer {token}"}
-    async with httpx.AsyncClient(timeout=25) as client:
-        return await client.delete(_gcal_event_url(event_id), headers=headers)
-    
 async def _create_term_calendar_for_user(
     *,
     user_id: str,
@@ -1000,383 +891,315 @@ async def _sync_term_calendar_for_user(
     term_start_at: datetime,
     term_end_at: Optional[datetime],
     rows: List[Dict[str, Any]],
-    action: str = "cleanup",              # "sync" | "cleanup" | "reset"
+    action: str = "cleanup",
     week_count: int = _TERM_WEEK_COUNT,
 ) -> Tuple[bool, Dict[str, int], Optional[str]]:
-    action = (action or "cleanup").lower().strip()
-    if action not in {"sync", "cleanup", "reset"}:
-        action = "cleanup"
+    """Sync faculty schedule rows into Google Calendar.
 
-    user = await db["users"].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
+    action:
+      - "sync"    : upsert events only (no deletions)
+      - "cleanup" : upsert + delete events that no longer exist in rows
+      - "reset"   : delete all AnimoAssign events for the term window, then recreate
+
+    Returns: (ok, stats, error)
+      stats = {created, updated, deleted, skipped}
+    """
+
+    stats: Dict[str, int] = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
+
+    user = await db[COL_USERS].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
     if not user:
-        return False, {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}, "User not found"
+        return False, stats, "User not found."
 
     gt = user.get("google_token") or {}
     access_token = (gt.get("access_token") or "").strip()
     refresh_token = (gt.get("refresh_token") or "").strip()
     if not access_token and not refresh_token:
-        return False, {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}, "No Google token (calendar scope required)."
+        return False, stats, "No Google token. Please login with Google again."
 
-    async def _ensure_token() -> str:
-        nonlocal access_token
-        if access_token:
-            return access_token
-        tokens = await _refresh_access_token(refresh_token)
-        access_token = (tokens.get("access_token") or "").strip()
-        if access_token:
-            await db["users"].update_one(
-                {"user_id": user_id},
-                {"$set": {"google_token.access_token": access_token, "google_token.updated_at": _now_utc()}},
-            )
-        return access_token
-
-    access_token = await _ensure_token()
-    if not access_token:
-        return False, {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}, "Unable to obtain Google access token."
+    action_norm = (action or "cleanup").strip().lower()
+    if action_norm not in {"sync", "cleanup", "reset"}:
+        action_norm = "cleanup"
 
     tzinfo = _pick_tzinfo()
-    term_start_local_date = _coerce_dt(term_start_at).astimezone(tzinfo).date()
+    term_start_at = _coerce_dt(term_start_at) or datetime.now(timezone.utc)
+    term_end_at = _coerce_dt(term_end_at) if term_end_at else None
 
-    start_dt = _coerce_dt(term_start_at)
-    end_dt = _coerce_dt(term_end_at) if term_end_at else None
-    time_min = start_dt - timedelta(days=21)
-    time_max = (end_dt + timedelta(days=21)) if end_dt else (start_dt + timedelta(days=120))
+    term_start_local_date = term_start_at.astimezone(tzinfo).date()
 
-    # strict term end: UNTIL (preferred)
-    if end_dt:
-        until_utc = end_dt.astimezone(timezone.utc).replace(hour=23, minute=59, second=59, microsecond=0)
-        rrule = f"RRULE:FREQ=WEEKLY;UNTIL={until_utc.strftime('%Y%m%dT%H%M%SZ')}"
+    # Window for event searches/deletions.
+    time_min = _rfc3339(term_start_at.astimezone(timezone.utc))
+    if term_end_at:
+        time_max_dt = term_end_at.astimezone(timezone.utc) + timedelta(days=7)
     else:
-        rrule = f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"
+        time_max_dt = term_start_at.astimezone(timezone.utc) + timedelta(days=int((week_count + 1) * 7))
+    time_max = _rfc3339(time_max_dt)
 
-    stats = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
+    async def _do_with_token(req_fn) -> Tuple[Optional[httpx.Response], Optional[str]]:
+        nonlocal access_token
 
-    # Pull existing events:
-    # - term-tagged (best)
-    # - app-tagged (for migrating older events that lack term tag)
-    existing_term_items = await _gcal_list_term_tagged_events(
-        access_token, term_id=calendar_term_id, time_min=time_min, time_max=time_max
-    )
-    existing_app_items = await _gcal_list_app_tagged_events(
-        access_token, time_min=time_min, time_max=time_max
-    )
+        # try current access token first
+        if access_token:
+            r = await req_fn(access_token)
+            if r is None:
+                return None, "Calendar request returned no response."
+            if r.status_code < 400:
+                return r, None
+            if r.status_code != 401:
+                return None, r.text
 
-    # Merge + de-dupe by event id
-    existing_map: Dict[str, Dict[str, Any]] = {}
-    for ev in (existing_term_items or []):
-        ev_id = ev.get("id")
-        if ev_id:
-            existing_map[ev_id] = ev
-    for ev in (existing_app_items or []):
-        ev_id = ev.get("id")
-        if ev_id and ev_id not in existing_map:
-            existing_map[ev_id] = ev
+        # refresh
+        if not refresh_token:
+            return None, "Access token expired and no refresh_token available. Reconnect Google."
 
-    def _base_key(course_code: str, section: str) -> str:
-        code = (course_code or "").strip()
-        sec = (section or "").strip()
-        return f"|{code}|{sec}|"
+        tokens = await _refresh_access_token(refresh_token)
+        new_access = (tokens.get("access_token") or "").strip()
+        if not new_access:
+            return None, "Failed to refresh Google access token."
 
-    def _meeting_key(course_code: str, section: str, meeting_idx: int) -> str:
-        return f"{_base_key(course_code, section)}M{int(meeting_idx)}|"
+        access_token = new_access
+        await db[COL_USERS].update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "google_token.access_token": new_access,
+                "google_token.updated_at": _now_utc(),
+                "google_token.expires_in": tokens.get("expires_in"),
+                "google_token.scope": tokens.get("scope"),
+            }},
+        )
 
-    def _base_key_from_event_key(ek: str) -> str:
-        toks = [t for t in (ek or "").split("|") if t]
-        if len(toks) >= 2:
-            return f"|{toks[0]}|{toks[1]}|"
-        return (ek or "").strip()
+        r2 = await req_fn(new_access)
+        if r2 is None:
+            return None, "Calendar request returned no response after refresh."
+        if r2.status_code < 400:
+            return r2, None
+        return None, r2.text
 
-    def _parse_iso_dt(s: Any) -> Optional[datetime]:
-        if not s:
-            return None
-        try:
-            ss = str(s).strip()
-            if ss.endswith("Z"):
-                ss = ss[:-1] + "+00:00"
-            return datetime.fromisoformat(ss)
-        except Exception:
-            return None
+    def _norm_key_part(v: Any) -> str:
+        return re.sub(r"\s+", "", str(v or "").strip().upper())
 
-    # Key maps (lists because duplicates already exist)
-    existing_by_key: Dict[str, List[Dict[str, Any]]] = {}
-    existing_by_base: Dict[str, List[Dict[str, Any]]] = {}
-    for ev in existing_map.values():
-        priv = ((ev.get("extendedProperties") or {}).get("private") or {})
-        ek = (priv.get(AA_EVENT_KEY) or "").strip()
-        if not ek:
-            continue
-        existing_by_key.setdefault(ek, []).append(ev)
-        existing_by_base.setdefault(_base_key_from_event_key(ek), []).append(ev)
+    def _aa_base_key(course_code: str, section: str) -> str:
+        # MUST match the key format used in _create_term_calendar_for_user
+        return (
+            f"{_norm_key_part(calendar_term_id)}|{_norm_key_part(user_id)}|regular|"
+            f"{_norm_key_part(course_code)}|{_norm_key_part(section)}"
+        )
 
-    used_event_ids: set[str] = set()
-
-    def _pick_best(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not cands:
-            return None
-
-        # Prefer those already used/selected in this run
-        used = [e for e in cands if (e.get("id") or "") in used_event_ids]
-        pool = used if used else cands
-
-        def _score(ev: Dict[str, Any]) -> str:
-            return str(ev.get("updated") or ev.get("created") or "")
-        pool = sorted(pool, key=_score, reverse=True)
-        return pool[0] if pool else None
-
-    def _pick_keep_for_dedupe(cands: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
-        if not cands:
-            return None
-        # Prefer one that we actually touched in this run; else newest
-        touched = [e for e in cands if (e.get("id") or "") in used_event_ids]
-        return _pick_best(touched if touched else cands)
-
-    def _find_migration_candidate(base_key: str, desired_start_iso: str) -> Optional[Dict[str, Any]]:
-        cands = existing_by_base.get(base_key, []) or []
-        if not cands:
-            return None
-
-        desired_dt = _parse_iso_dt(desired_start_iso)
-        if not desired_dt:
-            return _pick_best(cands)
-
-        best = None
-        best_diff = None
-        for ev in cands:
-            ev_id = ev.get("id") or ""
-            if ev_id in used_event_ids:
-                continue
-            ev_start = (ev.get("start") or {}).get("dateTime")
-            ev_dt = _parse_iso_dt(ev_start)
-            if not ev_dt:
-                continue
-            diff = abs((ev_dt - desired_dt).total_seconds())
-            if best is None or diff < best_diff:
-                best = ev
-                best_diff = diff
-
-        # Accept match if within 10 minutes
-        if best is not None and (best_diff is not None) and best_diff <= 600:
-            return best
-        return None
-
-    desired_keys: set[str] = set()
-    desired_base_keys: set[str] = set()
-
-    def _make_payload(rr: Dict[str, Any], meeting_idx: int, day_key: str, time_key: str, room_key: str):
-        course_code = rr.get("course_code") or rr.get("course") or ""
-        section = rr.get("section") or ""
-        mode = rr.get("mode") or ""
-
-        hm = _parse_time_band_to_hm(rr.get(time_key) or "")
+    def _make_event(
+        *,
+        course_code: str,
+        section: str,
+        day_full: str,
+        time_band: str,
+        room: str,
+        mode: str,
+        meeting_suffix: str,
+    ) -> Optional[Dict[str, Any]]:
+        hm = _parse_time_band_to_hm(time_band)
         if not hm:
             return None
 
         (sh, sm), (eh, em) = hm
-        day_full = _to_full_day(rr.get(day_key) or "")
-        wd = _WEEKDAY_IDX.get(day_full)
+        day_full2 = _to_full_day(day_full)
+        wd = _WEEKDAY_IDX.get(day_full2)
         if wd is None:
             return None
 
         first_date = _first_date_on_or_after(term_start_local_date, wd)
-        start_dt_local = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
-        end_dt_local = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
-
-        bk = _base_key(course_code, section)
-        ek = _meeting_key(course_code, section, meeting_idx)
-
-        desired_base_keys.add(bk)
-        desired_keys.add(ek)
+        start_dt = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
+        end_dt = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
 
         title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
-        location = (str(rr.get(room_key) or "Online")).strip() or "Online"
+        location = (room or "").strip() or "Online"
+        base_key = _aa_base_key(course_code, section)
+        aa_key = f"{base_key}|{meeting_suffix}"
 
-        managed_fields = {
+        desc_lines = [
+            f"Mode: {(mode or '').strip()}",
+            "Created by AnimoAssign.",
+            "AA_KIND: regular",
+            f"Login: {_aa_login_link()}",
+        ]
+
+        return {
             "summary": title,
             "location": location,
-            "start": {"dateTime": start_dt_local.isoformat(), "timeZone": _DEFAULT_TZ},
-            "end": {"dateTime": end_dt_local.isoformat(), "timeZone": _DEFAULT_TZ},
-            "recurrence": [rrule],
+            "description": "\n".join(desc_lines),
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
+            "extendedProperties": {
+                "private": {
+                    "aa_app": "AnimoAssign",
+                    "aa_user": str(user_id),
+                    "aa_kind": "regular",
+                    "aa_term": str(calendar_term_id),
+                    "aa_key": aa_key,
+                }
+            },
         }
-        h = _sync_hash(managed_fields)
-        managed_block = _aa_managed_block(ek, mode, location)
 
-        private_props = {
-            AA_APP_KEY: AA_APP_VAL,
-            AA_TERM_KEY: calendar_term_id,     # critical for future updates
-            AA_EVENT_KEY: ek,                  # M1/M2 unique key
-            AA_HASH_KEY: h,
+    async def _upsert_by_key(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        aa_key = str((((event_body.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip()
+        if not aa_key:
+            stats["skipped"] += 1
+            return True, None
+
+        # Find master recurring event by aa_key
+        r, err = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_key": aa_key},
+                single_events=False,
+            )
+        )
+        if err:
+            return False, err
+
+        items = (r.json() or {}).get("items", []) if r is not None else []
+        items = [
+            ev
+            for ev in (items or [])
+            if str((((ev.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip() == aa_key
+        ]
+
+        if not items:
+            r2, err2 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            if err2:
+                return False, err2
+            stats["created"] += 1
+            return True, None
+
+        primary_id = str(items[0].get("id") or "").strip()
+        if not primary_id:
+            r3, err3 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            if err3:
+                return False, err3
+            stats["created"] += 1
+            return True, None
+
+        patch_body = {
+            "summary": event_body.get("summary"),
+            "location": event_body.get("location"),
+            "description": event_body.get("description"),
+            "start": event_body.get("start"),
+            "end": event_body.get("end"),
+            "recurrence": event_body.get("recurrence"),
+            "extendedProperties": event_body.get("extendedProperties"),
         }
-        return ek, managed_fields, private_props, managed_block
+        r4, err4 = await _do_with_token(lambda tok: _patch_gcal_event(tok, primary_id, patch_body))
+        if err4:
+            return False, err4
+        stats["updated"] += 1
 
-    async def _delete_event(ev: Dict[str, Any]) -> Optional[str]:
-        ev_id = ev.get("id")
-        if not ev_id:
-            return None
-        rdel = await _gcal_delete_event(access_token, ev_id)
-        if rdel.status_code < 400 or rdel.status_code == 404:
-            stats["deleted"] += 1
-            return None
-        return rdel.text
-
-    # reset: delete this term’s AnimoAssign events (and only legacy events that match this schedule base keys)
-    if action == "reset":
-        # Build base keys first so we don't wipe unrelated legacy events lacking aa_term_id
-        for rr in rows or []:
-            cc = rr.get("course_code") or rr.get("course") or ""
-            sec = rr.get("section") or ""
-            if cc and sec:
-                desired_base_keys.add(_base_key(cc, sec))
-
-        for ev in list(existing_map.values()):
-            priv = ((ev.get("extendedProperties") or {}).get("private") or {})
-            ev_term = str(priv.get(AA_TERM_KEY) or "").strip()
-            ek = (priv.get(AA_EVENT_KEY) or "").strip()
-            if not ek:
+        # Delete duplicates (best-effort)
+        for ev in items[1:]:
+            eid = str(ev.get("id") or "").strip()
+            if not eid or eid == primary_id:
                 continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if not derr:
+                stats["deleted"] += 1
 
-            # Protect other terms
-            if ev_term and ev_term != calendar_term_id:
+        return True, None
+
+    # RESET: remove all existing events for term window, then recreate
+    if action_norm == "reset":
+        r0, err0 = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_term": str(calendar_term_id), "aa_kind": "regular"},
+                single_events=False,
+            )
+        )
+        if err0:
+            return False, stats, err0
+        for ev in (r0.json() or {}).get("items", []) if r0 is not None else []:
+            eid = str(ev.get("id") or "").strip()
+            if not eid:
                 continue
-
-            # If legacy (no term tag), only delete if it matches this schedule's base keys
-            if (not ev_term) and (_base_key_from_event_key(ek) not in desired_base_keys):
-                continue
-
-            derr = await _delete_event(ev)
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
             if derr:
                 return False, stats, derr
+            stats["deleted"] += 1
 
-        existing_map = {}
-        existing_by_key = {}
-        existing_by_base = {}
-
-        # Continue to upsert fresh after reset
-        action = "cleanup"
-
-    # Upsert: patch existing or insert new; migrate legacy by base key + start time
+    # Upsert all rows
+    expected_keys: set[str] = set()
     for rr in rows or []:
-        for out in (
-            _make_payload(rr, 1, "day1", "time1", "room1"),
-            _make_payload(rr, 2, "day2", "time2", "room2"),
-        ):
-            if not out:
+        r = rr or {}
+        course_code = r.get("course_code") or r.get("course") or ""
+        section = r.get("section") or ""
+        mode = r.get("mode") or ""
+
+        # Meeting 1
+        ev1 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=r.get("day1") or "",
+            time_band=r.get("time1") or "",
+            room=str(r.get("room1") or "TBA"),
+            mode=mode,
+            meeting_suffix="M1",
+        )
+        if ev1:
+            expected_keys.add(str((((ev1.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip())
+            ok1, err1 = await _upsert_by_key(ev1)
+            if not ok1:
+                return False, stats, err1
+        else:
+            stats["skipped"] += 1
+
+        # Meeting 2 (optional)
+        ev2 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=r.get("day2") or "",
+            time_band=r.get("time2") or "",
+            room=str(r.get("room2") or r.get("room1") or "TBA"),
+            mode=mode,
+            meeting_suffix="M2",
+        )
+        if ev2:
+            expected_keys.add(str((((ev2.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip())
+            ok2, err2 = await _upsert_by_key(ev2)
+            if not ok2:
+                return False, stats, err2
+
+    # CLEANUP: delete events not present anymore
+    if action_norm == "cleanup":
+        r1, err1 = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_term": str(calendar_term_id), "aa_kind": "regular"},
+                single_events=False,
+            )
+        )
+        if err1:
+            return False, stats, err1
+        for ev in (r1.json() or {}).get("items", []) if r1 is not None else []:
+            priv = ((ev.get("extendedProperties") or {}).get("private") or {}) if isinstance(ev.get("extendedProperties"), dict) else {}
+            aa_key = str(priv.get("aa_key") or "").strip()
+            aa_user = str(priv.get("aa_user") or "").strip()
+            if not aa_key or aa_user != str(user_id):
                 continue
-
-            event_key, managed_fields, private_props, managed_block = out
-
-            # 1) direct match (new key)
-            existing = _pick_best(existing_by_key.get(event_key, []) or [])
-
-            # 2) migrate legacy event (old key or missing term tag)
-            if not existing:
-                course_code = rr.get("course_code") or rr.get("course") or ""
-                section = rr.get("section") or ""
-                base_k = _base_key(course_code, section)
-                existing = _find_migration_candidate(base_k, managed_fields["start"]["dateTime"])
-
-            if existing:
-                ev_id = existing.get("id")
-                if ev_id:
-                    used_event_ids.add(ev_id)
-
-                priv = ((existing.get("extendedProperties") or {}).get("private") or {})
-                old_hash = (priv.get(AA_HASH_KEY) or "").strip()
-
-                # already up to date
-                if old_hash == private_props[AA_HASH_KEY]:
-                    stats["skipped"] += 1
-                    continue
-
-                existing_desc = existing.get("description") or ""
-                patch_body = dict(managed_fields)
-                patch_body["description"] = _merge_description(existing_desc, managed_block)
-                patch_body["extendedProperties"] = {"private": {**priv, **private_props}}
-
-                rpatch = await _gcal_patch_event(access_token, existing["id"], patch_body)
-                if rpatch.status_code < 400:
-                    stats["updated"] += 1
-
-                    # Update local maps so cleanup doesn't delete migrated/updated events
-                    try:
-                        updated_ev = rpatch.json()
-                        if isinstance(updated_ev, dict) and updated_ev.get("id"):
-                            existing_map[updated_ev["id"]] = updated_ev
-                            existing = updated_ev
-                    except Exception:
-                        # fallback: keep our patched shape
-                        existing["extendedProperties"] = patch_body["extendedProperties"]
-                        existing["description"] = patch_body["description"]
-                        existing["start"] = patch_body["start"]
-                        existing["end"] = patch_body["end"]
-                        existing["recurrence"] = patch_body.get("recurrence")
-
-                    # refresh indexes for this event_key
-                    existing_by_key.setdefault(event_key, []).append(existing)
-                    base_for_index = _base_key_from_event_key(event_key)
-                    existing_by_base.setdefault(base_for_index, []).append(existing)
-                else:
-                    return False, stats, rpatch.text
-
-            else:
-                insert_body = dict(managed_fields)
-                insert_body["description"] = _merge_description("", managed_block)
-                insert_body["extendedProperties"] = {"private": private_props}
-
-                rins = await _insert_gcal_event(access_token, insert_body)
-                if rins.status_code < 400:
-                    stats["created"] += 1
-                    try:
-                        created = rins.json()
-                        if isinstance(created, dict) and created.get("id"):
-                            existing_map[created["id"]] = created
-                            existing_by_key.setdefault(event_key, []).append(created)
-                            existing_by_base.setdefault(_base_key_from_event_key(event_key), []).append(created)
-                    except Exception:
-                        pass
-                else:
-                    return False, stats, rins.text
-
-    # Cleanup: delete any AnimoAssign-managed events in the window NOT matching desired keys.
-    # Also dedupe: if multiple exist for the same desired key, keep one and delete the rest.
-    if action == "cleanup":
-        # Rebuild key->events from existing_map after upserts (includes migrated/created)
-        key_to_events: Dict[str, List[Dict[str, Any]]] = {}
-        for ev in (existing_map.values() or []):
-            priv = ((ev.get("extendedProperties") or {}).get("private") or {})
-            ek = (priv.get(AA_EVENT_KEY) or "").strip()
-            if not ek:
+            if aa_key in expected_keys:
                 continue
-            key_to_events.setdefault(ek, []).append(ev)
-
-        for ek, evs in (key_to_events or {}).items():
-            # Protect other terms: if term tag exists and is not this term, never touch it
-            priv0 = ((evs[0].get("extendedProperties") or {}).get("private") or {})
-            ev_term = str(priv0.get(AA_TERM_KEY) or "").strip()
-            if ev_term and ev_term != calendar_term_id:
+            eid = str(ev.get("id") or "").strip()
+            if not eid:
                 continue
-
-            # If legacy (no term tag), only touch if it matches this schedule base keys
-            if (not ev_term) and (_base_key_from_event_key(ek) not in desired_base_keys):
-                continue
-
-            if ek in desired_keys:
-                # Deduplicate: keep 1, delete extras
-                keep = _pick_keep_for_dedupe(evs)
-                keep_id = (keep.get("id") if keep else None)
-                for ev in evs:
-                    if keep_id and ev.get("id") == keep_id:
-                        continue
-                    derr = await _delete_event(ev)
-                    if derr:
-                        return False, stats, derr
-            else:
-                # Not desired for this term schedule -> delete
-                for ev in evs:
-                    derr = await _delete_event(ev)
-                    if derr:
-                        return False, stats, derr
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if derr:
+                return False, stats, derr
+            stats["deleted"] += 1
 
     return True, stats, None
+
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
 
@@ -1852,31 +1675,6 @@ async def _apply_section_rooms_to_row(row: Dict[str, Any], section_id: str) -> N
     else:
         # Keep consistent with the schema used elsewhere: None when no 2nd meeting.
         row["room2"] = None
-        
-def _room_signature_from_rows(rows: List[Dict[str, Any]]) -> str:
-    """Stable signature of room assignments (room1/room2) per section."""
-    items: List[Dict[str, str]] = []
-    for r in (rows or []):
-        if not isinstance(r, dict):
-            continue
-        if bool(r.get("is_special_class")):
-            continue
-
-        k = str(r.get("section_id") or r.get("sectionId") or "").strip()
-        if not k:
-            code = str(r.get("course_code") or r.get("course") or "").strip()
-            sec = str(r.get("section") or r.get("section_code") or "").strip()
-            k = f"{code}:{sec}".strip(":")
-
-        room1 = str(r.get("room1") or "").strip() or "TBA"
-        room2 = r.get("room2")
-        room2s = str(room2 or "").strip() if room2 not in (None, "") else ""
-
-        items.append({"k": k, "room1": room1, "room2": room2s})
-
-    items.sort(key=lambda x: x.get("k", ""))
-    raw = json.dumps(items, separators=(",", ":"), ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 async def _fetch_reflected_faculty_service_rows_for_faculty(
     *,
@@ -2622,6 +2420,14 @@ async def overview_handler(
         max_preps = faculty.get("max_preps")
         teaching_years = faculty.get("teaching_years")
         certifications = faculty.get("certifications") or []
+        hire_date = faculty.get("hire_date")
+        if isinstance(hire_date, datetime):
+            hire_date = hire_date.date().isoformat()
+        elif hasattr(hire_date, "isoformat") and not isinstance(hire_date, str):
+            try:
+                hire_date = hire_date.isoformat()
+            except Exception:
+                pass
 
         # Qualified KACs (include course list with code + title)
         kac_ids = faculty.get("qualified_kacs") or []
@@ -2686,6 +2492,9 @@ async def overview_handler(
             "faculty": {
                 "full_name": full_name,
                 "fullName": full_name,
+                "first_name": first,
+                "last_name": last,
+                "email": _pick(user_doc.get("email"), faculty.get("email")), 
                 "role": "Faculty",
                 "department": (dept or {}).get("dept_name", "—"),
 
@@ -2694,6 +2503,7 @@ async def overview_handler(
                 "min_units": min_units,
                 "max_preps": max_preps,
                 "teaching_years": teaching_years,
+                "hire_date": hire_date,
                 "certifications": certifications,
                 "qualified_kacs": qualified_kacs_details,
             },
@@ -3196,7 +3006,6 @@ async def overview_handler(
         proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_doc = await db[COL_LOAD_RFC].find_one({"faculty_id": faculty_id, "term_id": term_id}, {"_id": 0}) or None
         rfc_norm = _normalize_rfc_doc(rfc_doc) if rfc_doc else None
-        room_changed_since_accept = False
 
         # IMPORTANT BEHAVIOR CHANGE:
         # - If this is a PLANNING term (next/upcoming term) and OM has NOT forwarded a proposal yet,
@@ -3328,30 +3137,7 @@ async def overview_handler(
                     except Exception:
                         # Non-fatal: keep proposal payload rooms if refresh fails.
                         pass
-                # --- Detect room changes since last acceptance (rooms only) ---
-                try:
-                    accepted_sig = str((proposal or {}).get("accepted_room_sig") or "").strip()
 
-                    # Backfill baseline for older accepts where signature was never stored (or stored as empty string).
-                    if (not accepted_sig) and proposal_status_l in ("approved", "accepted") and isinstance((proposal or {}).get("rows"), list):
-                        accepted_sig = _room_signature_from_rows((proposal or {}).get("rows") or [])
-                        if accepted_sig:
-                            await db[COL_LOAD_PROPOSALS].update_one(
-                                {"faculty_id": faculty_id, "term_id": term_id},
-                                {"$set": {
-                                    "accepted_room_sig": accepted_sig,
-                                    "accepted_room_sig_at": _now_utc(),
-                                    "updated_at": _now_utc(),
-                                }},
-                            )
-
-                    if accepted_sig and proposal_status_l in ("approved", "accepted"):
-                        room_changed_since_accept = (_room_signature_from_rows(final_teaching_load) != accepted_sig)
-                    else:
-                        room_changed_since_accept = False
-                except Exception:
-                    room_changed_since_accept = False
-                    
                 # Faculty-side label:
                 # - Locked -> Finalized
                 # - Accepted/approved -> Accepted
@@ -3449,7 +3235,6 @@ async def overview_handler(
         "proposal_status": proposal_status,
         "rfc": rfc_norm,
         "schedule_final": schedule_final,
-        "room_changed_since_accept": room_changed_since_accept,
     }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
@@ -4257,6 +4042,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
         {"_id": 0, "email": 1, "gmail": 1, "google_token": 1, "first_name": 1, "last_name": 1},
     ) or {}
 
+    # Calendar checkbox flag (default True = keeps current behavior)
     send_to_gcal = _payload_bool(payload.get("send_to_gcal", True), True)
 
     # Special Class tab uses this flag to sync without accepting/locking the schedule.
@@ -4273,6 +4059,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
     if not term_id:
         term = await _active_term()
         term_id = (term or {}).get("term_id")
+
     if not term_id:
         raise HTTPException(status_code=409, detail="No active/upcoming term")
 
@@ -4546,28 +4333,14 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
 
         return {
             "ok": True,
-            "status": "ACCEPTED",
-
-            "email_sent": email_sent,
-            "email_error": email_error,
-
-            "om_mailbox_email": OM_NOTIFY_EMAIL,
-            "om_mailbox_sent": om_mailbox_sent,
-            "om_mailbox_error": om_mailbox_error,
-
-            "send_to_gcal": send_to_gcal,
-            "gcal_action": gcal_action,
-
+            "status": "SYNC_ONLY",
+            "send_to_gcal": True,
             "calendar_ok": calendar_ok,
+            "calendar_events_created": calendar_events_created,
             "calendar_error": calendar_error,
             "calendar_term_id": calendar_term_id,
             "term_start_at": (term_start_at.isoformat() if term_start_at else None),
-            "calendar_url_used": _gcal_events_insert_url("primary"),
-
-            "calendar_created": created,
-            "calendar_updated": updated,
-            "calendar_deleted": deleted,
-            "calendar_skipped": skipped,
+            "week_count": week_count,
         }
 
     proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
@@ -4650,8 +4423,6 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                 "status": "approved",
                 "locked": True,
                 "accepted_at": _now_utc(),
-                "accepted_room_sig": accepted_room_sig,
-                "accepted_room_sig_at": _now_utc(),
                 "updated_at": _now_utc(),
             },
             "$setOnInsert": {"created_at": _now_utc()},

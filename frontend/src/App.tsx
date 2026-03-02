@@ -40,6 +40,7 @@ import OM_RP_LoadRisk from "@/pages/OM/OM_REPORTS_ANALYTICS/OM_RP_LoadRisk";
 import STUDENT_Petition from "./pages/STUDENT/STUDENT_Petition";
 import STUDENT_SpecialClass from "./pages/STUDENT/STUDENT_SpecialClass";
 import STUDENT_CourseOfferings from "./pages/STUDENT/STUDENT_CourseOfferings";
+import STUDENT_Inbox from "./pages/STUDENT/STUDENT_Inbox";
 
 // ---------------- Faculty ----------------
 import FACULTY_Overview from "./pages/FACULTY/FACULTY_Overview";
@@ -47,6 +48,7 @@ import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
 import FACULTY_History from "./pages/FACULTY/FACULTY_History";
 import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
 import FACULTY_Deloadings from "./pages/FACULTY/FACULTY_Deloadings";
+import FACULTY_Profile from "./pages/FACULTY/FACULTY_Profile";
 
 // ---------------- Admin ----------------
 import ADMIN from "./pages/ADMIN/ADMIN";
@@ -189,6 +191,7 @@ export default function App() {
           <Route path="/student/petition" element={<STUDENT_Petition />} />
           <Route path="/student/specialclass" element={<STUDENT_SpecialClass />} />
           <Route path="/student/courseofferings" element={<STUDENT_CourseOfferings />} />
+          <Route path="/student/inbox" element={<STUDENT_Inbox />} />
 
           {/* APO */}
           <Route path="/apo/preenlistment" element={<APO_PreEnlistment />} />
@@ -198,6 +201,7 @@ export default function App() {
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
+          <Route path="/faculty/profile" element={<FACULTY_Profile />} />
           <Route path="/faculty/history" element={<FACULTY_History />} />
           <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
           <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />

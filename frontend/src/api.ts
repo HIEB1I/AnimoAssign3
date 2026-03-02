@@ -2536,9 +2536,13 @@ export async function listOMSP(params: { status?: string; search?: string }) {
   return data as { ok: boolean; rows: OMPetitionRow[]; term_id: string };
 }
 
-export async function updateOMSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
+export async function updateOMSPCourse(
+  course_id: string,
+  payload: { status?: string; remarks?: string },
+  userId?: string | null
+) {
   const { data } = await axios.post(`${API_BASE}/om/student-petition`, payload, {
-    params: { action: "update", courseId: course_id },
+    params: { action: "update", courseId: course_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
@@ -2704,10 +2708,11 @@ export async function getOMSC_SchedulePresets(
 
 export async function updateOMSC(
   special_id: string,
-  payload: Partial<OMSpecialClassRow>
+  payload: Partial<OMSpecialClassRow>,
+  userId?: string | null
 ): Promise<{ ok: boolean; matched: number; modified: number }> {
   const { data } = await api.post(`/om/specialclass`, payload, {
-    params: { action: "update", specialId: special_id },
+    params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
