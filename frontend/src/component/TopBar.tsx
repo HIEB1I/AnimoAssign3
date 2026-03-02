@@ -56,6 +56,16 @@ export default function TopBar({
   const { unreadTotal } = useInboxBadge();
   const hasInboxUnread = unreadTotal > 0;
 
+  // Show faculty-only account items strictly when the *user role* is Faculty.
+  // (Route checks alone are not enough because TopBar is reused across roles.)
+  const isFacultyRole = String(role || "")
+    .trim()
+    .toLowerCase()
+    .startsWith("faculty");
+
+  const isFacultyRoute =
+    typeof window !== "undefined" && window.location.pathname.startsWith("/faculty");
+
   const incomingNotifs: IncomingNotifs = incomingNotifsProp ?? EMPTY_NOTIFS;
 
 
@@ -306,6 +316,20 @@ const logout = async () => {
                 <div className="px-4 pb-2 pt-3 text-[15px] font-semibold text-emerald-700">
                   My Account
                 </div>
+                <div className="mx-4 h-px bg-neutral-200" />
+                {isFacultyRole && isFacultyRoute && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMenuOpen(false);
+                      navigate("/faculty/profile");
+                    }}
+                    className="flex w-full items-center gap-2 px-4 py-3 text-left text-[15px] hover:bg-neutral-50"
+                  >
+                    <UserCircle className="h-4 w-4" />
+                    <span>My Profile</span>
+                  </button>
+                )}
                 <div className="mx-4 h-px bg-neutral-200" />
                 <button
                   onClick={logout}

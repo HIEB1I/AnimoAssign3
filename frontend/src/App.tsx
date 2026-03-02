@@ -48,6 +48,7 @@ import FACULTY_Inbox from "./pages/FACULTY/FACULTY_Inbox";
 import FACULTY_History from "./pages/FACULTY/FACULTY_History";
 import FACULTY_Preferences from "./pages/FACULTY/FACULTY_Preferences";
 import FACULTY_Deloadings from "./pages/FACULTY/FACULTY_Deloadings";
+import FACULTY_Profile from "./pages/FACULTY/FACULTY_Profile";
 
 // ---------------- Admin ----------------
 import ADMIN from "./pages/ADMIN/ADMIN";
@@ -200,6 +201,7 @@ export default function App() {
 
           {/* Faculty */}
           <Route path="/faculty/overview" element={<FACULTY_Overview />} />
+          <Route path="/faculty/profile" element={<FACULTY_Profile />} />
           <Route path="/faculty/history" element={<FACULTY_History />} />
           <Route path="/faculty/preferences" element={<FACULTY_Preferences />} />
           <Route path="/faculty/deloadings" element={<FACULTY_Deloadings />} />
