@@ -4292,51 +4292,55 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-    # RESYNC calendar
-    calendar_ok: Optional[bool] = None
-    calendar_error: Optional[str] = None
-    calendar_term_id: Optional[str] = None
-    term_start_at = None
-    week_count = _TERM_WEEK_COUNT
-    created = updated = deleted = skipped = 0
+        # RESYNC calendar
+        calendar_ok: Optional[bool] = None
+        calendar_error: Optional[str] = None
+        calendar_term_id: Optional[str] = None
+        term_start_at = None
+        week_count = _TERM_WEEK_COUNT
+        created = updated = deleted = skipped = 0
 
-    if send_to_gcal:
-        nxt_term = await _next_term_from_current()
-        if not nxt_term:
-            calendar_ok = False
-            calendar_error = "No next term found after current term."
-        else:
-            calendar_term_id = (nxt_term.get("term_id") or "").strip()
-            term_start_at = _coerce_dt(nxt_term.get("start_at"))
-            term_end_at = _coerce_dt(nxt_term.get("end_at"))
-
-            if not term_start_at:
+        if send_to_gcal:
+            nxt_term = await _next_term_from_current()
+            if not nxt_term:
                 calendar_ok = False
-                calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
+                calendar_error = "No next term found after current term."
             else:
-                rows_for_calendar = [rr for rr in (proposal_rows or []) if not bool((rr or {}).get("is_special_class"))]
-                ok, stats, err = await _sync_term_calendar_for_user(
-                    user_id=userId,
-                    calendar_term_id=calendar_term_id,
-                    term_start_at=term_start_at,
-                    term_end_at=term_end_at,
-                    rows=rows_for_calendar,
-                    action=gcal_action,      # cleanup removes deleted schedule rows
-                    week_count=week_count,
-                )
-                calendar_ok = ok
-                calendar_error = err
-                created = int((stats or {}).get("created") or 0)
-                updated = int((stats or {}).get("updated") or 0)
-                deleted = int((stats or {}).get("deleted") or 0)
-                skipped = int((stats or {}).get("skipped") or 0)
+                calendar_term_id = (nxt_term.get("term_id") or "").strip()
+                term_start_at = _coerce_dt(nxt_term.get("start_at"))
+                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+                if not term_start_at:
+                    calendar_ok = False
+                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
+                else:
+                    rows_for_calendar = [
+                        rr for rr in (proposal_rows or [])
+                        if not bool((rr or {}).get("is_special_class"))
+                    ]
+
+                    ok, stats, err = await _sync_term_calendar_for_user(
+                        user_id=userId,
+                        calendar_term_id=calendar_term_id,
+                        term_start_at=term_start_at,
+                        term_end_at=term_end_at,
+                        rows=rows_for_calendar,
+                        action=gcal_action,
+                        week_count=week_count,
+                    )
+                    calendar_ok = ok
+                    calendar_error = err
+                    created = int((stats or {}).get("created") or 0)
+                    updated = int((stats or {}).get("updated") or 0)
+                    deleted = int((stats or {}).get("deleted") or 0)
+                    skipped = int((stats or {}).get("skipped") or 0)
 
         return {
             "ok": True,
             "status": "SYNC_ONLY",
-            "send_to_gcal": True,
+            "send_to_gcal": bool(send_to_gcal),
             "calendar_ok": calendar_ok,
-            "calendar_events_created": calendar_events_created,
+            "calendar_events_created": int(created or 0), 
             "calendar_error": calendar_error,
             "calendar_term_id": calendar_term_id,
             "term_start_at": (term_start_at.isoformat() if term_start_at else None),
