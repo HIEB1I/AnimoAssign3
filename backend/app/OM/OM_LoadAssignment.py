@@ -2359,8 +2359,8 @@ async def loadassignment_handler(
         # So "updated vs submitted" should be based on forwarded_to_chair, not existence alone.
         was_forwarded_before = bool((existing_header or {}).get("forwarded_to_chair"))
 
-        # 1) persist the final assignments/schedules (NO auto-assign / NO compute)
-        await _persist_rows_no_auto(active["term_id"], rows, db)
+        # 1) persist the final assignments/schedules
+        await _approve_and_persist(active["term_id"], rows, db)
 
         # 2) create/update faculty_loads header for this term (also marks forwarded_to_chair=True)
         # Snapshot the exact sections currently visible in the OM Load Assignment table.
