@@ -112,16 +112,17 @@ jobs:
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d mongo-primary
 
-            # Wait until a PRIMARY is elected 
+            # Wait until THIS node is writable PRIMARY
             i=0; tries=180
             until docker exec -i mongo-primary mongosh \
-                -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                --authenticationDatabase admin --quiet \
-                --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1; do
-              i=$((i+1)); [ "$i" -ge "$tries" ] && { echo "::error ::No PRIMARY elected"; docker logs mongo-primary | tail -n 200; exit 1; }
+              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
+              --authenticationDatabase admin --quiet \
+              --eval 'db.hello().isWritablePrimary ? quit(0) : quit(1)' >/dev/null 2>&1; do
+              i=$((i+1))
+              [ "$i" -ge "$tries" ] && { echo "::error ::Mongo is not PRIMARY yet"; docker logs mongo-primary | tail -n 200; exit 1; }
               sleep 2
             done
-            echo "::notice ::Replica set has a PRIMARY"
+            echo "::notice ::mongo-primary is writable PRIMARY"
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build backend-primary analytics-primary frontend-primary nginx
 
@@ -245,7 +246,7 @@ jobs:
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
 
             # Wait for a PRIMARY (up to ~6 minutes)
-            i=0; tries=180
+            i=0; tries=90
             while true; do
               if docker exec -i mongo-secondary mongosh \
                 -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
