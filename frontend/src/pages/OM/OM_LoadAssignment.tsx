@@ -4639,16 +4639,68 @@ const handleApplyPendingDrafts = useCallback(
 
   const handleForwardToChair = async () => {
     if (!userId) return;
+  
+    // --- readiness scan (finalized is source of truth) ---
+    const hasSectionId = (r: any) => String(r?.id || r?.section_id || "").trim().length > 0;
+  
+    const relevant = rows.filter(hasSectionId);
+    const pendingRfc = relevant.filter((r: any) => r?.pending_rfc === true);
+    const unassigned = relevant.filter((r: any) => !String(r?.faculty_id || "").trim());
+    const notFinalized = relevant.filter((r: any) => r?.finalized !== true); // missing => not finalized
+  
+    if (pendingRfc.length || unassigned.length || notFinalized.length) {
+      const proceed = await openConfirm({
+        title: "Some sections are not ready",
+        variant: "warning",
+        confirmText: "Submit anyway",
+        cancelText: "Review",
+        message: (
+          <div className="space-y-2">
+            <div className="text-sm text-gray-700">
+              You still have sections that are incomplete and/or not finalized by faculty.
+            </div>
+  
+            <ul className="list-disc pl-5 text-sm text-gray-700 space-y-1">
+              {pendingRfc.length > 0 && (
+                <li>
+                  <b>{pendingRfc.length}</b> section(s) have <b>pending RFC</b>.
+                </li>
+              )}
+              {unassigned.length > 0 && (
+                <li>
+                  <b>{unassigned.length}</b> section(s) have <b>no assigned faculty</b>.
+                </li>
+              )}
+              {notFinalized.length > 0 && (
+                <li>
+                  <b>{notFinalized.length}</b> section(s) are <b>not finalized</b> by faculty.
+                </li>
+              )}
+            </ul>
+  
+            <div className="text-xs text-gray-500">
+              Proceeding will submit the current recommendations as-is.
+            </div>
+          </div>
+        ),
+      });
+  
+      if (!proceed) return;
+    }
+  
+    // --- forward (persist only what OM has; backend no longer runs compute) ---
     try {
       const res = await submitOmLoadAssignment(
         userId,
         { rows: rows.map(stripUiFieldsForPersist) },
         "approve"
       );
+  
       await notifyChairLoadRecommendation(userId, {
         kind: (res as any)?.kind,
         reco_id: (res as any)?.reco_id,
       });
+  
       showToast("Forwarded to Chair.", "success");
       await loadFromServer();
       setApproved(true);
@@ -7643,9 +7695,9 @@ const courseCodeToInfo = useMemo(() => {
                           <table className="w-full text-sm table-fixed border-collapse">
                             <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
                               <tr className="whitespace-nowrap text-[13px] font-semibold">
-                                <th className="px-3 py-2 text-left border border-gray-300">
+                                {/* <th className="px-3 py-2 text-left border border-gray-300">
                                   Rule
-                                </th>
+                                </th> */}
                                 <th className="px-3 py-2 text-left border border-gray-300">
                                   Faculty
                                 </th>
@@ -7666,11 +7718,11 @@ const courseCodeToInfo = useMemo(() => {
                             <tbody >
                               {ruleAlertsFiltered.map((a) => (
                                 <tr key={a.id} className="hover:bg-gray-50">
-                                  <td className="px-3 py-2 align-top border border-gray-300">
+                                  {/* <td className="px-3 py-2 align-top border border-gray-300">
                                     <span className="font-mono text-[11px]">
                                       {a.rule}
                                     </span>
-                                  </td>
+                                  </td> */}
                                   <td className="px-3 py-2 align-top border border-gray-300">
                                     <div className="font-medium text-gray-900">
                                       {a.facultyName || "—"}
