@@ -223,7 +223,7 @@ export default function OM_CourseManagement() {
       <header className="mb-6">
         <h1 className="text-2xl font-bold">Course Management</h1>
           <p className="text-sm text-gray-600">
-            Manage courses with their coordinators, teaching composition, and syllabi for {termLabel || ""}
+            Manage courses with their coordinators, teaching team, and syllabi for {termLabel || ""}
           </p>
       </header>
 
@@ -237,7 +237,7 @@ export default function OM_CourseManagement() {
             ref={searchRef}
             value={searchInput}
             onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search by course code, title, coordinator, or teaching composition…"
+            placeholder="Search by course code, title, coordinator, or teaching team"
             className="w-full rounded-lg border border-gray-300 bg-white pl-9 pr-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
 
@@ -396,7 +396,7 @@ export default function OM_CourseManagement() {
 
                             <div className="md:col-span-3">
                               <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                                Teaching Composition
+                                Teaching Team
                               </div>
                               {sortedComposition.length ? (
                                 isExpanded ? (
