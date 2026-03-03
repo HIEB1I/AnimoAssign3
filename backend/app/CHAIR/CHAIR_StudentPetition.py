@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
-
+from ..Notifications import create_notification
 router = APIRouter(prefix="/chair", tags=["chair"])
 
 # --- collections ---
@@ -317,6 +317,53 @@ async def om_student_petitions_handler(
             {"term_id": current_term_id, "course_id": courseId, "petition_id": {"$exists": True}},
             {"$set": updates},
         )
+        # --- notify students affected by this course update (best-effort) ---
+        try:
+            uids = await db[COL_PETITIONS].distinct(
+                "user_id",
+                {"term_id": current_term_id, "course_id": courseId, "petition_id": {"$exists": True}},
+            )
+            uids = [str(u).strip() for u in (uids or []) if str(u).strip()]
+            if uids and res.modified_count:
+                course = await db[COL_COURSES].find_one(
+                    {"course_id": courseId},
+                    {"_id": 0, "course_code": 1, "course_title": 1},
+                ) or {}
+                cc = course.get("course_code")
+                course_code = (cc[0] if isinstance(cc, list) and cc else cc) or ""
+                course_code = str(course_code or "").strip()
+                course_title = str(course.get("course_title") or "").strip()
+
+                title = "Student Petition updated"
+                parts = []
+                if course_code or course_title:
+                    parts.append(f"Course: {course_code} — {course_title}".strip(" —"))
+                if new_status:
+                    parts.append(f"Status: {new_status}")
+                if remarks_present:
+                    parts.append(f"Remarks: {new_remarks or ''}")
+                details = "\n".join([p for p in parts if p]) or "Your petition was updated."
+
+                meta = {
+                    "route": "/student/petition",
+                    "kind": "student_petition_updated",
+                    "term_id": current_term_id,
+                    "course_id": courseId,
+                }
+
+                actor = (userId or "").strip() if isinstance(userId, str) else None
+                for uid in uids:
+                    await create_notification(
+                        user_id=uid,
+                        title=title,
+                        details=details,
+                        meta=meta,
+                        send_email=True,
+                        email_from_user_id=actor or None,
+                    )
+        except Exception:
+            pass
+
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
     # ---------- BULK FORWARD ----------
@@ -337,6 +384,57 @@ async def om_student_petitions_handler(
             {"term_id": current_term_id, "course_id": {"$in": payload["course_ids"]}, "petition_id": {"$exists": True}},
             {"$set": {"status": target_status}},
         )
+        # --- notify students affected by bulk forward (best-effort) ---
+        try:
+            course_ids = [str(x).strip() for x in (payload.get("course_ids") or []) if str(x).strip()]
+            if course_ids and res.modified_count:
+                # Map course_id -> course_code (best-effort)
+                course_docs = await db[COL_COURSES].find(
+                    {"course_id": {"$in": course_ids}},
+                    {"_id": 0, "course_id": 1, "course_code": 1},
+                ).to_list(5000)
+                code_map: Dict[str, str] = {}
+                for c in course_docs or []:
+                    cid = str(c.get("course_id") or "").strip()
+                    cc = c.get("course_code")
+                    disp = (cc[0] if isinstance(cc, list) and cc else cc) or ""
+                    code_map[cid] = str(disp or "").strip() or cid
+
+                # Group affected courses per student
+                by_user: Dict[str, set] = {}
+                cur = db[COL_PETITIONS].find(
+                    {"term_id": current_term_id, "course_id": {"$in": course_ids}, "petition_id": {"$exists": True}},
+                    {"_id": 0, "user_id": 1, "course_id": 1},
+                )
+                async for d in cur:
+                    uid = str(d.get("user_id") or "").strip()
+                    cid = str(d.get("course_id") or "").strip()
+                    if not uid or not cid:
+                        continue
+                    by_user.setdefault(uid, set()).add(cid)
+
+                actor = (userId or "").strip() if isinstance(userId, str) else None
+                for uid, cset in (by_user or {}).items():
+                    codes = [code_map.get(cid, cid) for cid in sorted(cset)]
+                    show = ", ".join(codes[:12])
+                    if len(codes) > 12:
+                        show += f" (+{len(codes) - 12} more)"
+
+                    await create_notification(
+                        user_id=uid,
+                        title="Student Petition updated",
+                        details=f"Your petition status was updated to: {target_status}\nCourses: {show}",
+                        meta={
+                            "route": "/student/petition",
+                            "kind": "student_petition_bulk_forward",
+                            "term_id": current_term_id,
+                        },
+                        send_email=True,
+                        email_from_user_id=actor or None,
+                    )
+        except Exception:
+            pass
+
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count, "status": target_status}
 
     raise HTTPException(status_code=400, detail="Invalid action parameter.")

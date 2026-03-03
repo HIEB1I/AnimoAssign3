@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
+import { getSessionUserId } from "../../lib/session";
 import {
   getOMSC_Options,
   listOMSC,
@@ -1006,7 +1007,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
         }
       }
 
-      await updateOMSC(editId, payload);
+      await updateOMSC(editId, payload, getSessionUserId());
 
       setEditId(null);
       setDraft({});
@@ -1138,9 +1139,9 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
       </div>
 
       <div className="table-wrapper w-full overflow-hidden">
-        <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-auto rounded-xl">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
           <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-700">
+            <thead className="bg-gray-50 border-b text-gray-900">
               <tr>
                 <th className="text-left px-3 py-2 whitespace-nowrap w-10">
                   <input

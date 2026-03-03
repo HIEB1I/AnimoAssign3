@@ -12,6 +12,7 @@ type SessionUser = {
   userId?: string;
   user_id?: string;
   id?: string;
+  _id?: string;
   email?: string;
   gmail?: string;
 };
@@ -74,7 +75,7 @@ export function resetSocket() {
 
 export function getSocket(): Socket | null {
   const session = getSession();
-  const userId = (session?.userId || session?.user_id || session?.id || "").toString().trim();
+  const userId = (session?.userId || session?.user_id || session?.id || (session as any)?._id || "").toString().trim();
   if (!userId) return null;
 
   if (socket && socketUserId && socketUserId !== userId) {
@@ -88,9 +89,10 @@ export function getSocket(): Socket | null {
     socket = url
       ? io(url, {
           path,
-          transports: ["websocket"],
+          transports: ["websocket", "polling"],
+          withCredentials: true,
           auth: {
-            userId,
+            ...( /^USR/i.test(userId) ? { userId } : {} ),
             email: (session?.email || session?.gmail || "").toString(),
           },
           autoConnect: true,
@@ -98,9 +100,10 @@ export function getSocket(): Socket | null {
         })
       : io({
           path,
-          transports: ["websocket"],
+          transports: ["websocket", "polling"],
+          withCredentials: true,
           auth: {
-            userId,
+            ...( /^USR/i.test(userId) ? { userId } : {} ),
             email: (session?.email || session?.gmail || "").toString(),
           },
           autoConnect: true,
@@ -143,6 +146,22 @@ export function getSocket(): Socket | null {
 
     socket.on("socket:ready", (msg) => {
       console.log("[socket] ready", msg);
+      try {
+        const canonical = String((msg as any)?.userId || "").trim();
+        if (canonical && /^USR/i.test(canonical)) {
+          const raw = localStorage.getItem("animo.user");
+          if (raw) {
+            const u = JSON.parse(raw);
+            const prev = String(u?.userId || u?.user_id || u?.id || u?._id || "").trim();
+            if (prev !== canonical) {
+              u.user_id = canonical;
+              // keep userId consistent too (some screens read this field)
+              if (!u.userId || !/^USR/i.test(String(u.userId))) u.userId = canonical;
+              localStorage.setItem("animo.user", JSON.stringify(u));
+            }
+          }
+        }
+      } catch {}
       void seedUnreadFromServer();
     });
 }

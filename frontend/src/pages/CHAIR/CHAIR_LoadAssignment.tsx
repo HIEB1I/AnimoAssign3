@@ -6,5 +6,5 @@ import OM_LoadAssignment from "../OM/OM_LoadAssignment";
  * - CHAIR-only difference: hides "Forward to Chair" button/workflow.
  */
 export default function CHAIR_LoadAssignment() {
-  return <OM_LoadAssignment embedded hideForwardToChair showToPlantilla/>;
+  return <OM_LoadAssignment embedded hideForwardToChair chairExportExcel />;
 }
