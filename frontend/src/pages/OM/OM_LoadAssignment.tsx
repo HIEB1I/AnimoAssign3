@@ -72,6 +72,7 @@ import {
   Play,
   RefreshCcw,
   Send,
+  AlertTriangle,
   CalendarClock,
   Info,
   Plus,
@@ -2720,50 +2721,6 @@ function useToast() {
 
   return { toast, show, clear };
 }
-
-// Custom confirm modal helper
-const [confirmModal, setConfirmModal] = useState<{
-  open: boolean;
-  title: string;
-  variant?: "info" | "warning" | "danger";
-  message: React.ReactNode;
-  confirmText?: string;
-  cancelText?: string;
-  resolve?: (value: boolean) => void;
-}>({ open: false, title: "", message: "" });
-
-const openConfirm = useCallback(
-  (opts: {
-    title: string;
-    variant?: "info" | "warning" | "danger";
-    message: React.ReactNode;
-    confirmText?: string;
-    cancelText?: string;
-  }) =>
-    new Promise<boolean>((resolve) => {
-      setConfirmModal({
-        open: true,
-        title: opts.title,
-        variant: opts.variant ?? "info",
-        message: opts.message,
-        confirmText: opts.confirmText ?? "Continue",
-        cancelText: opts.cancelText ?? "Cancel",
-        resolve,
-      });
-    }),
-  []
-);
-
-const closeConfirm = useCallback((result: boolean) => {
-  setConfirmModal((prev) => {
-    try {
-      prev.resolve?.(result);
-    } finally {
-      return { open: false, title: "", message: "" };
-    }
-  });
-}, []);
-
 /* ---------------- Main ---------------- */
 export type OMLoadAssignmentProps = {
   /** Render without AppShell wrapper (for embedding inside another shell, e.g., CHAIR). */
@@ -6365,30 +6322,6 @@ const courseCodeToInfo = useMemo(() => {
 
     const content = (
     <>
-
-    {confirmModal.open && (
-      <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30">
-        <div className="w-[520px] rounded-xl bg-white p-4 shadow-xl">
-          <div className="text-lg font-semibold">{confirmModal.title}</div>
-          <div className="mt-2">{confirmModal.message}</div>
-
-          <div className="mt-4 flex justify-end gap-2">
-            <button
-              className="rounded-md border px-3 py-2 text-sm"
-              onClick={() => closeConfirm(false)}
-            >
-              {confirmModal.cancelText ?? "Cancel"}
-            </button>
-            <button
-              className="rounded-md bg-emerald-600 px-3 py-2 text-sm text-white"
-              onClick={() => closeConfirm(true)}
-            >
-              {confirmModal.confirmText ?? "Continue"}
-            </button>
-          </div>
-        </div>
-      </div>
-    )}
 
       {/* If Inbox is opened from the TopBar, show it like a tab */}
       {showInbox ? (
