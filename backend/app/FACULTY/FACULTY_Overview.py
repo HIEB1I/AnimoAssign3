@@ -788,19 +788,18 @@ async def _create_term_calendar_for_user(
         # Include a stable marker + kind, so overwrite can selectively remove events.
         # Do NOT remove the "Created by AnimoAssign" marker because it is used by legacy searches.
         desc_lines = [
-            f"Mode: {(mode or '').strip()}",
             "Created by AnimoAssign.",
-            f"AA_KIND: {kind_norm}",
+            f"Mode: {(mode or '').strip()}",
+            f"Room: {location}"
         ]
         if kind_norm == "special":
-            desc_lines.append("AA_NOTE: Special Class")
+            desc_lines.append("NOTE: Special Class")
         desc_lines.append(f"Login: {_aa_login_link()}")
-        desc = "\n".join(desc_lines)
 
         return {
             "summary": title,
             "location": location,
-            "description": desc,
+            "description": "\n".join(desc_lines),
             "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
@@ -1015,10 +1014,9 @@ async def _sync_term_calendar_for_user(
         aa_key = f"{base_key}|{meeting_suffix}"
 
         desc_lines = [
-            f"Mode: {(mode or '').strip()}",
             "Created by AnimoAssign.",
-            "AA_KIND: regular",
-            f"Login: {_aa_login_link()}",
+            f"Mode: {(mode or '').strip()}",
+            f"Room: {location}",
         ]
 
         return {
@@ -1954,7 +1952,7 @@ def _term_label(t: Dict[str, Any]) -> str:
 
 def _aa_web_base() -> str:
     # Prefer your deployed URL if set; fallback to localhost
-    base = (os.getenv("ANIMOASSIGN_WEB_URL") or os.getenv("FRONTEND_URL") or "http://localhost:5173").strip()
+    base = (os.getenv("ANIMOASSIGN_WEB_URL") or os.getenv("FRONTEND_URL") or "http://ccscloud.dlsu.edu.ph:11160/login").strip()
     return base.rstrip("/")
 
 def _aa_login_link() -> str:
@@ -3211,6 +3209,18 @@ async def overview_handler(
         # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
         # but they must NOT be included in the teaching units and course prep calculations.
         calc_load = [r for r in (merged_load or []) if not bool(r.get("is_special_class"))]
+        room_changed_since_accept = False
+        try:
+            accepted_sig = str((proposal or {}).get("accepted_room_sig") or "").strip()
+
+            # Backfill baseline if missing (older accepts)
+            if (not accepted_sig) and proposal and isinstance((proposal or {}).get("rows"), list):
+                accepted_sig = _room_signature_from_rows((proposal or {}).get("rows") or [])
+
+            if accepted_sig and proposal_status_l in ("approved", "accepted"):
+                room_changed_since_accept = (_room_signature_from_rows(calc_load) != accepted_sig)
+        except Exception:
+            room_changed_since_accept = False
         total_units, course_preps = _calc_units_and_preps(calc_load)
 
         summary["teaching_units"] = f"{int(round(total_units))}/{int(pref_units_for_calc)}"
@@ -3225,17 +3235,18 @@ async def overview_handler(
         summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
 
-    return {
-        "ok": True,
-        "term": term,
-        "summary": summary,
-        "teaching_load": merged_load,
-        # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
-        "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
-        "proposal_status": proposal_status,
-        "rfc": rfc_norm,
-        "schedule_final": schedule_final,
-    }
+        return {
+            "ok": True,
+            "term": term,
+            "summary": summary,
+            "teaching_load": merged_load,
+            # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
+            "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
+            "proposal_status": proposal_status,
+            "rfc": rfc_norm,
+            "schedule_final": schedule_final,
+            "room_changed_since_accept": room_changed_since_accept,
+        }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
 
@@ -4314,6 +4325,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     calendar_ok = False
                     calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
                 else:
+                    # ✅ Regular Accept should NOT sync special class rows
                     rows_for_calendar = [
                         rr for rr in (proposal_rows or [])
                         if not bool((rr or {}).get("is_special_class"))
@@ -4335,16 +4347,28 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
                     deleted = int((stats or {}).get("deleted") or 0)
                     skipped = int((stats or {}).get("skipped") or 0)
 
+        # ✅ Always return here so we never execute the legacy duplicate code below
         return {
             "ok": True,
-            "status": "SYNC_ONLY",
+            "status": "ACCEPTED",
             "send_to_gcal": bool(send_to_gcal),
+
             "calendar_ok": calendar_ok,
-            "calendar_events_created": int(created or 0), 
+            "calendar_events_created": int(created or 0),  # ✅ FIX: never use undefined calendar_events_created
+            "calendar_events_updated": int(updated or 0),
+            "calendar_events_deleted": int(deleted or 0),
+            "calendar_events_skipped": int(skipped or 0),
+
             "calendar_error": calendar_error,
             "calendar_term_id": calendar_term_id,
             "term_start_at": (term_start_at.isoformat() if term_start_at else None),
             "week_count": week_count,
+
+            # keep these (already computed above in your function)
+            "email_sent": email_sent,
+            "email_error": email_error,
+            "om_mailbox_sent": om_mailbox_sent,
+            "om_mailbox_error": om_mailbox_error,
         }
 
     proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
