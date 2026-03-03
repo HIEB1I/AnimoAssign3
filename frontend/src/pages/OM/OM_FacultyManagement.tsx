@@ -520,13 +520,13 @@ export default function OM_FacultyManagement() {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
+                  <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -543,13 +543,13 @@ export default function OM_FacultyManagement() {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
+                  <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -576,13 +576,13 @@ export default function OM_FacultyManagement() {
                   <table className="w-full table-fixed text-sm">
                     <thead className="bg-gray-50 border-b text-gray-900">
                       <tr>
-                        <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                        <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
+                        <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
+                        <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
+                        <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                        <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
+                        <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
+                        <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
                       </tr>
                     </thead>
 

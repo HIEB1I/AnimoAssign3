@@ -26,9 +26,19 @@ export default function Tabs({
   items,
 }: TabsProps) {
   // Responsive grid columns:
-  // - For 3-or-less tabs: stack on very small screens, split evenly on >=sm.
-  // - For 4+ tabs: use 2 columns on very small screens, split evenly on >=sm.
-  const cols = items.length <= 3 ? "grid-cols-1 sm:grid-cols-3" : "grid-cols-2 sm:grid-cols-4";
+  // NOTE:
+  // - Some pages (Faculty) only have 2 tabs, while others have 3.
+  // - We must size the grid based on the number of items, otherwise a 2-tab view
+  //   rendered as sm:grid-cols-3 leaves an empty column (mis-centers tab labels).
+  const count = items.length;
+  const cols =
+    count <= 1
+      ? "grid-cols-1"
+      : count === 2
+      ? "grid-cols-1 sm:grid-cols-2"
+      : count === 3
+      ? "grid-cols-1 sm:grid-cols-3"
+      : "grid-cols-2 sm:grid-cols-4";
 
   return (
     <div className="sticky top-[var(--header-h,58px)] z-50 w-full bg-gray-100/80 backdrop-blur">

@@ -7,6 +7,8 @@ from ..Notifications import create_notification
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import re
+import json
+import hashlib
 
 from html import escape as _html_escape
 
@@ -105,6 +107,41 @@ async def _room_label(room_id: str) -> str:
         return "TBA"
     r = await db[COL_ROOMS].find_one({"room_id": rid}, {"_id": 0, "room_number": 1, "room_name": 1}) or {}
     return str(r.get("room_number") or r.get("room_name") or rid).strip() or rid
+
+
+def _room_signature_from_rows(rows: List[Dict[str, Any]]) -> str:
+    """Deterministic signature for the *room assignment* of a schedule.
+
+    Used to detect "rooms changed after acceptance" scenarios.
+    We only sign stable, relevant fields and return a short sha256 hex.
+    """
+
+    def _norm(v: Any) -> str:
+        return re.sub(r"\s+", "", str(v or "").strip().upper())
+
+    items: List[Dict[str, str]] = []
+    for rr in rows or []:
+        r = rr or {}
+        if bool(r.get("is_special_class")):
+            continue
+
+        sid = str(r.get("section_id") or r.get("sectionId") or "").strip()
+        items.append(
+            {
+                "section": _norm(sid),
+                "d1": _norm(r.get("day1")),
+                "t1": _norm(r.get("time1")),
+                "r1": _norm(r.get("room1")),
+                "d2": _norm(r.get("day2")),
+                "t2": _norm(r.get("time2")),
+                "r2": _norm(r.get("room2")),
+            }
+        )
+
+    # Stable ordering
+    items.sort(key=lambda x: (x.get("section") or "", x.get("d1") or "", x.get("t1") or "", x.get("d2") or "", x.get("t2") or ""))
+    payload = json.dumps(items, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _overlaps(a_start: str, a_end: str, b_start: str, b_end: str) -> bool:
@@ -845,6 +882,323 @@ async def _create_term_calendar_for_user(
                 return False, created, err2
 
     return True, created, None
+
+
+async def _sync_term_calendar_for_user(
+    *,
+    user_id: str,
+    calendar_term_id: str,
+    term_start_at: datetime,
+    term_end_at: Optional[datetime],
+    rows: List[Dict[str, Any]],
+    action: str = "cleanup",
+    week_count: int = _TERM_WEEK_COUNT,
+) -> Tuple[bool, Dict[str, int], Optional[str]]:
+    """Sync faculty schedule rows into Google Calendar.
+
+    action:
+      - "sync"    : upsert events only (no deletions)
+      - "cleanup" : upsert + delete events that no longer exist in rows
+      - "reset"   : delete all AnimoAssign events for the term window, then recreate
+
+    Returns: (ok, stats, error)
+      stats = {created, updated, deleted, skipped}
+    """
+
+    stats: Dict[str, int] = {"created": 0, "updated": 0, "deleted": 0, "skipped": 0}
+
+    user = await db[COL_USERS].find_one({"user_id": user_id}, {"_id": 0, "google_token": 1})
+    if not user:
+        return False, stats, "User not found."
+
+    gt = user.get("google_token") or {}
+    access_token = (gt.get("access_token") or "").strip()
+    refresh_token = (gt.get("refresh_token") or "").strip()
+    if not access_token and not refresh_token:
+        return False, stats, "No Google token. Please login with Google again."
+
+    action_norm = (action or "cleanup").strip().lower()
+    if action_norm not in {"sync", "cleanup", "reset"}:
+        action_norm = "cleanup"
+
+    tzinfo = _pick_tzinfo()
+    term_start_at = _coerce_dt(term_start_at) or datetime.now(timezone.utc)
+    term_end_at = _coerce_dt(term_end_at) if term_end_at else None
+
+    term_start_local_date = term_start_at.astimezone(tzinfo).date()
+
+    # Window for event searches/deletions.
+    time_min = _rfc3339(term_start_at.astimezone(timezone.utc))
+    if term_end_at:
+        time_max_dt = term_end_at.astimezone(timezone.utc) + timedelta(days=7)
+    else:
+        time_max_dt = term_start_at.astimezone(timezone.utc) + timedelta(days=int((week_count + 1) * 7))
+    time_max = _rfc3339(time_max_dt)
+
+    async def _do_with_token(req_fn) -> Tuple[Optional[httpx.Response], Optional[str]]:
+        nonlocal access_token
+
+        # try current access token first
+        if access_token:
+            r = await req_fn(access_token)
+            if r is None:
+                return None, "Calendar request returned no response."
+            if r.status_code < 400:
+                return r, None
+            if r.status_code != 401:
+                return None, r.text
+
+        # refresh
+        if not refresh_token:
+            return None, "Access token expired and no refresh_token available. Reconnect Google."
+
+        tokens = await _refresh_access_token(refresh_token)
+        new_access = (tokens.get("access_token") or "").strip()
+        if not new_access:
+            return None, "Failed to refresh Google access token."
+
+        access_token = new_access
+        await db[COL_USERS].update_one(
+            {"user_id": user_id},
+            {"$set": {
+                "google_token.access_token": new_access,
+                "google_token.updated_at": _now_utc(),
+                "google_token.expires_in": tokens.get("expires_in"),
+                "google_token.scope": tokens.get("scope"),
+            }},
+        )
+
+        r2 = await req_fn(new_access)
+        if r2 is None:
+            return None, "Calendar request returned no response after refresh."
+        if r2.status_code < 400:
+            return r2, None
+        return None, r2.text
+
+    def _norm_key_part(v: Any) -> str:
+        return re.sub(r"\s+", "", str(v or "").strip().upper())
+
+    def _aa_base_key(course_code: str, section: str) -> str:
+        # MUST match the key format used in _create_term_calendar_for_user
+        return (
+            f"{_norm_key_part(calendar_term_id)}|{_norm_key_part(user_id)}|regular|"
+            f"{_norm_key_part(course_code)}|{_norm_key_part(section)}"
+        )
+
+    def _make_event(
+        *,
+        course_code: str,
+        section: str,
+        day_full: str,
+        time_band: str,
+        room: str,
+        mode: str,
+        meeting_suffix: str,
+    ) -> Optional[Dict[str, Any]]:
+        hm = _parse_time_band_to_hm(time_band)
+        if not hm:
+            return None
+
+        (sh, sm), (eh, em) = hm
+        day_full2 = _to_full_day(day_full)
+        wd = _WEEKDAY_IDX.get(day_full2)
+        if wd is None:
+            return None
+
+        first_date = _first_date_on_or_after(term_start_local_date, wd)
+        start_dt = datetime(first_date.year, first_date.month, first_date.day, sh, sm, tzinfo=tzinfo)
+        end_dt = datetime(first_date.year, first_date.month, first_date.day, eh, em, tzinfo=tzinfo)
+
+        title = f"{(course_code or '').strip()} {(section or '').strip()}".strip() or "Class"
+        location = (room or "").strip() or "Online"
+        base_key = _aa_base_key(course_code, section)
+        aa_key = f"{base_key}|{meeting_suffix}"
+
+        desc_lines = [
+            f"Mode: {(mode or '').strip()}",
+            "Created by AnimoAssign.",
+            "AA_KIND: regular",
+            f"Login: {_aa_login_link()}",
+        ]
+
+        return {
+            "summary": title,
+            "location": location,
+            "description": "\n".join(desc_lines),
+            "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
+            "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
+            "extendedProperties": {
+                "private": {
+                    "aa_app": "AnimoAssign",
+                    "aa_user": str(user_id),
+                    "aa_kind": "regular",
+                    "aa_term": str(calendar_term_id),
+                    "aa_key": aa_key,
+                }
+            },
+        }
+
+    async def _upsert_by_key(event_body: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
+        aa_key = str((((event_body.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip()
+        if not aa_key:
+            stats["skipped"] += 1
+            return True, None
+
+        # Find master recurring event by aa_key
+        r, err = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_key": aa_key},
+                single_events=False,
+            )
+        )
+        if err:
+            return False, err
+
+        items = (r.json() or {}).get("items", []) if r is not None else []
+        items = [
+            ev
+            for ev in (items or [])
+            if str((((ev.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip() == aa_key
+        ]
+
+        if not items:
+            r2, err2 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            if err2:
+                return False, err2
+            stats["created"] += 1
+            return True, None
+
+        primary_id = str(items[0].get("id") or "").strip()
+        if not primary_id:
+            r3, err3 = await _do_with_token(lambda tok: _insert_gcal_event(tok, event_body))
+            if err3:
+                return False, err3
+            stats["created"] += 1
+            return True, None
+
+        patch_body = {
+            "summary": event_body.get("summary"),
+            "location": event_body.get("location"),
+            "description": event_body.get("description"),
+            "start": event_body.get("start"),
+            "end": event_body.get("end"),
+            "recurrence": event_body.get("recurrence"),
+            "extendedProperties": event_body.get("extendedProperties"),
+        }
+        r4, err4 = await _do_with_token(lambda tok: _patch_gcal_event(tok, primary_id, patch_body))
+        if err4:
+            return False, err4
+        stats["updated"] += 1
+
+        # Delete duplicates (best-effort)
+        for ev in items[1:]:
+            eid = str(ev.get("id") or "").strip()
+            if not eid or eid == primary_id:
+                continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if not derr:
+                stats["deleted"] += 1
+
+        return True, None
+
+    # RESET: remove all existing events for term window, then recreate
+    if action_norm == "reset":
+        r0, err0 = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_term": str(calendar_term_id), "aa_kind": "regular"},
+                single_events=False,
+            )
+        )
+        if err0:
+            return False, stats, err0
+        for ev in (r0.json() or {}).get("items", []) if r0 is not None else []:
+            eid = str(ev.get("id") or "").strip()
+            if not eid:
+                continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if derr:
+                return False, stats, derr
+            stats["deleted"] += 1
+
+    # Upsert all rows
+    expected_keys: set[str] = set()
+    for rr in rows or []:
+        r = rr or {}
+        course_code = r.get("course_code") or r.get("course") or ""
+        section = r.get("section") or ""
+        mode = r.get("mode") or ""
+
+        # Meeting 1
+        ev1 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=r.get("day1") or "",
+            time_band=r.get("time1") or "",
+            room=str(r.get("room1") or "TBA"),
+            mode=mode,
+            meeting_suffix="M1",
+        )
+        if ev1:
+            expected_keys.add(str((((ev1.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip())
+            ok1, err1 = await _upsert_by_key(ev1)
+            if not ok1:
+                return False, stats, err1
+        else:
+            stats["skipped"] += 1
+
+        # Meeting 2 (optional)
+        ev2 = _make_event(
+            course_code=course_code,
+            section=section,
+            day_full=r.get("day2") or "",
+            time_band=r.get("time2") or "",
+            room=str(r.get("room2") or r.get("room1") or "TBA"),
+            mode=mode,
+            meeting_suffix="M2",
+        )
+        if ev2:
+            expected_keys.add(str((((ev2.get("extendedProperties") or {}).get("private") or {}).get("aa_key") or "")).strip())
+            ok2, err2 = await _upsert_by_key(ev2)
+            if not ok2:
+                return False, stats, err2
+
+    # CLEANUP: delete events not present anymore
+    if action_norm == "cleanup":
+        r1, err1 = await _do_with_token(
+            lambda tok: _list_gcal_events(
+                tok,
+                time_min=time_min,
+                time_max=time_max,
+                private_ext={"aa_term": str(calendar_term_id), "aa_kind": "regular"},
+                single_events=False,
+            )
+        )
+        if err1:
+            return False, stats, err1
+        for ev in (r1.json() or {}).get("items", []) if r1 is not None else []:
+            priv = ((ev.get("extendedProperties") or {}).get("private") or {}) if isinstance(ev.get("extendedProperties"), dict) else {}
+            aa_key = str(priv.get("aa_key") or "").strip()
+            aa_user = str(priv.get("aa_user") or "").strip()
+            if not aa_key or aa_user != str(user_id):
+                continue
+            if aa_key in expected_keys:
+                continue
+            eid = str(ev.get("id") or "").strip()
+            if not eid:
+                continue
+            _, derr = await _do_with_token(lambda tok, _eid=eid: _delete_gcal_event(tok, _eid))
+            if derr:
+                return False, stats, derr
+            stats["deleted"] += 1
+
+    return True, stats, None
 
 
 RFC_TERMINAL = {"ACCEPTED", "APPROVED", "REJECTED"}
@@ -2138,6 +2492,9 @@ async def overview_handler(
             "faculty": {
                 "full_name": full_name,
                 "fullName": full_name,
+                "first_name": first,
+                "last_name": last,
+                "email": _pick(user_doc.get("email"), faculty.get("email")), 
                 "role": "Faculty",
                 "department": (dept or {}).get("dept_name", "—"),
 
