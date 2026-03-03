@@ -381,7 +381,7 @@ export default function FACULTY_Deloadings({ embedded = false }: { embedded?: bo
               <input
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search deloadings…"
+                placeholder="Search by deloading type…"
                 className="w-full bg-transparent outline-none placeholder:text-gray-400 pr-6"
               />
               {query && (

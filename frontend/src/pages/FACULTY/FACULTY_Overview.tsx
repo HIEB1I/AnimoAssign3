@@ -6,7 +6,6 @@ import {
   X,
   BookOpen as SyllabusIcon,
   Edit,
-  Info,
 } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -822,14 +821,9 @@ type TeachingLoadEnhancedProps = {
 const LIST_HEADERS = [
   "Course Code & Title",
   "Section",
-  "Day 1",
-  "Begin 1",
-  "End 1",
-  "Room 1",
-  "Day 2",
-  "Begin 2",
-  "End 2",
-  "Room 2",
+  "Day",
+  "Time",
+  "Room",
   "Mode",
   "Syllabus",
 ];
@@ -1680,21 +1674,7 @@ const scheduleFinalLabel = (() => {
     {/* Special Class Tab (List-style) */}
   <div className="overflow-x-auto">
     <div className="min-w-[1100px] rounded-xl border border-neutral-300 bg-white">
-      <div className="border-b border-neutral-200 bg-emerald-50 px-4 py-3">
-        <div className="flex items-center gap-2 text-sm font-semibold text-emerald-900">
-          <span>Special Classes</span>
-          <span
-            title="To message the OM about a Special Class, click the row to open the modal and use the Conversation tab."
-            aria-label="Info"
-            className="inline-flex"
-          >
-            <Info className="h-4 w-4 text-emerald-900/70" />
-          </span>
-        </div>
-        <div className="mt-0.5 text-xs text-emerald-800/80">
-          These classes are shown separately and do not appear in Calendar/List views.
-        </div>
-      </div>
+
 
       <div className="w-full">
 
@@ -1895,17 +1875,12 @@ const scheduleFinalLabel = (() => {
               <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
                 <table className="w-full table-fixed text-[13px]">
                   <colgroup>
-                    <col className="w-[240px]" />
+                    <col className="w-[320px]" />
                     <col className="w-[92px]" />
-                    <col className="w-[82px]" />
+                    <col className="w-[90px]" />
+                    <col className="w-[150px]" />
+                    <col className="w-[180px]" />
                     <col className="w-[92px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[110px]" />
-                    <col className="w-[82px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[110px]" />
-                    <col className="w-[96px]" />
                     <col className="w-[76px]" />
                   </colgroup>
                   <thead className="bg-emerald-50 text-emerald-900">
@@ -1952,6 +1927,13 @@ const scheduleFinalLabel = (() => {
                           ? specialModeFromRooms((it as any).room1, (it as any).room2)
                           : (modeRaw || "—");
 
+                        const hasSecondMeeting = Boolean(
+                          d2Raw ||
+                            (t2.begin && t2.begin !== "—") ||
+                            (t2.end && t2.end !== "—") ||
+                            (room2Display && room2Display !== "—")
+                        );
+
                         return (
                           <tr
                             key={idx}
@@ -1967,14 +1949,30 @@ const scheduleFinalLabel = (() => {
                               </div>
                             </td>
                             <td className="px-4 py-3 align-middle text-center">{it.section || "—"}</td>
-                            <td className="px-4 py-3 align-middle text-center">{d1}</td>
-                            <td className="px-4 py-3 align-middle text-center">{t1.begin}</td>
-                            <td className="px-4 py-3 align-middle text-center">{t1.end}</td>
-                            <td className="px-4 py-3 align-middle text-center">{room1Display}</td>
-                            <td className="px-4 py-3 align-middle text-center">{d2}</td>
-                            <td className="px-4 py-3 align-middle text-center">{t2.begin}</td>
-                            <td className="px-4 py-3 align-middle text-center">{t2.end}</td>
-                            <td className="px-4 py-3 align-middle text-center">{room2Display}</td>
+                            <td className="px-4 py-3 align-top text-center">
+                              <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight">
+                                <div className="font-semibold">{d1 || "—"}</div>
+                                {hasSecondMeeting && <div className="font-semibold">{d2 || "—"}</div>}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 align-top text-center">
+                              <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight whitespace-nowrap">
+                                <div>
+                                  {t1.begin && t1.end && t1.begin !== "—" ? `${t1.begin}–${t1.end}` : "TBA"}
+                                </div>
+                                {hasSecondMeeting && (
+                                  <div>
+                                    {t2.begin && t2.end && t2.begin !== "—" ? `${t2.begin}–${t2.end}` : "TBA"}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 align-top text-center">
+                              <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight break-words whitespace-normal">
+                                <div>{room1Display || "—"}</div>
+                                {hasSecondMeeting && <div>{room2Display || "—"}</div>}
+                              </div>
+                            </td>
                             <td className="px-4 py-3 align-middle text-center text-gray-800">{modeDisplay}</td>
                             <td className="px-4 py-3 align-middle text-center">
                               <button

@@ -342,10 +342,10 @@ export function FacultyProfileTab({
       type="button"
       onClick={onClick}
       className={cls(
-        "inline-flex items-center justify-center gap-2 rounded-full px-3 py-1.5 text-xs font-semibold uppercase tracking-wide transition",
-        active
-          ? "bg-emerald-600 text-white shadow-sm"
-          : "bg-white text-slate-700 hover:bg-slate-50"
+        // Match the Calendar/List segmented control styling in Faculty Schedule
+        "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold transition",
+        "focus:outline-none focus:ring-2 focus:ring-emerald-600/30",
+        active ? "bg-emerald-700 text-white shadow-sm" : "text-neutral-700 hover:bg-white"
       )}
     >
       {children}
@@ -616,7 +616,7 @@ export function FacultyProfileTab({
                     value={kacQuery}
                     onChange={(e) => setKacQuery(e.target.value)}
                     className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 pr-9 text-sm"
-                    placeholder="Search KAC or Course code…"
+                    placeholder="Search by KAC or Course code…"
                   />
                   {kacQuery.trim() ? (
                     <button
@@ -784,7 +784,7 @@ export function FacultyProfileTab({
             </div>
 
             <div className="flex items-center justify-between gap-3">
-              <div className="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-slate-50 p-1">
+              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
                 <SegBtn
                   active={recordsTab === "Teaching history"}
                   onClick={() => setRecordsTab("Teaching history")}
@@ -837,4 +837,3 @@ export function FacultyProfileTab({
     </div>
   );
 }
-

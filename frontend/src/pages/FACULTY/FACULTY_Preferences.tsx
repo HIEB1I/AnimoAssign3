@@ -32,6 +32,35 @@ function Tag({ children, tone = "emerald" }: { children: React.ReactNode; tone?:
   );
 }
 
+
+/* ---------- removable chip ---------- */
+function Chip({
+  label,
+  onRemove,
+}: {
+  label: string;
+  onRemove?: () => void;
+}) {
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-[12px] text-emerald-800">
+      <span className="max-w-[340px] truncate" title={label}>
+        {label}
+      </span>
+      {onRemove ? (
+        <button
+          type="button"
+          onClick={onRemove}
+          className="rounded-full p-0.5 text-emerald-800/70 hover:bg-emerald-100 hover:text-emerald-900"
+          aria-label={`Remove ${label}`}
+          title="Remove"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      ) : null}
+    </span>
+  );
+}
+
 /* ---------- shared label/dropdown styles ---------- */
 function FieldLabel({ children, required = false }: { children: React.ReactNode; required?: boolean }) {
   return (
@@ -105,6 +134,8 @@ function MultiSelectDropdown({
   className = "w/full",
   placeholder = "— Select options —",
   maxPreview = 2,
+  previewMode = "list",
+  countLabel,
   error = false,
   searchable = false,
   renderOptionMeta,
@@ -126,6 +157,8 @@ function MultiSelectDropdown({
   className?: string;
   placeholder?: string;
   maxPreview?: number;
+  previewMode?: "list" | "count" | "chips";
+  countLabel?: string;
   error?: boolean;
   searchable?: boolean;
   // Optional meta renderer (e.g., show "courses under this KAC")
@@ -205,9 +238,25 @@ function MultiSelectDropdown({
 
   const displayLabel = useMemo(() => {
     if (values.length === 0) return <span className="text-gray-400">{placeholder}</span>;
+
+    if (previewMode === "count") {
+      const lbl = countLabel ?? "selected";
+      return `${values.length} ${lbl}`;
+    }
+
+    if (previewMode === "chips") {
+      return (
+        <div className="flex flex-wrap items-center gap-2 pr-1">
+          {values.map((v) => (
+            <Chip key={v} label={v} />
+          ))}
+        </div>
+      );
+    }
+
     if (maxPreview <= 0 || values.length <= maxPreview) return values.join(", ");
     return `${values.slice(0, maxPreview).join(", ")} +${values.length - maxPreview} more`;
-  }, [values, maxPreview, placeholder]);
+  }, [values, maxPreview, placeholder, previewMode, countLabel]);
 
   const onKey = (e: React.KeyboardEvent) => {
     if (!open && ["ArrowDown", "Enter", " "].includes(e.key)) {
@@ -811,6 +860,7 @@ function EditForm({
   // Field-level validation (only for Preferred Time Slots minimum selection rule)
   const [timeSlotsError, setTimeSlotsError] = useState<string>("");
 
+
   // Field-level validation for required inputs (show warnings instead of silently blocking save)
   const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
   const clearFieldError = (key: string) =>
@@ -1064,57 +1114,72 @@ function EditForm({
     }
     return true;
   }
+  // Day-pairs (select by pair, but still saved individually in DB)
+  const DAY_PAIRS = [
+    { key: "MTh", label: "Monday and Thursday", days: ["Monday", "Thursday"] },
+    { key: "TF", label: "Tuesday and Friday", days: ["Tuesday", "Friday"] },
+    { key: "WS", label: "Wednesday and Saturday", days: ["Wednesday", "Saturday"] },
+  ] as const;
 
-  // toggles
-  const DAY_PAIR: Record<string, string> = {
-    Monday: "Thursday",
-    Thursday: "Monday",
-    Tuesday: "Friday",
-    Friday: "Tuesday",
-    Wednesday: "Saturday",
-    Saturday: "Wednesday",
-  };
-
-  const toggleMulti = (key: "days" | "timeSlots", value: string) =>
+  // Normalize any partially-saved day into full pairs (safety)
+  useEffect(() => {
     setForm((f) => {
-      const arr = (f[key] as string[]) ?? [];
+      const arr = Array.isArray(f.days) ? [...(f.days as string[])] : [];
+      const ensurePair = (a: string, b: string) => {
+        const hasA = arr.includes(a);
+        const hasB = arr.includes(b);
+        if (hasA && !hasB) arr.push(b);
+        if (hasB && !hasA) arr.push(a);
+      };
+      ensurePair("Monday", "Thursday");
+      ensurePair("Tuesday", "Friday");
+      ensurePair("Wednesday", "Saturday");
 
-      // Keep Preferred Teaching Days in paired sync (Mon<->Thu, Tue<->Fri, Wed<->Sat)
-      if (key === "days") {
-        const pair = DAY_PAIR[value];
-        const has = arr.includes(value);
-        const targetSelected = !has;
+      const uniq = Array.from(new Set(arr));
+      const order = (d: string) => {
+        const i = daysMaster.indexOf(d);
+        return i < 0 ? 999 : i;
+      };
+      uniq.sort((a, b) => order(a) - order(b));
 
-        let next = [...arr];
-        const setSelected = (day: string | undefined, selected: boolean) => {
-          if (!day) return;
-          const inArr = next.includes(day);
-          if (selected && !inArr) next = [...next, day];
-          if (!selected && inArr) next = next.filter((v) => v !== day);
-        };
+      const prev = Array.isArray(f.days) ? (f.days as string[]) : [];
+      const same = prev.length === uniq.length && prev.every((d, i) => d === uniq[i]);
 
-        setSelected(value, targetSelected);
-        setSelected(pair, targetSelected);
+      return same ? f : { ...f, days: uniq };
+    });
+    // run once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-        // Keep stable ordering for nicer UI + consistent payload ordering
-        const order = (d: string) => {
-          const i = daysMaster.indexOf(d);
-          return i < 0 ? 999 : i;
-        };
-        next.sort((a, b) => order(a) - order(b));
-      // Clear required-field warning once at least one day is selected
+  const toggleDayPair = (pairDays: readonly string[]) =>
+    setForm((f) => {
+      const current = (f.days as string[]) ?? [];
+      const anySelected = pairDays.some((d) => current.includes(d));
+
+      let next = current.filter((d) => !pairDays.includes(d));
+      if (!anySelected) next = [...next, ...pairDays];
+
+      const order = (d: string) => {
+        const i = daysMaster.indexOf(d);
+        return i < 0 ? 999 : i;
+      };
+      next = Array.from(new Set(next)).sort((a, b) => order(a) - order(b));
+
       if (next.length > 0) clearFieldError("days");
-        return { ...f, days: next };
-      }
+      return { ...f, days: next };
+    });
 
+  const toggleTimeSlot = (value: string) =>
+    setForm((f) => {
+      const arr = (f.timeSlots as string[]) ?? [];
       const has = arr.includes(value);
-    const next = has ? arr.filter((v) => v !== value) : [...arr, value];
-    // Clear required-field warning once minimum time slots rule is satisfied
-    if (key === "timeSlots" && next.length >= 3) {
-      clearFieldError("timeSlots");
-      if (timeSlotsError) setTimeSlotsError("");
-    }
-    return { ...f, [key]: next };
+      const next = has ? arr.filter((v) => v !== value) : [...arr, value];
+
+      if (next.length >= 3) {
+        clearFieldError("timeSlots");
+        if (timeSlotsError) setTimeSlotsError("");
+      }
+      return { ...f, timeSlots: next };
     });
 
   // Corrected showAE logic: Hide if on teaching break
@@ -1173,11 +1238,10 @@ function EditForm({
         )}
               {/* Preferred units guidance */}
               {form.prefUnits !== TEACHING_BREAK && form.prefUnits !== ZERO_LOAD_LABEL && (
-                <div className="mt-2 flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-900">
-                  <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
-                  <span>
-                    If you have deloading, subtract it from your <span className="font-semibold">Preferred Teaching Units</span>{" "}
-                    before submitting.
+                <div className="mt-2 flex items-center gap-2 rounded-md border border-amber-300 bg-amber-50 p-2 text-[12px] text-amber-900">
+                  <AlertTriangle className="h-4 w-4 shrink-0 text-amber-700" />
+                  <span className="whitespace-normal break-words">
+                    If you have deloading, subtract it from <span className="font-semibold">Preferred Teaching Units</span> before submitting.
                   </span>
                 </div>
               )}
@@ -1817,35 +1881,21 @@ function EditForm({
   <div>
     <FieldLabel required>Preferred Teaching Days</FieldLabel>
 
-    <div className="grid grid-cols-2 gap-2">
-      <div className="space-y-2">
-        {["Monday", "Tuesday", "Wednesday"].map((d) => (
-          <label key={d} className="flex items-center gap-2 text-[15px]">
-            <input
-              type="checkbox"
-              className="accent-emerald-700"
-              checked={form.days.includes(d)}
-              onChange={() => toggleMulti("days", d)}
-            />
-            {d}
-          </label>
-        ))}
-      </div>
-
-      <div className="space-y-2">
-        {["Thursday", "Friday", "Saturday"].map((d) => (
-          <label key={d} className="flex items-center gap-2 text-[15px]">
-            <input
-              type="checkbox"
-              className="accent-emerald-700"
-              checked={form.days.includes(d)}
-              onChange={() => toggleMulti("days", d)}
-            />
-            {d}
-          </label>
-        ))}
-      </div>
+    
+    <div className="space-y-2">
+      {DAY_PAIRS.map((p) => (
+        <label key={p.key} className="flex items-center gap-2 text-[15px]">
+          <input
+            type="checkbox"
+            className="accent-emerald-700"
+            checked={p.days.some((d) => form.days.includes(d))}
+            onChange={() => toggleDayPair(p.days)}
+          />
+          {p.label}
+        </label>
+      ))}
     </div>
+
   {fieldErrors.days && (
     <div className="mt-2 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 p-2 text-[13px] text-red-800">
       <AlertTriangle className="mt-0.5 h-4 w-4" />
@@ -1857,6 +1907,11 @@ function EditForm({
   {/* RIGHT: Preferred Time Slots */}
   <div>
     <FieldLabel required>Preferred Time Slots</FieldLabel>
+
+    <p className="mb-2 text-[12px] text-neutral-600">
+      Select at least <span className="font-semibold">3</span> time slots.
+      <span className="ml-1 font-medium">({(form.timeSlots?.length ?? 0)} selected)</span>
+    </p>
     <div className="grid grid-cols-1 gap-1.5">
       {timeSlotsMaster.map((t) => (
         <label key={t} className="flex items-center gap-2 text-[15px]">
@@ -1864,7 +1919,7 @@ function EditForm({
             type="checkbox"
             className="accent-emerald-700"
             checked={form.timeSlots.includes(t)}
-            onChange={() => toggleMulti("timeSlots", t)}
+            onChange={() => toggleTimeSlot(t)}
           />
           {t}
         </label>
@@ -1927,7 +1982,7 @@ function EditForm({
                       }}
                       options={kacDisplayOptions}
                       placeholder="— Select KAC —"
-                      maxPreview={0} // show all selected KACs (no +N more)
+                      previewMode="chips"
                       searchable
                       renderOptionMeta={(opt: any) => {
                         const courses: string[] = Array.isArray(opt?.courses_display) ? opt.courses_display : [];
@@ -2321,7 +2376,7 @@ export default function FACULTY_Preferences() {
   }, [reuseMenuOpen, preferenceHistory, selectedHistoryTermId]);
 
   useEffect(() => {
-    // close the "Use Previous Preferences" history menu when clicking outside
+    // close the "Reuse Previous Submission" history menu when clicking outside
     const close = (e: MouseEvent) => {
       if (!reuseMenuOpen) return;
       const t = e.target as Node;
@@ -2706,6 +2761,19 @@ useEffect(() => {
     : "—";
   const latestIsActive = !!activeTermId && String(latestRecord?.term_id || "") === String(activeTermId);
 
+  const latestSubmittedAt = (() => {
+    const raw = (latestRecord as any)?.submitted_at || (latestRecord as any)?.updated_at || (latestRecord as any)?.created_at;
+    if (!raw) return "";
+    const d = new Date(String(raw));
+    return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleString();
+  })();
+
+  const stripPreference = (s: string) => String(s || "").replace(/\s*Preference\s*$/i, "").trim();
+  const activeTermTitle = stripPreference(activeLabel);
+  const latestTermTitle = stripPreference(latestLabel);
+  const showLatestTermName = !!latestTermTitle && latestTermTitle !== "—" && !latestIsActive && latestTermTitle !== activeTermTitle;
+
+
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -2721,7 +2789,9 @@ useEffect(() => {
         <div className="mb-4 flex items-start justify-between">
           <div>
             <div className="flex items-center gap-1">
-              <h2 className="text-[15px] font-semibold text-neutral-900">Faculty Preferences</h2>
+              <h2 className="text-[15px] font-semibold text-neutral-900">
+                Faculty Preferences for <span className="text-emerald-700">{activeTermTitle || activeLabel}</span>
+              </h2>
               <button
                 type="button"
                 onClick={() => setInfoOpen(true)}
@@ -2733,19 +2803,23 @@ useEffect(() => {
               </button>
             </div>
             <p className="mt-0.5 text-sm text-neutral-500">
-              Configure your teaching preferences for the upcoming term
+              Share your teaching preferences to help guide planning for this term.
             </p>
 
             <div className="mt-2 flex flex-wrap items-center gap-2">
-              <Tag tone="amber">
-                <Info className="h-3.5 w-3.5" />
-                Planning term: {activeLabel}
-              </Tag>
+              {showLatestTermName ? (
+                <Tag tone="gray">
+                  <BookOpen className="h-3.5 w-3.5" />
+                  Last submitted for {latestTermTitle}
+                </Tag>
+              ) : null}
 
-              <Tag tone={latestIsActive ? "emerald" : "gray"}>
-                <BookOpen className="h-3.5 w-3.5" />
-                Currently loaded: {latestLabel}
-              </Tag>
+              {!!latestSubmittedAt && (
+                <Tag tone={latestIsActive ? "emerald" : "gray"}>
+                  <CalendarDays className="h-3.5 w-3.5" />
+                  Last submitted: {latestSubmittedAt}
+                </Tag>
+              )}
             </div>
 
             
@@ -2762,7 +2836,7 @@ useEffect(() => {
                 aria-expanded={reuseMenuOpen}
                 className={cls(
                   BTN_BASE,
-                  "gap-2 min-w-[290px]",
+                  "gap-2",
                   editingLocked || reuseBusy || preferenceHistory.length === 0
                     ? "cursor-not-allowed bg-gray-200 text-gray-600"
                     : "bg-neutral-100 text-slate-900 hover:bg-neutral-200/70"
@@ -2774,11 +2848,11 @@ useEffect(() => {
                     ? "Submissions not open yet"
                     : deadlinePassedPage
                     ? "Deadline passed — submissions locked"
-                    : "Choose which previous preference to submit"
+                    : "Reuse and submit a previous preference for the planning term"
                 }
               >
                 <BookOpen className="h-4 w-4" />
-                {reuseBusy ? "Submitting…" : "Use Previous Preferences"}
+                {reuseBusy ? "Submitting…" : "Reuse Previous Submission"}
                 <ChevronDown className="ml-1 h-4 w-4 opacity-70" />
               </button>
 
@@ -2786,11 +2860,18 @@ useEffect(() => {
                 <div
                   ref={reuseMenuListRef}
                   role="listbox"
-                  className={cls(DD_MENU, "w-[360px]")}
+                  className={cls(DD_MENU, "w-full min-w-[280px] max-w-[420px]")}
                 >
                   {preferenceHistory.map((r, i) => {
                     const tid = String(r.term_id || "");
                     const label = formatPreferenceLabel(r);
+                    const raw = (r as any)?.submitted_at || (r as any)?.updated_at || (r as any)?.created_at;
+                    const submitted = raw
+                      ? (() => {
+                          const d = new Date(String(raw));
+                          return Number.isNaN(d.getTime()) ? String(raw) : d.toLocaleDateString();
+                        })()
+                      : "";
                     const selected = tid === String(selectedHistoryTermId || "");
                     return (
                       <button
@@ -2808,8 +2889,13 @@ useEffect(() => {
                           i === reuseMenuHover && "bg-emerald-50"
                         )}
                       >
-                        <span className="flex items-center justify-between gap-3">
-                          <span className="truncate">{label}</span>
+                        <span className="flex items-start justify-between gap-3">
+                          <span className="min-w-0">
+                            <span className="block truncate">{label}</span>
+                            {submitted ? (
+                              <span className="mt-0.5 block text-[12px] text-neutral-500">Submitted: {submitted}</span>
+                            ) : null}
+                          </span>
                           {selected && <CheckCircle2 className="h-4 w-4 text-emerald-700" />}
                         </span>
                       </button>
@@ -2943,7 +3029,7 @@ useEffect(() => {
       {/* Info modal */} 
       <Modal
         open={infoOpen}
-        title="About Faculty Preferences"
+        title="How Faculty Preferences work"
         onClose={() => setInfoOpen(false)}
         footer={
           <div className="flex items-center justify-end">
@@ -2957,31 +3043,50 @@ useEffect(() => {
           </div>
         }
       >
-        <div className="space-y-3 text-sm text-neutral-700">
-          <p>
-            <span className="font-semibold text-neutral-900">Faculty Preferences</span> is where you set the
-            preferences and constraints used for building your teaching assignment for the upcoming term.
-          </p>
-
-          <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
-            <p className="font-medium text-neutral-900">Use Previous Preferences</p>
-            <p className="mt-1">
-              Copies a saved preference set from a prior term into the currently selected planning term. You’ll see
-              a preview and then a confirmation step before it is applied.
+        <div className="space-y-4 text-sm text-neutral-700">
+          <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-3">
+            <p className="text-[13px] leading-6">
+              These preferences help guide scheduling decisions for{' '}
+              <span className="font-semibold text-neutral-900">{activeTermTitle || activeLabel}</span>. Final assignments may
+              also consider availability, department needs, and scheduling conflicts.
             </p>
           </div>
 
-          <div className="rounded-lg border border-neutral-200 bg-neutral-50 p-3">
-            <p className="font-medium text-neutral-900">Edit Preferences</p>
-            <p className="mt-1">
-              Opens the editable form for the current planning term so you can make changes and submit a new set of
-              preferences.
-            </p>
+          <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+            <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+              <div className="flex items-start gap-2">
+                <div className="mt-0.5 rounded-lg bg-emerald-50 p-2 text-emerald-700">
+                  <BookOpen className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="font-medium text-neutral-900">Reuse Previous Submission</p>
+                  <p className="mt-1 text-[13px] leading-5 text-neutral-600">
+                    Submits a saved preference set from a prior term for the current term. You’ll preview it first and
+                    confirm before submitting.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-neutral-200 bg-white p-3 shadow-sm">
+              <div className="flex items-start gap-2">
+                <div className="mt-0.5 rounded-lg bg-emerald-50 p-2 text-emerald-700">
+                  <Settings className="h-4 w-4" />
+                </div>
+                <div>
+                  <p className="font-medium text-neutral-900">Edit Preferences</p>
+                  <p className="mt-1 text-[13px] leading-5 text-neutral-600">
+                    Opens the editable form so you can update days, time slots, KACs, and other preferences, then submit
+                    a new set.
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </Modal>
 
-{/* Preview + confirmation modal for "Use Previous Preferences" */}
+{/* Preview + confirmation modal for "Reuse Previous Submission" */}
       <Modal
         open={reuseModalOpen}
         title={reuseModalStep === "preview" ? "Preview previous preferences" : "Confirm submission"}
