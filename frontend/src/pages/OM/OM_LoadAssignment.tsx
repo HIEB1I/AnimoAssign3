@@ -25,6 +25,8 @@ import {
   applyOmPendingOverrides,
 } from "../../api";
 
+import type { ReactNode } from "react";
+
 import {
   getOmLoadAssignmentList,
   getOmLoadAssignmentTerms,
@@ -72,7 +74,6 @@ import {
   Play,
   RefreshCcw,
   Send,
-  AlertTriangle,
   CalendarClock,
   Info,
   Plus,
@@ -2961,6 +2962,35 @@ const closeChairPlantillaPreview = useCallback(() => {
   setChairPlantillaOpen(false);
 }, [chairPlantillaLoading]);
 
+type ConfirmState = {
+  open: boolean;
+  title: string;
+  message: ReactNode;
+  cancelText?: string;
+  confirmText?: string;
+};
+
+const [confirmModal, setConfirmModal] = useState<ConfirmState>({
+  open: false,
+  title: "",
+  message: null,
+});
+
+const confirmResolverRef = useRef<((ok: boolean) => void) | null>(null);
+
+function openConfirm(opts: Omit<ConfirmState, "open">) {
+  return new Promise<boolean>((resolve) => {
+    confirmResolverRef.current = resolve;
+    setConfirmModal({ open: true, ...opts });
+  });
+}
+
+function closeConfirm(ok: boolean) {
+  setConfirmModal((s) => ({ ...s, open: false }));
+  confirmResolverRef.current?.(ok);
+  confirmResolverRef.current = null;
+}
+
 // Fetch plantilla data when modal opens (copied from CHAIR_Plantilla; no dependency on that page).
 useEffect(() => {
   if (!chairPlantillaOpen) return;
@@ -4978,7 +5008,6 @@ const handleApplyPendingDrafts = useCallback(
     if (pendingRfc.length || unassigned.length || notFinalized.length) {
       const proceed = await openConfirm({
         title: "Some sections are not ready",
-        variant: "warning",
         confirmText: "Submit anyway",
         cancelText: "Review",
         message: (
@@ -8597,6 +8626,31 @@ const courseCodeToInfo = useMemo(() => {
         </div>
       </div>
     </div>
+
+    {confirmModal.open && (
+    <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/30">
+      <div className="w-[520px] rounded-xl bg-white p-4 shadow-xl">
+        <div className="text-lg font-semibold">{confirmModal.title}</div>
+        <div className="mt-2">{confirmModal.message}</div>
+
+        <div className="mt-4 flex justify-end gap-2">
+          <button
+            className="rounded-md border px-3 py-2 text-sm"
+            onClick={() => closeConfirm(false)}
+          >
+            {confirmModal.cancelText ?? "Cancel"}
+          </button>
+          <button
+            className="rounded-md bg-emerald-600 px-3 py-2 text-sm text-white"
+            onClick={() => closeConfirm(true)}
+          >
+            {confirmModal.confirmText ?? "Continue"}
+          </button>
+        </div>
+      </div>
+    </div>
+  )}                  
+ 
   </div>
 )}
 
