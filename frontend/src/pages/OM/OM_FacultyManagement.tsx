@@ -1,5 +1,6 @@
 /* ------------- OM_FacultyManagement.tsx ------------- */
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
@@ -258,6 +259,8 @@ export default function OM_FacultyManagement() {
 
   // row actions dropdown
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [openMenuRow, setOpenMenuRow] = useState<FacultyRow | null>(null);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const openMenuRef = useRef<HTMLDivElement | null>(null);
 
   const [modalError, setModalError] = useState<string>("");
@@ -323,13 +326,43 @@ export default function OM_FacultyManagement() {
       if (e.key === "Escape") setOpenMenuId(null);
     };
 
+    const onScrollOrResize = () => {
+      // Close to avoid stale positioning when the viewport changes.
+      setOpenMenuId(null);
+    };
+
     window.addEventListener("mousedown", onDown);
     window.addEventListener("keydown", onKey);
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
     return () => {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("keydown", onKey);
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
     };
   }, [openMenuId]);
+
+  // Reset row/position whenever menu closes.
+  useEffect(() => {
+    if (openMenuId) return;
+    setOpenMenuRow(null);
+    setMenuPos(null);
+  }, [openMenuId]);
+
+  const openActionsMenu = (row: FacultyRow, btn: HTMLButtonElement) => {
+    const id = row.faculty_id;
+    setOpenMenuId((cur) => (cur === id ? null : id));
+
+    // Compute fixed-position anchor (portal avoids clipping inside overflow containers).
+    const rect = btn.getBoundingClientRect();
+    const menuWidth = 224; // tailwind w-56
+    const gap = 8;
+    const top = rect.bottom + gap;
+    const left = Math.max(gap, Math.min(window.innerWidth - menuWidth - gap, rect.right - menuWidth));
+    setMenuPos({ top, left });
+    setOpenMenuRow(row);
+  };
 
   // Fetch rows (status filter is client-side)
   useEffect(() => {
@@ -520,13 +553,13 @@ export default function OM_FacultyManagement() {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -543,13 +576,13 @@ export default function OM_FacultyManagement() {
             <table className="w-full table-fixed text-sm">
               <thead className="bg-gray-50 border-b text-gray-900">
                 <tr>
-                  <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                   <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
+                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                 </tr>
               </thead>
               <tbody className="divide-y">
@@ -576,13 +609,13 @@ export default function OM_FacultyManagement() {
                   <table className="w-full table-fixed text-sm">
                     <thead className="bg-gray-50 border-b text-gray-900">
                       <tr>
-                        <th className="w-[28.2857%] text-left px-4 py-2">Faculty</th>
-                        <th className="w-[12.2857%] text-center px-4 py-2">Faculty Type</th>
-                        <th className="w-[10.2857%] text-left px-4 py-2">Certifications</th>
+                        <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
+                        <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                        <th className="w-[10.2857%] text-center px-4 py-2">Status</th>
-                        <th className="w-[10.2857%] text-center px-2 py-2">Actions</th>
+                        <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
+                        <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
                       </tr>
                     </thead>
 
@@ -631,13 +664,10 @@ export default function OM_FacultyManagement() {
                             <td className="px-2 py-3 text-center">
                               <div
                                 className="relative flex items-center justify-center"
-                                ref={(node) => {
-                                  if (openMenuId === r.faculty_id) openMenuRef.current = node;
-                                }}
                               >
                                 <button
                                   type="button"
-                                  onClick={() => setOpenMenuId((cur) => (cur === r.faculty_id ? null : r.faculty_id))}
+                                  onClick={(e) => openActionsMenu(r, e.currentTarget)}
                                   className={cls(
                                     // No extra "white box" around the 3-dots. Keep it clean and table-native.
                                     "inline-flex h-9 w-9 items-center justify-center rounded-full text-gray-700 hover:bg-gray-100",
@@ -650,39 +680,6 @@ export default function OM_FacultyManagement() {
                                 >
                                   <MoreVertical className="h-4 w-4" />
                                 </button>
-
-                                {openMenuId === r.faculty_id && (
-                                  <div
-                                    role="menu"
-                                    className="absolute right-0 top-11 z-30 w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg"
-                                  >
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                      onClick={() => {
-                                        setOpenMenuId(null);
-                                        openModal("schedule", r);
-                                      }}
-                                    >
-                                      <Calendar className="h-4 w-4 text-gray-500" />
-                                      <span>Schedule</span>
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                                      onClick={() => {
-                                        setOpenMenuId(null);
-                                        openModal("history", r);
-                                      }}
-                                    >
-                                      <BookOpen className="h-4 w-4 text-gray-500" />
-                                      <span>Teaching History</span>
-                                    </button>
-                                  </div>
-                                )}
                               </div>
                             </td>
                           </tr>
@@ -696,6 +693,45 @@ export default function OM_FacultyManagement() {
           ))
         )}
       </section>
+
+      {/* Actions dropdown menu (portal: always on top, not clipped by overflow containers) */}
+      {openMenuId && openMenuRow && menuPos
+        ? createPortal(
+            <div
+              ref={openMenuRef}
+              role="menu"
+              style={{ position: "fixed", top: menuPos.top, left: menuPos.left }}
+              className="z-[5000] w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg"
+            >
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  openModal("schedule", openMenuRow);
+                }}
+              >
+                <Calendar className="h-4 w-4 text-gray-500" />
+                <span>Schedule</span>
+              </button>
+
+              <button
+                type="button"
+                role="menuitem"
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                onClick={() => {
+                  setOpenMenuId(null);
+                  openModal("history", openMenuRow);
+                }}
+              >
+                <BookOpen className="h-4 w-4 text-gray-500" />
+                <span>Teaching History</span>
+              </button>
+            </div>,
+            document.body
+          )
+        : null}
 
       {/* -------- Schedule / History Modals -------- */}
       {activeModal && selected && (
