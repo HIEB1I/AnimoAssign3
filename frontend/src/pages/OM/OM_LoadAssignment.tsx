@@ -5051,12 +5051,10 @@ const handleApplyPendingDrafts = useCallback(
         { rows: rows.map(stripUiFieldsForPersist) },
         "approve"
       );
-  
       await notifyChairLoadRecommendation(userId, {
         kind: (res as any)?.kind,
         reco_id: (res as any)?.reco_id,
       });
-  
       showToast("Forwarded to Chair.", "success");
       await loadFromServer();
       setApproved(true);
@@ -7971,9 +7969,9 @@ const courseCodeToInfo = useMemo(() => {
                           <table className="w-full text-sm table-fixed border-collapse">
                             <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
                               <tr className="whitespace-nowrap text-[13px] font-semibold">
-                                {/* <th className="px-3 py-2 text-left border border-gray-300">
+                                <th className="px-3 py-2 text-left border border-gray-300">
                                   Rule
-                                </th> */}
+                                </th>
                                 <th className="px-3 py-2 text-left border border-gray-300">
                                   Faculty
                                 </th>
@@ -7994,11 +7992,11 @@ const courseCodeToInfo = useMemo(() => {
                             <tbody >
                               {ruleAlertsFiltered.map((a) => (
                                 <tr key={a.id} className="hover:bg-gray-50">
-                                  {/* <td className="px-3 py-2 align-top border border-gray-300">
+                                  <td className="px-3 py-2 align-top border border-gray-300">
                                     <span className="font-mono text-[11px]">
                                       {a.rule}
                                     </span>
-                                  </td> */}
+                                  </td>
                                   <td className="px-3 py-2 align-top border border-gray-300">
                                     <div className="font-medium text-gray-900">
                                       {a.facultyName || "—"}
