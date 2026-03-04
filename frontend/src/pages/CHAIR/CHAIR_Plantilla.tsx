@@ -39,7 +39,7 @@ function ClipboardStarIcon({
 
 /* ---------------- Sidebar ---------------- */
 const ITEMS: SidebarItem[] = [
-  { label: "Plantilla", to: "/chair/plantilla", Icon: ListChecks },
+  //{ label: "Plantilla", to: "/chair/plantilla", Icon: ListChecks },
   { label: "Load Assignment", to: "/chair/load-assignment", Icon: FileSpreadsheet },
   { label: "Faculty Directory", to: "/chair/faculty-management", Icon: Users },
   { label: "Course Management", to: "/chair/course-management", Icon: BookOpen },
@@ -745,7 +745,7 @@ export default function CHAIR_Plantilla() {
   }, [navigate]);
 
   useEffect(() => {
-    if (isRootChair) navigate("/chair/plantilla", { replace: true });
+    if (isRootChair) navigate("/chair/load-assignment", { replace: true });
   }, [isRootChair, navigate]);
 
   // fetch header (department label comes from here)
