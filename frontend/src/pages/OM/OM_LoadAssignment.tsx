@@ -86,6 +86,7 @@ import {
   Download,
   Save,
   Trash2,
+  Inbox,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -2171,7 +2172,7 @@ const SendBlockedModal = ({
       <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-2 flex items-start gap-3">
           <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-            <MessageSquareText className="h-5 w-5" />
+            <Inbox className="h-5 w-5" />
           </div>
           <div className="min-w-0">
             <h3 className="text-lg font-semibold text-gray-900">
@@ -7267,7 +7268,7 @@ const courseCodeToInfo = useMemo(() => {
                                               isArchiveView &&
                                                 "opacity-40 cursor-not-allowed hover:brightness-100"
                                             )}
-                                            title="Message"
+                                            title="RFC"
                                             onClick={() => {
                                               if (isArchiveView) return;
                                               setReqChange({
@@ -7280,7 +7281,7 @@ const courseCodeToInfo = useMemo(() => {
                                               });
                                             }}
                                           >
-                                            <MessageSquareText className="h-5 w-5" />
+                                            <Inbox className="h-5 w-5" />
                                             {unread && (
                                               <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
                                             )}

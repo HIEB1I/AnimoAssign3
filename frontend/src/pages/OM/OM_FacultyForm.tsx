@@ -765,158 +765,183 @@ useEffect(() => {
                 )}
 
                 {!prefLoading && pref && (
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                    {/* Teaching Load */}
-                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                      <div className="flex items-center gap-2 text-gray-900">
-                        <GraduationCap className="h-4 w-4 text-emerald-700" />
-                        <h3 className="font-semibold">Teaching Load</h3>
-                      </div>
+                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 items-stretch">
+  <div className="flex flex-col gap-4 h-full">
+    {/* Teaching Load */}
+                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                          <div className="flex items-center gap-2 text-gray-900">
+                            <GraduationCap className="h-4 w-4 text-emerald-700" />
+                            <h3 className="font-semibold">Teaching Load</h3>
+                          </div>
 
-                      <div className="mt-3 space-y-3 text-sm">
-                        <div>
-                          <p className="text-xs font-medium text-gray-600">
-                            Preferred Teaching Units
-                          </p>
-                          <p className="mt-1 break-words text-gray-800">
-                            {pref.teaching?.preferred_units ?? "—"}
-                          </p>
+                          <div className="mt-3 space-y-3 text-sm">
+                            <div>
+                              <p className="text-xs font-medium text-gray-600">
+                                Preferred Teaching Units
+                              </p>
+                              <p className="mt-1 break-words text-gray-800">
+                                {pref.teaching?.preferred_units ?? "—"}
+                              </p>
+                            </div>
+
+                            <div>
+                              <p className="text-xs font-medium text-gray-600">
+                                Deloading
+                              </p>
+
+                              {(() => {
+                                const raw = pref.teaching?.deloading;
+                                const deload: string[] = Array.isArray(raw)
+                                  ? raw
+                                  : raw
+                                  ? [String(raw)]
+                                  : [];
+
+                                if (!deload.length) {
+                                  return (
+                                    <div className="mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                                      <div>
+                                        <div className="font-semibold">
+                                          No deloading indicated
+                                        </div>
+                                        <div className="mt-0.5 text-amber-800/90">
+                                          This faculty has no deloading entry for
+                                          the current preference record.
+                                        </div>
+                                      </div>
+                                    </div>
+                                  );
+                                }
+
+                                return (
+                                  <ul className="mt-2 space-y-1 text-gray-700">
+                                    {deload.map((d, i) => (
+                                      <li key={i} className="flex gap-2">
+                                        <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-400" />
+                                        <span className="flex-1 break-words">
+                                          {d}
+                                        </span>
+                                      </li>
+                                    ))}
+                                  </ul>
+                                );
+                              })()}
+                            </div>
+                          </div>
                         </div>
+    {/* Schedule */}
+                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                          <div className="flex items-center gap-2 text-gray-900">
+                            <Calendar className="h-4 w-4 text-emerald-700" />
+                            <h3 className="font-semibold">Schedule</h3>
+                          </div>
 
-                        <div>
-                          <p className="text-xs font-medium text-gray-600">
-                            Deloading
-                          </p>
 
-                          {(() => {
-                            const raw = pref.teaching?.deloading;
-                            const deload: string[] = Array.isArray(raw)
-                              ? raw
-                              : raw
-                              ? [String(raw)]
-                              : [];
-
-                            if (!deload.length) {
-                              return (
-                                <div className="mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                  <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
-                                  <div>
-                                    <div className="font-semibold">
-                                      No deloading indicated
-                                    </div>
-                                    <div className="mt-0.5 text-amber-800/90">
-                                      This faculty has no deloading entry for
-                                      the current preference record.
-                                    </div>
-                                  </div>
+                          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
+                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                              <div>
+                                <p className="text-xs font-medium text-gray-600">Days</p>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {(() => {
+                                    const days: string[] = Array.isArray(pref.schedule?.days) ? pref.schedule.days : [];
+                                    if (!days.length) return <span className="text-sm text-gray-800">—</span>;
+                                    return days.map((d, idx) => (
+                                      <span
+                                        key={`${d}-${idx}`}
+                                        className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
+                                      >
+                                        {d}
+                                      </span>
+                                    ));
+                                  })()}
                                 </div>
-                              );
-                            }
+                              </div>
 
-                            return (
-                              <ul className="mt-2 space-y-1 text-gray-700">
-                                {deload.map((d, i) => (
-                                  <li key={i} className="flex gap-2">
-                                    <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-400" />
-                                    <span className="flex-1 break-words">
-                                      {d}
-                                    </span>
-                                  </li>
-                                ))}
+                              <div>
+                                <p className="text-xs font-medium text-gray-600">Time Slots</p>
+                                <div className="mt-2 flex flex-wrap gap-2">
+                                  {(() => {
+                                    const times: string[] = Array.isArray(pref.schedule?.times) ? pref.schedule.times : [];
+                                    if (!times.length) return <span className="text-sm text-gray-800">—</span>;
+                                    return times.map((t, idx) => (
+                                      <span
+                                        key={`${t}-${idx}`}
+                                        className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
+                                      >
+                                        {t}
+                                      </span>
+                                    ));
+                                  })()}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <div className="flex flex-col gap-4 h-full">
+                        {/* Location and Mode */}
+                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm h-fit w-full">
+                          <div className="flex items-center gap-2 text-gray-900">
+                            <MapPin className="h-4 w-4 text-emerald-700" />
+                            <h3 className="font-semibold">Location and Mode</h3>
+                          </div>
+
+                          <div className="mt-3 text-sm">
+                            <p className="text-xs font-medium text-gray-600">Mode</p>
+                            <p className="mt-1 break-words text-gray-800">
+                              {typeof pref.location_mode?.mode === "object"
+                                ? JSON.stringify(pref.location_mode?.mode)
+                                : pref.location_mode?.mode ?? "—"}
+                            </p>
+                          </div>
+                        </div>
+    {/* Academic Specialization */}
+                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm flex-1 min-h-0 flex flex-col">
+                          <div className="flex items-center gap-2 text-gray-900">
+                            <BookOpen className="h-4 w-4 text-emerald-700" />
+                            <h3 className="font-semibold">
+                              Academic Specialization
+                            </h3>
+                          </div>
+
+                          <div className="mt-3 text-sm flex-1 min-h-0 overflow-auto">
+                            <p className="text-xs font-medium text-gray-600">
+                              KAC's
+                            </p>
+                            {(pref.specialization?.courses || []).length ? (
+                              <ul className="mt-1 list-disc space-y-1 pl-5 text-gray-800">
+                                {(pref.specialization?.courses || []).map(
+                                  (kac: string, idx: number) => (
+                                    <li key={`${kac}-${idx}`} className="break-words">
+                                      {kac}
+                                    </li>
+                                  )
+                                )}
                               </ul>
-                            );
-                          })()}
+                            ) : (
+                              <p className="mt-1 break-words text-gray-800">—</p>
+                            )}
+                          </div>
+                        </div>
+  </div>
+  {/* Remarks */}
+                      <div className="md:col-span-2 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-1">
+                          <div>
+                            <p className="text-xs font-medium text-gray-600">
+                              Remarks
+                            </p>
+                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
+                              {pref.submission?.notes &&
+                              String(pref.submission.notes).trim()
+                                ? pref.submission.notes
+                                : "—"}
+                            </p>
+                          </div>
                         </div>
                       </div>
-                    </div>
-
-                    {/* Location and Mode */}
-                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                      <div className="flex items-center gap-2 text-gray-900">
-                        <MapPin className="h-4 w-4 text-emerald-700" />
-                        <h3 className="font-semibold">Location and Mode</h3>
-                      </div>
-
-                      <div className="mt-3 text-sm">
-                        <p className="text-xs font-medium text-gray-600">Mode</p>
-                        <p className="mt-1 break-words text-gray-800">
-                          {typeof pref.location_mode?.mode === "object"
-                            ? JSON.stringify(pref.location_mode?.mode)
-                            : pref.location_mode?.mode ?? "—"}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Schedule */}
-                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                      <div className="flex items-center gap-2 text-gray-900">
-                        <Calendar className="h-4 w-4 text-emerald-700" />
-                        <h3 className="font-semibold">Schedule</h3>
-                      </div>
-
-                      <div className="mt-3 space-y-3 text-sm">
-                        <div>
-                          <p className="text-xs font-medium text-gray-600">
-                            Days
-                          </p>
-                          <p className="mt-1 break-words text-gray-800">
-                            {(pref.schedule?.days || []).length
-                              ? pref.schedule.days.join(", ")
-                              : "—"}
-                          </p>
-                        </div>
-
-                        <div>
-                          <p className="text-xs font-medium text-gray-600">
-                            Time Slots
-                          </p>
-                          <p className="mt-1 break-words text-gray-800">
-                            {(pref.schedule?.times || []).length
-                              ? pref.schedule.times.join(", ")
-                              : "—"}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-
-                    {/* Academic Specialization */}
-                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                      <div className="flex items-center gap-2 text-gray-900">
-                        <BookOpen className="h-4 w-4 text-emerald-700" />
-                        <h3 className="font-semibold">
-                          Academic Specialization
-                        </h3>
-                      </div>
-
-                      <div className="mt-3 text-sm">
-                        <p className="text-xs font-medium text-gray-600">
-                          Courses
-                        </p>
-                        <p className="mt-1 break-words text-gray-800">
-                          {(pref.specialization?.courses || []).length
-                            ? pref.specialization.courses.join(", ")
-                            : "—"}
-                        </p>
-                      </div>
-                    </div>
-
-                    {/* Remarks */}
-                    <div className="md:col-span-2 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                      <div className="grid grid-cols-1 gap-4 md:grid-cols-1">
-                        <div>
-                          <p className="text-xs font-medium text-gray-600">
-                            Remarks
-                          </p>
-                          <p className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
-                            {pref.submission?.notes &&
-                            String(pref.submission.notes).trim()
-                              ? pref.submission.notes
-                              : "—"}
-                          </p>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+</div>
                 )}
               </div>
 
