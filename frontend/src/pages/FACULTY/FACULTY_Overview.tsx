@@ -4,6 +4,8 @@ import ReactDOM from "react-dom";
 import {
   Send as SendIcon,
   X,
+  Check,
+  Inbox,
   BookOpen as SyllabusIcon,
   Edit,
   AlertTriangle,
@@ -421,7 +423,6 @@ const pushToast = useCallback(
       proposal_status: (list as any).proposal_status,
       rfc: (list as any).rfc,
       schedule_final: (list as any).schedule_final,
-      room_changed_since_accept: (list as any).room_changed_since_accept,
     };
     setData(nextData);
     setError(null);
@@ -721,6 +722,7 @@ type TLItem = {
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
+  special_faculty_status?: "PENDING" | "ACCEPTED" | string;
   student?: string;
   reason?: string;
   is_serviced?: boolean;
@@ -938,10 +940,9 @@ type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[];
   term: any;
   workflow?: {
-  schedule_final?: boolean;
-  proposal_status?: string | null;
-  room_changed_since_accept?: boolean;
-  rfc?: { status?: string | null } | null;
+    schedule_final?: boolean;
+    proposal_status?: string | null;
+    rfc?: { status?: string | null } | null;
   };
   onToast?: (kind: ToastKind, message: string, title?: string) => void;
   onRefresh?: () => Promise<void> | void;
@@ -1472,11 +1473,24 @@ const [isAccepting, setIsAccepting] = useState(false);
   // Faculty acceptance should NOT lock/finalize; OM can still edit/resend, and faculty can RFC/accept again.
   const scheduleFinal = Boolean(workflow?.schedule_final);
 
+  const hasServiced = useMemo(
+    () =>
+      (teachingLoad || []).some(
+        (it) => !Boolean((it as any)?.is_special_class) && Boolean((it as any)?.is_serviced)
+      ),
+    [teachingLoad]
+  );
+
+  // Extra guard (frontend): if serviced classes exist, ensure RFC isn't blocked by a stale lock state.
+  const scheduleFinalEffective = scheduleFinal && !hasServiced;
+
   // If OM already marked the schedule as Approved (faculty accepted), prevent accepting again.
   // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
   const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
-  const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
-  const roomChangedSinceAccept = Boolean(workflow?.room_changed_since_accept);
+  const isAlreadyApprovedRaw =
+    proposalStatusLower === "approved" || proposalStatusLower === "accepted";
+  // If serviced classes arrived after acceptance, allow faculty to RFC/accept again.
+  const isAlreadyApproved = isAlreadyApprovedRaw && !hasServiced;
 
 
 const scheduleFinalLabel = (() => {
@@ -1518,6 +1532,11 @@ const scheduleFinalLabel = (() => {
   };
 
   const hasTBA = regularTeachingLoad.some((item) => item.day1 === 'TBA' || item.time1 === 'TBA');
+
+  // Special class reject confirmation (custom dialog)
+  const [rejectSpecialOpen, setRejectSpecialOpen] = useState(false);
+  const [rejectSpecialBusy, setRejectSpecialBusy] = useState(false);
+  const [rejectSpecialItem, setRejectSpecialItem] = useState<any | null>(null);
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
@@ -1581,7 +1600,7 @@ const scheduleFinalLabel = (() => {
 
                 const resp: any = await acceptFacultyLoadAssignment(
                   userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal, gcal_action: "cleanup" }
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
                 );
 
                 console.log("ACCEPT resp:", resp);
@@ -1607,24 +1626,22 @@ const scheduleFinalLabel = (() => {
                 setIsAccepting(false);
               }
 	                  }}
-	                  disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
+	                  disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
 	                  className={cls(
 	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
 	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved)))
+	                    (isAccepting || scheduleFinalEffective || isAlreadyApproved)
 	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
 	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
 	                  )}
 	                >
-	                  {roomChangedSinceAccept
-                      ? "Accept Updated Rooms"
-                      : scheduleFinal
-                      ? scheduleFinalLabel
-                      : isAlreadyApproved
-                      ? "Approved"
-                      : isAccepting
-                      ? "Accepting…"
-                      : "Accept Schedule"}
+	                  {scheduleFinalEffective
+	                    ? "Finalized"
+	                    : isAlreadyApproved
+	                    ? "Approved"
+	                    : isAccepting
+	                    ? "Accepting…"
+	                    : "Accept Schedule"}
 	                </button>
 
 	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
@@ -1633,7 +1650,7 @@ const scheduleFinalLabel = (() => {
 	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 accent-emerald-600 focus:ring-emerald-600/40"
 	                    checked={sendToGcal}
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
+	                    disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
 	                  />
 	                  <span>Send to GCalendar</span>
 	                </label>
@@ -1681,7 +1698,8 @@ const scheduleFinalLabel = (() => {
 	                }}
 	                disabled={isSyncingSpecial}
 	                className={cls(
-	                  "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
+	                  // Match height of Calendar/List/Special Class controls
+	                  "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm",
 	                  "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
 	                  isSyncingSpecial
 	                    ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
@@ -1695,6 +1713,63 @@ const scheduleFinalLabel = (() => {
         </div>
         </div>
       </div>
+
+      {/* Custom reject confirmation (Special Class tab) */}
+      <ConfirmDialog
+        open={rejectSpecialOpen}
+        tone="danger"
+        title="Reject this special class request?"
+        description={
+          rejectSpecialItem ? (
+            <div className="space-y-2">
+              <div className="text-sm">
+                This will remove the request from your Special Class list and notify the OM/Chair.
+              </div>
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-800">
+                <div className="font-semibold">
+                  {rejectSpecialItem.course_code || "—"}{" "}
+                  <span className="font-normal text-neutral-600">({rejectSpecialItem.section || "—"})</span>
+                </div>
+                <div className="text-[13px] text-neutral-600">{rejectSpecialItem.course_title || "—"}</div>
+              </div>
+            </div>
+          ) : null
+        }
+        confirmText={rejectSpecialBusy ? "Rejecting…" : "Reject"}
+        cancelText="Cancel"
+        onCancel={() => {
+          if (rejectSpecialBusy) return;
+          setRejectSpecialOpen(false);
+          setRejectSpecialItem(null);
+        }}
+        onConfirm={async () => {
+          if (rejectSpecialBusy) return;
+          try {
+            setRejectSpecialBusy(true);
+
+            const it = rejectSpecialItem;
+            const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+            const userId = raw.userId || raw.user_id || raw.id;
+            if (!userId) throw new Error("User is not logged in");
+            if (!it?.special_id) throw new Error("Missing special class id");
+
+            await apiPost("/api/faculty/special-class/respond", {
+              user_id: userId,
+              special_id: it.special_id,
+              action: "reject",
+            });
+
+            onToast?.("info", "Special class rejected. OM/Chair notified.");
+            setRejectSpecialOpen(false);
+            setRejectSpecialItem(null);
+            await Promise.resolve(onRefresh?.());
+          } catch (err: any) {
+            onToast?.("error", err?.message || "Failed to reject special class.");
+          } finally {
+            setRejectSpecialBusy(false);
+          }
+        }}
+      />
 
 	      {/* Legend (mobile): centered above the calendar/list table */}
 	      {view !== "Special" && (
@@ -1722,7 +1797,7 @@ const scheduleFinalLabel = (() => {
         "Schedule Locked" applies only to regular/serviced load assignment.
         It must NOT appear in the Special Class tab.
       */}
-      {scheduleFinal && view !== "Special" && (
+      {scheduleFinalEffective && view !== "Special" && (
         <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
           <span className="font-semibold">Schedule Locked:</span> {scheduleFinalLabel}. You can no longer submit RFCs.
         </div>
@@ -1790,7 +1865,7 @@ const scheduleFinalLabel = (() => {
                           key={j}
                           it={it}
                           onClick={() => {
-                            if (scheduleFinal) return;
+                            if (scheduleFinalEffective) return;
                             // Reflected Special Classes must NOT allow RFC.
                             if (it.is_special_class) return;
                             setModal({ day: g.day, item: it });
@@ -1863,6 +1938,38 @@ const scheduleFinalLabel = (() => {
                 const room2Display = normalizeRoomDisplayForSpecial((it as any).room2);
 
                 const modeDisplay = specialModeFromRooms((it as any).room1, (it as any).room2);
+
+                const facStatus = String((it as any)?.special_faculty_status || "PENDING").toUpperCase();
+                const isPending = facStatus !== "ACCEPTED";
+
+                const onAcceptSpecial = async (e: React.MouseEvent) => {
+                  e.stopPropagation();
+                  try {
+                    const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                    const userId = raw.userId || raw.user_id || raw.id;
+                    if (!userId) throw new Error("User is not logged in");
+
+                    await apiPost("/api/faculty/special-class/respond", {
+                      user_id: userId,
+                      special_id: (it as any)?.special_id,
+                      action: "accept",
+                    });
+
+                    onToast?.("success", "Special class accepted. OM/Chair notified.");
+                    await Promise.resolve(onRefresh?.());
+                  } catch (err: any) {
+                    onToast?.("error", err?.message || "Failed to accept special class.");
+                  }
+                };
+
+                const onRejectSpecial = async (e: React.MouseEvent) => {
+                  e.stopPropagation();
+                  setRejectSpecialItem({
+                    ...it,
+                    special_id: (it as any)?.special_id,
+                  });
+                  setRejectSpecialOpen(true);
+                };
 
                 // Allow opening the RFC modal from special classes (Conversation-only mode is handled inside the modal).
                 const onOpen = () => {
@@ -1975,21 +2082,65 @@ const scheduleFinalLabel = (() => {
                     </td>
 
                     <td className="px-3 py-3 align-top text-center">
-                      <button
-                        type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openEditSpecial(it);
-                        }}
-                        className={cls(
-                          "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                          "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
-                        )}
-                        title="Edit Special Class Schedule"
-                        aria-label="Edit Special Class Schedule"
-                      >
-                        <Edit className="h-4 w-4" />
-                      </button>
+                      {isPending ? (
+                        <div className="flex items-center justify-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={onAcceptSpecial}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-lg border",
+                              "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
+                            )}
+                            title="Accept"
+                            aria-label="Accept"
+                          >
+                            <Check className="h-4 w-4 text-emerald-700" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={onRejectSpecial}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-lg border",
+                              "border-red-200 bg-red-50 text-red-700 hover:bg-red-100 active:translate-y-[0.5px]"
+                            )}
+                            title="Reject"
+                            aria-label="Reject"
+                          >
+                            <X className="h-4 w-4" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onOpen();
+                            }}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-lg border",
+                              "border-slate-200 bg-white hover:bg-slate-50 active:translate-y-[0.5px]"
+                            )}
+                            title="Message OM/Chair"
+                            aria-label="Message OM/Chair"
+                          >
+                            <Inbox className="h-4 w-4 text-slate-700" />
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            openEditSpecial(it);
+                          }}
+                          className={cls(
+                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
+                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
+                          )}
+                          title="Edit Special Class Schedule"
+                          aria-label="Edit Special Class Schedule"
+                        >
+                          <Edit className="h-4 w-4" />
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -2404,7 +2555,7 @@ const scheduleFinalLabel = (() => {
         onClose={() => setModal(null)}
         context={modal}
         term={term}
-        scheduleFinal={scheduleFinal}
+        scheduleFinal={scheduleFinalEffective}
         allTeachingLoad={teachingLoad}
         onToast={onToast}
         onRefresh={onRefresh}
