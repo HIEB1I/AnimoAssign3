@@ -74,7 +74,6 @@ import {
   Play,
   RefreshCcw,
   Send,
-  AlertTriangle,
   CalendarClock,
   Info,
   Plus,

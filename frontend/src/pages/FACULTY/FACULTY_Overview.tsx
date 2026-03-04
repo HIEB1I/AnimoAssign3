@@ -421,6 +421,7 @@ const pushToast = useCallback(
       proposal_status: (list as any).proposal_status,
       rfc: (list as any).rfc,
       schedule_final: (list as any).schedule_final,
+      room_changed_since_accept: (list as any).room_changed_since_accept,
     };
     setData(nextData);
     setError(null);
@@ -937,9 +938,10 @@ type TeachingLoadEnhancedProps = {
   teachingLoad: TLItem[];
   term: any;
   workflow?: {
-    schedule_final?: boolean;
-    proposal_status?: string | null;
-    rfc?: { status?: string | null } | null;
+  schedule_final?: boolean;
+  proposal_status?: string | null;
+  room_changed_since_accept?: boolean;
+  rfc?: { status?: string | null } | null;
   };
   onToast?: (kind: ToastKind, message: string, title?: string) => void;
   onRefresh?: () => Promise<void> | void;
@@ -1474,6 +1476,7 @@ const [isAccepting, setIsAccepting] = useState(false);
   // The button should re-enable when OM sends a new schedule proposal (proposal_status changes away from Approved/Accepted).
   const proposalStatusLower = String(workflow?.proposal_status || "").toLowerCase();
   const isAlreadyApproved = proposalStatusLower === "approved" || proposalStatusLower === "accepted";
+  const roomChangedSinceAccept = Boolean(workflow?.room_changed_since_accept);
 
 
 const scheduleFinalLabel = (() => {
@@ -1578,7 +1581,7 @@ const scheduleFinalLabel = (() => {
 
                 const resp: any = await acceptFacultyLoadAssignment(
                   userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal, gcal_action: "cleanup" }
                 );
 
                 console.log("ACCEPT resp:", resp);
@@ -1604,22 +1607,24 @@ const scheduleFinalLabel = (() => {
                 setIsAccepting(false);
               }
 	                  }}
-	                  disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+	                  disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
 	                  className={cls(
 	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
 	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || scheduleFinal || isAlreadyApproved)
+	                    (isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved)))
 	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
 	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
 	                  )}
 	                >
-	                  {scheduleFinal
-	                    ? "Finalized"
-	                    : isAlreadyApproved
-	                    ? "Approved"
-	                    : isAccepting
-	                    ? "Accepting…"
-	                    : "Accept Schedule"}
+	                  {roomChangedSinceAccept
+                      ? "Accept Updated Rooms"
+                      : scheduleFinal
+                      ? scheduleFinalLabel
+                      : isAlreadyApproved
+                      ? "Approved"
+                      : isAccepting
+                      ? "Accepting…"
+                      : "Accept Schedule"}
 	                </button>
 
 	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
@@ -1628,7 +1633,7 @@ const scheduleFinalLabel = (() => {
 	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 accent-emerald-600 focus:ring-emerald-600/40"
 	                    checked={sendToGcal}
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting || scheduleFinal || isAlreadyApproved}
+	                    disabled={isAccepting || (!roomChangedSinceAccept && (scheduleFinal || isAlreadyApproved))}
 	                  />
 	                  <span>Send to GCalendar</span>
 	                </label>
