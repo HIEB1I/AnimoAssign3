@@ -6,6 +6,7 @@ import {
   X,
   BookOpen as SyllabusIcon,
   Edit,
+  AlertTriangle,
 } from "lucide-react";
 
 import TopBar from "../../component/TopBar";
@@ -130,6 +131,134 @@ function ToastViewport({
         </div>
       ))}
     </div>
+  );
+}
+
+/* =========================================
+   Confirm Dialog (Faculty)
+   - Custom replacement for window.confirm (avoids generic browser prompt)
+   - Uses a portal so it floats above page/modals
+   ========================================= */
+function ConfirmDialog({
+  open,
+  title,
+  description,
+  confirmText = "Confirm",
+  cancelText = "Cancel",
+  tone = "warning",
+  onConfirm,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description?: React.ReactNode;
+  confirmText?: string;
+  cancelText?: string;
+  tone?: "warning" | "danger" | "info";
+  onConfirm: () => void;
+  onCancel: () => void;
+}) {
+  const confirmBtnRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => confirmBtnRef.current?.focus(), 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onCancel]);
+
+  if (!open) return null;
+
+  const ring =
+    tone === "danger"
+      ? "ring-red-500/30"
+      : tone === "info"
+      ? "ring-slate-500/20"
+      : "ring-amber-500/30";
+
+  const iconTone =
+    tone === "danger"
+      ? "bg-red-50 text-red-700 border-red-200"
+      : tone === "info"
+      ? "bg-slate-50 text-slate-700 border-slate-200"
+      : "bg-amber-50 text-amber-800 border-amber-200";
+
+  const confirmBtn =
+    tone === "danger"
+      ? "bg-red-600 hover:bg-red-700 focus:ring-red-500/30"
+      : tone === "info"
+      ? "bg-slate-900 hover:bg-slate-800 focus:ring-slate-500/30"
+      : "bg-amber-600 hover:bg-amber-700 focus:ring-amber-500/30";
+
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/40"
+        aria-label="Close dialog"
+        onClick={onCancel}
+      />
+
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label={title}
+        className={cls(
+          "relative w-full max-w-[520px] overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-2xl",
+          "outline-none ring-2",
+          ring
+        )}
+      >
+        <div className="flex items-start gap-3 border-b border-neutral-100 px-5 py-4">
+          <div
+            className={cls(
+              "mt-0.5 inline-flex h-10 w-10 flex-none items-center justify-center rounded-xl border",
+              iconTone
+            )}
+          >
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div className="min-w-0">
+            <div className="text-base font-semibold text-neutral-900">{title}</div>
+            {description ? (
+              <div className="mt-1 text-sm text-neutral-600">{description}</div>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2.5 px-5 py-4">
+          <button
+            type="button"
+            onClick={onCancel}
+            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-white px-4 text-sm font-medium text-neutral-800 shadow-sm hover:bg-neutral-50 focus:outline-none focus:ring-2 focus:ring-neutral-400/20"
+          >
+            {cancelText}
+          </button>
+          <button
+            ref={confirmBtnRef}
+            type="button"
+            onClick={onConfirm}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-semibold text-white shadow-sm",
+              "focus:outline-none focus:ring-2",
+              confirmBtn
+            )}
+          >
+            {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
   );
 }
 
@@ -2265,7 +2394,16 @@ const scheduleFinalLabel = (() => {
         </div>
       )}
 
-      <ChangeRequestModal open={!!modal} onClose={() => setModal(null)} context={modal} term={term} scheduleFinal={scheduleFinal} onToast={onToast} onRefresh={onRefresh} />
+      <ChangeRequestModal
+        open={!!modal}
+        onClose={() => setModal(null)}
+        context={modal}
+        term={term}
+        scheduleFinal={scheduleFinal}
+        allTeachingLoad={teachingLoad}
+        onToast={onToast}
+        onRefresh={onRefresh}
+      />
     </section>
   );
 }
@@ -2382,6 +2520,7 @@ function ChangeRequestModal({
   context,
   term,
   scheduleFinal,
+  allTeachingLoad,
   onToast,
   onRefresh,
 }: {
@@ -2390,6 +2529,7 @@ function ChangeRequestModal({
   context: { day: DayLong; item: TLItemForCalendar } | null; // <-- MODIFIED
   term: any;
   scheduleFinal: boolean;
+  allTeachingLoad: TLItem[];
   onToast?: (kind: ToastKind, message: string, title?: string) => void;
   onRefresh?: () => Promise<void> | void;
 }) {
@@ -2413,6 +2553,145 @@ function ChangeRequestModal({
   const [remarks, setRemarks] = useState("");
   const [otherText, setOtherText] = useState("");
   const [panel, setPanel] = useState<"request" | "conversation">("request");
+
+  // Custom confirmation dialog (replaces window.confirm)
+  const conflictConfirmResolver = useRef<((v: boolean) => void) | null>(null);
+  const [conflictConfirm, setConflictConfirm] = useState<{
+    open: boolean;
+    conflicts: Array<{
+      day: DayLong;
+      time: string;
+      with: { code: string; section: string; is_serviced?: boolean };
+    }>;
+  }>({ open: false, conflicts: [] });
+
+  const confirmPotentialConflict = useCallback(
+    (conflicts: Array<{ day: DayLong; time: string; with: { code: string; section: string; is_serviced?: boolean } }>) => {
+      return new Promise<boolean>((resolve) => {
+        conflictConfirmResolver.current = resolve;
+        setConflictConfirm({ open: true, conflicts });
+      });
+    },
+    []
+  );
+
+  const closeConflictConfirm = useCallback((result: boolean) => {
+    const r = conflictConfirmResolver.current;
+    conflictConfirmResolver.current = null;
+    setConflictConfirm({ open: false, conflicts: [] });
+    r?.(result);
+  }, []);
+
+  // ================================
+  // Schedule conflict detection (RFC)
+  // - Warn before sending, but NEVER block submission.
+  // - Compare requested schedule against faculty's current schedule overview
+  //   (regular classes Manila/Laguna + serviced classes).
+  // - Special rule:
+  //   Mon/Tue/Wed = Online days: if overlap and SAME course -> NOT a conflict.
+  //   Thu/Fri/Sat = F2F days: any overlap is a conflict, even if SAME course.
+  // ================================
+  const ONLINE_DAYS = useMemo(() => new Set<DayLong>(["Monday", "Tuesday", "Wednesday"]), []);
+
+  const parseTimeRange = useCallback((raw?: string): { start: number; end: number } | null => {
+    const s = String(raw ?? "").trim();
+    if (!s || s.toUpperCase() === "TBA") return null;
+    // Accept: "07:30 – 09:00" | "7:30-9:00" | "07:30 — 09:00"
+    const parts = s
+      .split(/\s*(?:–|—|-)\s*/)
+      .map((p) => p.trim())
+      .filter(Boolean);
+    if (parts.length < 2) return null;
+    const a = hmToMinutes(parts[0]);
+    const b = hmToMinutes(parts[1]);
+    if (a == null || b == null) return null;
+    const start = Math.min(a, b);
+    const end = Math.max(a, b);
+    if (end <= start) return null;
+    return { start, end };
+  }, []);
+
+  const rangesOverlap = useCallback(
+    (a: { start: number; end: number }, b: { start: number; end: number }) => {
+      // Standard half-open interval overlap
+      return a.start < b.end && b.start < a.end;
+    },
+    []
+  );
+
+  const detectConflicts = useCallback(
+    (
+      requested: Array<{ day: DayLong; time: string }>,
+      currentCourseCode: string,
+      currentSectionId: string
+    ) => {
+      const conflicts: Array<{
+        day: DayLong;
+        time: string;
+        with: { code: string; section: string; is_serviced?: boolean };
+      }> = [];
+
+      const reqMeetings = requested
+        .map((m) => ({ ...m, range: parseTimeRange(m.time) }))
+        .filter((m) => m.day && m.day !== "TBA" && m.range);
+
+      if (!reqMeetings.length) return conflicts;
+
+      const normalizedCurrentSection = String(currentSectionId || "").trim();
+      const normalizedCurrentCode = String(currentCourseCode || "").trim().toUpperCase();
+
+      for (const it of allTeachingLoad || []) {
+        const itSection = String(it.section_id || "").trim();
+        // Ignore self (this course row)
+        if (normalizedCurrentSection && itSection && itSection === normalizedCurrentSection) continue;
+
+        const itCode = String(it.course_code || "").trim().toUpperCase();
+
+        const meetings: Array<{ day: DayLong; time: string; range: { start: number; end: number } }> = [];
+        const d1 = normalizeDay(it.day1 || "") || null;
+        const r1 = parseTimeRange(it.time1);
+        if (d1 && d1 !== "TBA" && r1) meetings.push({ day: d1, time: String(it.time1 || ""), range: r1 });
+        const d2 = normalizeDay(it.day2 || "") || null;
+        const r2 = parseTimeRange(it.time2);
+        if (d2 && d2 !== "TBA" && r2) meetings.push({ day: d2, time: String(it.time2 || ""), range: r2 });
+
+        if (!meetings.length) continue;
+
+        for (const req of reqMeetings) {
+          for (const cur of meetings) {
+            if (req.day !== cur.day) continue;
+            if (!rangesOverlap(req.range!, cur.range)) continue;
+
+            const sameCourse = itCode && normalizedCurrentCode && itCode === normalizedCurrentCode;
+
+            if (ONLINE_DAYS.has(req.day)) {
+              // Online days: overlap is only a conflict if DIFFERENT course
+              if (sameCourse) continue;
+            }
+
+            // F2F days: any overlap is a conflict (even same course)
+            // If day is not in either set (shouldn't happen), default to conflict.
+
+            conflicts.push({
+              day: req.day,
+              time: req.time,
+              with: { code: it.course_code, section: it.section, is_serviced: it.is_serviced },
+            });
+          }
+        }
+      }
+
+      // De-dupe (same course/day/time)
+      const seen = new Set<string>();
+      return conflicts.filter((c) => {
+        const key = `${c.day}|${c.time}|${String(c.with.code)}|${String(c.with.section)}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    },
+    [ONLINE_DAYS, allTeachingLoad, parseTimeRange, rangesOverlap]
+  );
 
   const dayAbbrev = (d?: string) => {
     const s = String(d || "").trim();
@@ -2441,6 +2720,11 @@ function ChangeRequestModal({
       setRemarks("");
       setOtherText("");
       setPanel("request");
+
+      // If a confirmation is pending and the modal closes, resolve as cancelled.
+      if (conflictConfirmResolver.current) {
+        closeConflictConfirm(false);
+      }
     }
   }, [open]);
 
@@ -2497,7 +2781,44 @@ function ChangeRequestModal({
     (effectivePanel === "request" && choices.length > 0 && !remarks.trim());
 
   return (
-    <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
+    <>
+      <ConfirmDialog
+        open={conflictConfirm.open}
+        title="Potential Conflict"
+        tone="warning"
+        cancelText="Review changes"
+        confirmText="Submit anyway"
+        description={
+          <div className="space-y-3">
+            <div>
+              A schedule overlap was detected with your current teaching load. You can still submit this RFC if you want.
+            </div>
+            <div className="max-h-56 overflow-auto rounded-xl border border-neutral-200 bg-neutral-50 p-3">
+              <ul className="list-disc space-y-1 pl-5">
+                {conflictConfirm.conflicts.slice(0, 10).map((c, idx) => {
+                  const tag = c.with.is_serviced ? " (Serviced)" : "";
+                  return (
+                    <li key={`${c.day}|${c.time}|${c.with.code}|${c.with.section}|${idx}`}>
+                      <span className="font-medium text-neutral-900">{c.day}</span> {c.time} overlaps with{" "}
+                      <span className="font-medium text-neutral-900">
+                        {c.with.code} {c.with.section}
+                      </span>
+                      {tag}
+                    </li>
+                  );
+                })}
+                {conflictConfirm.conflicts.length > 10 ? (
+                  <li className="text-neutral-600">(+{conflictConfirm.conflicts.length - 10} more)</li>
+                ) : null}
+              </ul>
+            </div>
+          </div>
+        }
+        onCancel={() => closeConflictConfirm(false)}
+        onConfirm={() => closeConflictConfirm(true)}
+      />
+
+      <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
 	    <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
 	      {/* Header */}
 	      <div className="border-b border-neutral-200 p-5 sm:p-6">
@@ -2801,6 +3122,52 @@ function ChangeRequestModal({
                   : (oi?.time2 || "TBA")
                 : "";
 
+              // ===== Conflict check (warn only; do not block) =====
+              const oiAny: any = (context?.item?.originalItem ?? context?.item ?? {});
+              const sectionIdForSend =
+                oiAny.section_id ||
+                oiAny.special_id ||
+                oiAny.id ||
+                oiAny.sectionId ||
+                oiAny.section?.section_id ||
+                oiAny.section?.id ||
+                "";
+
+              const requestedMeetings: Array<{ day: DayLong; time: string }> = [];
+              const rDay1 = normalizeDay(String(requestedDay1 || "")) || "TBA";
+              if (rDay1 !== "TBA" && requestedTime1 && String(requestedTime1).toUpperCase() !== "TBA") {
+                requestedMeetings.push({ day: rDay1, time: requestedTime1 });
+              }
+              const rDay2 = hasSecond ? (normalizeDay(String(requestedDay2 || "")) || "TBA") : "TBA";
+              if (hasSecond && rDay2 !== "TBA" && requestedTime2 && String(requestedTime2).toUpperCase() !== "TBA") {
+                requestedMeetings.push({ day: rDay2, time: requestedTime2 });
+              }
+
+              const conflicts = detectConflicts(
+                requestedMeetings,
+                String(context.item.code || ""),
+                String(sectionIdForSend || "")
+              );
+              if (conflicts.length) {
+                const proceed = await confirmPotentialConflict(conflicts);
+                if (!proceed) return;
+
+                // Still show a visible warning toast after confirmation (non-blocking)
+                const preview = conflicts
+                  .slice(0, 3)
+                  .map((c) => {
+                    const tag = c.with.is_serviced ? " (Serviced)" : "";
+                    return `${c.day} ${c.time} overlaps with ${c.with.code} ${c.with.section}${tag}`;
+                  })
+                  .join(" • ");
+                const more = conflicts.length > 3 ? ` (+${conflicts.length - 3} more)` : "";
+                onToast?.(
+                  "warning",
+                  `Potential schedule conflict detected: ${preview}${more}. You chose to submit anyway.`,
+                  "Schedule Conflict"
+                );
+              }
+
               // Build a clear, paired summary for OM (avoids confusion between Day 1/2 and Meeting 1/2)
               const msgLines: string[] = [];
               msgLines.push(`RFC: ${context.item.code} ${context.item.sec}`);
@@ -2831,15 +3198,7 @@ function ChangeRequestModal({
 
               const msg = msgLines.join("\n");
 
-              const oiAny: any = (context?.item?.originalItem ?? context?.item ?? {});
-              const sectionId =
-                oiAny.section_id ||
-                oiAny.special_id ||
-                oiAny.id ||
-                oiAny.sectionId ||
-                oiAny.section?.section_id ||
-                oiAny.section?.id ||
-                "";
+              const sectionId = sectionIdForSend;
 
               if (!sectionId) {
                 console.error("RFC send blocked: missing section_id on row", oiAny);
@@ -2893,7 +3252,8 @@ function ChangeRequestModal({
 	        </div>
 	      )}
       </div>
-    </div>
+      </div>
+    </>
   );
 }
 
