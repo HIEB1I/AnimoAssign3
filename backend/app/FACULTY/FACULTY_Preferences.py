@@ -41,6 +41,7 @@ class DeloadingItem(BaseModel):
     deloading_type: Optional[str] = None
     units: Optional[float] = 0
     detail: Optional[str] = ""
+    additional_notes: Optional[str] = ""
 
 
 class SubmitPayload(BaseModel):
@@ -395,6 +396,7 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
           continue
       units_num = r.get("units", 0) or 0
       detail = (r.get("detail") or "").strip()
+      additional_notes = (r.get("additional_notes") or "").strip()
 
       # Units should never be negative (UI also blocks this)
       try:
@@ -420,19 +422,18 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
           "type_id": type_id,
           "units": units_float,
           "notes": detail if needs_spec else "",
+          "additional_notes": additional_notes,
       })
 
+  # We store at most one deloading row per (faculty_id, term_id, type_id).
+  # IMPORTANT: always persist/overwrite `additional_notes` explicitly so new notes
+  # are saved even when a record already exists (and so the field is created).
   existing = await db.deloadings.find({"faculty_id": faculty_id, "term_id": term_id}).to_list(length=9999)
+  keep_type_ids = {r["type_id"] for r in normalized}
 
-  def sig(row: dict) -> tuple[str, float, str]:
-      return (row.get("type_id", ""), float(row.get("units_deloaded", 0)), row.get("notes", ""))
-
-  old_sigs = {sig(x) for x in existing}
-  new_sigs = {(r["type_id"], float(r["units"]), r["notes"]) for r in normalized}
-
+  # Delete types no longer present
   for x in existing:
-      s = sig(x)
-      if s not in new_sigs:
+      if (x.get("type_id") or "") not in keep_type_ids:
           await db.deloadings.delete_one({"_id": x["_id"]})
 
   for r in normalized:
@@ -440,8 +441,6 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
           "faculty_id": faculty_id,
           "term_id": term_id,
           "type_id": r["type_id"],
-          "units_deloaded": float(r["units"]),
-          "notes": r["notes"],
       }
       await db.deloadings.update_one(
           filt,
@@ -452,8 +451,12 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
                   "created_at": now,
                   "faculty_id": faculty_id,
                   "term_id": term_id,
+                  "type_id": r["type_id"],
               },
               "$set": {
+                  "units_deloaded": float(r["units"]),
+                  "notes": r["notes"],
+                  "additional_notes": r.get("additional_notes", ""),
                   "updated_at": now,
               },
           },
@@ -465,6 +468,7 @@ async def _sync_deloadings(db, faculty_id: str, term_id: str, items: list[dict])
           "deloading_type": r["type"],
           "units": r["units"],
           "detail": r["notes"],
+          "additional_notes": r.get("additional_notes", ""),
       }
       for r in normalized
   ]
@@ -506,7 +510,7 @@ async def _enrich_pref(doc: Dict[str, Any]) -> Dict[str, Any]:
       if faculty_id and term_id:
           drows = await db.deloadings.find(
               {"faculty_id": faculty_id, "term_id": term_id},
-              {"_id": 0, "type_id": 1, "units_deloaded": 1, "notes": 1},
+              {"_id": 0, "type_id": 1, "units_deloaded": 1, "notes": 1, "additional_notes": 1},
           ).to_list(length=9999)
 
           # Resolve distinct type labels in one pass
@@ -533,6 +537,7 @@ async def _enrich_pref(doc: Dict[str, Any]) -> Dict[str, Any]:
                   "deloading_type": label,
                   "units": float(r.get("units_deloaded") or 0),
                   "detail": str(r.get("notes") or ""),
+                  "additional_notes": str(r.get("additional_notes") or ""),
               })
           out["deloading_data"] = hydrated
       else:

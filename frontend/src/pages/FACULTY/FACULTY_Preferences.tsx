@@ -49,7 +49,13 @@ function Chip({
       {onRemove ? (
         <button
           type="button"
-          onClick={onRemove}
+          onClick={(e) => {
+            // Chips are rendered inside the dropdown trigger button.
+            // Prevent this click from toggling the dropdown.
+            e.preventDefault();
+            e.stopPropagation();
+            onRemove();
+          }}
           className="rounded-full p-0.5 text-emerald-800/70 hover:bg-emerald-100 hover:text-emerald-900"
           aria-label={`Remove ${label}`}
           title="Remove"
@@ -248,7 +254,7 @@ function MultiSelectDropdown({
       return (
         <div className="flex flex-wrap items-center gap-2 pr-1">
           {values.map((v) => (
-            <Chip key={v} label={v} />
+            <Chip key={v} label={v} onRemove={() => onChange(values.filter((x) => x !== v))} />
           ))}
         </div>
       );
@@ -779,7 +785,7 @@ function AELine1Schedule() {
 /* ===========================
    TYPES & STATE
    =========================== */
-type DeloadRow = { type: string; detail?: string; units: number | null };
+type DeloadRow = { type: string; detail?: string; additionalNotes?: string; units: number | null };
 type FutureTerm = { term_id: string; label: string; start_date?: string };
 
 type TermMeta = { acad_year_start?: number | string; acad_year_end?: number | string; term_number?: number | string };
@@ -1385,6 +1391,29 @@ function EditForm({
                                         )
                                       }
                                     />
+                                    {r.type === "Administrative" && (
+                                      <div className="mt-3">
+                                        <div className="text-[13px] font-semibold text-emerald-700">
+                                          Additional Details{" "}
+                                          <span className="text-neutral-500 font-normal">(optional)</span>
+                                        </div>
+                                        <input
+                                          type="text"
+                                          className="mt-1 w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                                          placeholder="Add any extra context"
+                                          value={r.additionalNotes || ""}
+                                          onChange={(e) =>
+                                            setDeloadRows((rows) =>
+                                              rows.map((x, idx) =>
+                                                idx === i
+                                                  ? { ...x, additionalNotes: e.target.value }
+                                                  : x
+                                              )
+                                            )
+                                          }
+                                        />
+                                      </div>
+                                    )}
                                   </>
                                 )}
 
@@ -1428,7 +1457,7 @@ function EditForm({
                             onClick={() =>
                               setDeloadRows((rows) => [
                                 ...rows,
-                                { type: "Administrative", units: null, detail: "" },
+                                { type: "Administrative", units: null, detail: "", additionalNotes: "" },
                               ])
                             }
                             className={BTN_PRIMARY}
@@ -1673,6 +1702,32 @@ function EditForm({
                                       )
                                     }
                                   />
+                                  {r.type === "Administrative" && (
+                                    <div className="mt-3">
+                                      <div className="text-[13px] font-semibold text-emerald-700">
+                                        Additional Details{" "}
+                                        <span className="text-neutral-500 font-normal">(optional)</span>
+                                      </div>
+                                      <input
+                                        type="text"
+                                        className="mt-1 w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                                        placeholder="Add any extra context (optional)"
+                                        value={r.additionalNotes || ""}
+                                        onChange={(e) =>
+                                          setDeloadRows((rows) =>
+                                            rows.map((x, idx) =>
+                                              idx === i
+                                                ? {
+                                                    ...x,
+                                                    additionalNotes: e.target.value,
+                                                  }
+                                                : x
+                                            )
+                                          )
+                                        }
+                                      />
+                                    </div>
+                                  )}
                                 </div>
                               )}
 
@@ -1717,7 +1772,7 @@ function EditForm({
                           onClick={() =>
                             setDeloadRows((rows) => [
                               ...rows,
-                              { type: "Administrative", units: null, detail: "" },
+                              { type: "Administrative", units: null, detail: "", additionalNotes: "" },
                             ])
                           }
                           className={BTN_PRIMARY}
@@ -2141,6 +2196,32 @@ function EditForm({
                                       )
                                     }
                                   />
+                                  {r.type === "Administrative" && (
+                                    <div className="mt-3">
+                                      <div className="text-[13px] font-semibold text-emerald-700">
+                                        Additional Details{" "}
+                                        <span className="text-neutral-500 font-normal">(optional)</span>
+                                      </div>
+                                      <input
+                                        type="text"
+                                        className="mt-1 w-full rounded-2xl border border-neutral-300 px-4 py-3 text-[15px] shadow-sm outline-none"
+                                        placeholder="Add any extra context (optional)"
+                                        value={r.additionalNotes || ""}
+                                        onChange={(e) =>
+                                          setDeloadRows((rows) =>
+                                            rows.map((x, idx) =>
+                                              idx === i
+                                                ? {
+                                                    ...x,
+                                                    additionalNotes: e.target.value,
+                                                  }
+                                                : x
+                                            )
+                                          )
+                                        }
+                                      />
+                                    </div>
+                                  )}
                                 </div>
                               )}
 
@@ -2184,7 +2265,7 @@ function EditForm({
                           onClick={() =>
                             setDeloadRows((rows) => [
                               ...rows,
-                              { type: "Administrative", units: null, detail: "" },
+                              { type: "Administrative", units: null, detail: "", additionalNotes: "" },
                             ])
                           }
                           className={BTN_PRIMARY}
@@ -2426,6 +2507,7 @@ export default function FACULTY_Preferences() {
           type: d?.deloading_type ?? "Administrative",
           units: d?.units != null ? Number(d.units) : null,
           detail: d?.detail ?? d?.notes ?? "",
+          additionalNotes: d?.additional_notes ?? "",
         }))
         .filter((x: any) => x.type || x.units != null),
       noDeloading: deloadArr.length === 0,
@@ -2583,6 +2665,7 @@ useEffect(() => {
         deloading_type: r.type,
         units: r.units ?? 0,
         detail: needsSpecify ? detail : "",
+        additional_notes: (r.additionalNotes || "").trim(),
       };
     };
 
