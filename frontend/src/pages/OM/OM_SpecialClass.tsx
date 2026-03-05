@@ -304,6 +304,7 @@ function formatDate(dt?: string) {
 }
 
 const CLEAR_SCHEDULE_LABEL = "Clear schedule";
+const DAY_PLACEHOLDER = "Select day…";
 
 /** SelectBox-styled combo input (type + dropdown in ONE box) */
 function ComboSelect({
@@ -834,6 +835,9 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
   const applyPreset = (scheduleId: string) => {
     setDidClearAll(false);
 
+    // Choosing a preset cancels any previous clear-schedule intent
+    setClearMode("none");
+
     if (scheduleId === "CUSTOM") {
       setPresetChoice("CUSTOM");
       setDraft((d) => ({
@@ -897,6 +901,8 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
       if (rowHasNoSchedule) {
         setPresetChoice("CLEAR_SCHEDULE");
+        // Preserve cleared schedule if user saves remarks/status only
+        setClearMode("schedule");
       } else {
         setPresetChoice(match ? match.schedule_id : "CUSTOM");
       }
@@ -1191,6 +1197,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                 rows.map((r) => {
                   const editing = editId === r.special_id;
                   const isCustom = presetChoice === "CUSTOM";
+                  const canEditSectionFaculty = isCustom || presetChoice === "CLEAR_SCHEDULE";
 
                   return (
                     <tr key={r.special_id} className="hover:bg-gray-50 align-top">
@@ -1216,10 +1223,16 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
                       <td className="px-4 py-3">
                         {editing ? (
-                          isCustom ? (
+                          canEditSectionFaculty ? (
                             <input
                               value={(draft.section_code || "") as string}
-                              onChange={(e) => setDraft((d) => ({ ...d, section_code: e.target.value }))}
+                              onChange={(e) => {
+                                if (presetChoice === "CLEAR_SCHEDULE") {
+                                  setClearMode("none");
+                                  setPresetChoice("CUSTOM");
+                                }
+                                setDraft((d) => ({ ...d, section_id: null, section_code: e.target.value }));
+                              }}
                               placeholder=" "
                               className={cls(
                                 "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
@@ -1242,7 +1255,14 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                           <ComboSelect
                             value={facultyInput?.trim() ? facultyInput : ""}
                             onChange={(v) => {
-                              if (!isCustom) return;
+                              if (!canEditSectionFaculty) return;
+
+                              // If the row is in "Clear schedule" mode, switching faculty means you want Custom mode.
+                              if (presetChoice === "CLEAR_SCHEDULE") {
+                                setClearMode("none");
+                                setPresetChoice("CUSTOM");
+                                setDraft((d) => ({ ...d, section_id: null }));
+                              }
 
                               const t = (v || "").trim();
 
@@ -1258,7 +1278,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                             }}
                             options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
                             placeholder="Select Faculty"
-                            disabled={!isCustom}
+                            disabled={!canEditSectionFaculty}
                           />
                         ) : (
                           <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
@@ -1289,21 +1309,17 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                                 onChange={(label) => {
                                   // Any manual change cancels a pending "clear all" state
                                   setDidClearAll(false);
-                                  if (label === "Clear schedule") {
-                                  setClearMode("schedule");
-                                  setDraft((d) => ({
-                                    ...d,
-                                    day1: "" as any,
-                                    begin1: "",
-                                    end1: "",
-                                    day2: "" as any,
-                                    begin2: "",
-                                    end2: "",
-                                    schedule_id1: null,
-                                    schedule_id2: null,
-                                  }));
-                                  return;
-                                }
+
+                                  if (label === CLEAR_SCHEDULE_LABEL) {
+                                    // Clear schedule only (keeps current binding)
+                                    setPresetChoice("CLEAR_SCHEDULE");
+                                    setClearMode("schedule");
+                                    clearScheduleOnlyDraft();
+                                    return;
+                                  }
+
+                                  // Any other selection cancels clear-schedule mode
+                                  setClearMode("none");
 
                                   if (label === "Custom") {
                                     setPresetChoice("CUSTOM");
@@ -1314,12 +1330,6 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                                       day1: (d.day1 as any) || "M",
                                       day2: (d.day2 as any) || "M",
                                     }));
-                                    return;
-                                  }
-
-                                  if (label === CLEAR_SCHEDULE_LABEL) {
-                                    setPresetChoice("CLEAR_SCHEDULE");
-                                    clearScheduleOnlyDraft();
                                     return;
                                   }
 
@@ -1337,11 +1347,16 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
                                   <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">
                                     <SelectBox
-                                      value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : "Monday"}
+                                      value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : DAY_PLACEHOLDER}
                                       onChange={(lbl) =>
-                                        setDraft((d) => ({ ...d, day1: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
+                                        setDraft((d) => ({
+                                          ...d,
+                                          day1: (lbl === DAY_PLACEHOLDER
+                                            ? ("" as any)
+                                            : (DAY_FROM_LABEL[lbl as DayLabel] || "M")) as any,
+                                        }))
                                       }
-                                      options={[...DAY_OPTS_LABELS]}
+                                      options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
                                     />
 
                                     <SelectBox
@@ -1373,11 +1388,16 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
                                   <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
                                     <SelectBox
-                                      value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : "Monday"}
+                                      value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : DAY_PLACEHOLDER}
                                       onChange={(lbl) =>
-                                        setDraft((d) => ({ ...d, day2: DAY_FROM_LABEL[lbl as DayLabel] || "M" }))
+                                        setDraft((d) => ({
+                                          ...d,
+                                          day2: (lbl === DAY_PLACEHOLDER
+                                            ? ("" as any)
+                                            : (DAY_FROM_LABEL[lbl as DayLabel] || "M")) as any,
+                                        }))
                                       }
-                                      options={[...DAY_OPTS_LABELS]}
+                                      options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
                                     />
 
                                     <SelectBox
