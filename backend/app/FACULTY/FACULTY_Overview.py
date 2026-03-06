@@ -1330,6 +1330,10 @@ async def _fetch_reflected_special_classes_for_faculty(
         {
             "_id": 0,
             "special_id": 1,
+            "faculty_response": 1,
+            "faculty_status": 1,
+            "faculty_accepted_at": 1,
+            "faculty_rejected_at": 1,
             "user_id": 1,
             "student_number": 1,
             "reason": 1,
@@ -1377,6 +1381,14 @@ async def _fetch_reflected_special_classes_for_faculty(
         if special_id in seen_special:
             continue
         seen_special.add(special_id)
+
+        # Faculty acceptance state (default: PENDING)
+        fac_state = str(d.get("faculty_response") or d.get("faculty_status") or "PENDING").strip().upper()
+        if fac_state in {"REJECTED", "REJECT"}:
+            # Requirement: rejected special classes disappear from the faculty list.
+            continue
+        if fac_state not in {"PENDING", "ACCEPTED"}:
+            fac_state = "PENDING"
 
         # Determine owning faculty
         assignment_id = (d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
@@ -1512,6 +1524,7 @@ async def _fetch_reflected_special_classes_for_faculty(
             "section_id": f"SPECIAL:{special_id}",
             "special_id": special_id,
             "is_special_class": True,
+            "special_faculty_status": fac_state,
             "student": student_name or "—",
             "reason": reason_display,
             "course_code": course_code,
@@ -1531,6 +1544,117 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+@router.post("/special-class/respond")
+async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
+    """Faculty Accept/Reject Special Class request.
+
+    Behavior:
+    - Accept: marks the request as accepted by faculty; enables editing on the Faculty UI.
+    - Reject: marks as rejected; it disappears from faculty list.
+    - Both actions notify OM/Chair via in-app + Gmail.
+    """
+
+    user_id = str(payload.get("user_id") or "").strip()
+    special_id = str(payload.get("special_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    if not user_id or not special_id or action not in {"accept", "reject"}:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    sc = await db[COL_SPECIAL_CLASS].find_one(
+        {"special_id": special_id, "status": "Approved"},
+        {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1},
+    )
+    if not sc:
+        raise HTTPException(status_code=404, detail="Special class not found")
+
+    now = _now_utc()
+    fac_status = "ACCEPTED" if action == "accept" else "REJECTED"
+
+    term_id = str(sc.get("term_id") or "").strip()
+    q = {"special_id": special_id, "status": "Approved"}
+    if term_id:
+        q["term_id"] = term_id
+
+    set_doc: Dict[str, Any] = {
+        "faculty_response": fac_status,
+        "faculty_status": fac_status,
+        "faculty_user_id": user_id,
+        "updated_at": now,
+    }
+    if action == "accept":
+        set_doc["faculty_accepted_at"] = now
+    else:
+        set_doc["faculty_rejected_at"] = now
+
+    await db[COL_SPECIAL_CLASS].update_many(q, {"$set": set_doc})
+
+    # Notify OM + Chair (best-effort; broad roles)
+    actor = "Faculty"
+    try:
+        fac = await db[COL_USERS].find_one(
+            {"user_id": user_id},
+            {"_id": 0, "first_name": 1, "last_name": 1, "name": 1},
+        ) or {}
+        fn = (fac.get("first_name") or "").strip()
+        ln = (fac.get("last_name") or "").strip()
+        actor = (f"{fn} {ln}".strip() or (fac.get("name") or "Faculty")).strip() or "Faculty"
+    except Exception:
+        actor = "Faculty"
+
+    subj = f"Special Class {('accepted' if action=='accept' else 'rejected')} by Faculty"
+    details = f"{actor} {('accepted' if action=='accept' else 'rejected')} a Special Class request (special_id: {special_id})."
+
+    recipients = set()
+    for uid in await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"]):
+        recipients.add(uid)
+    for uid in await _role_user_ids_by_name_patterns([r"^chair$", r"chair"]):
+        recipients.add(uid)
+
+    email_sent_any = False
+    email_errors: List[str] = []
+    if recipients:
+        for rid in sorted(recipients):
+            try:
+                await create_notification(
+                    user_id=rid,
+                    title=subj,
+                    details=details,
+                    meta={
+                        "type": "SPECIAL_CLASS_FACULTY_RESPONSE",
+                        "action": fac_status,
+                        "special_id": special_id,
+                        "term_id": term_id,
+                        "actor_user_id": user_id,
+                        "when": now.isoformat(),
+                        "route": "/om/special-class",
+                        "kind": "special_class_faculty_response",
+                    },
+                    send_email=True,
+                    email_from_user_id=user_id,
+                )
+                email_sent_any = True
+            except Exception as e:
+                email_errors.append(str(e))
+    else:
+        ok, err = await _send_email_via_user_gmail(
+            user_id=user_id,
+            to_email=_RFC_EMAIL_TO,
+            subject=subj,
+            body=details,
+        )
+        email_sent_any = bool(ok)
+        if err:
+            email_errors.append(err)
+
+    return {
+        "ok": True,
+        "special_id": special_id,
+        "faculty_status": fac_status,
+        "email_sent": email_sent_any,
+        "email_error": ("; ".join(email_errors) if email_errors else None),
+    }
 
 
 def _payload_bool(v: Any, default: bool = False) -> bool:
@@ -3203,6 +3327,23 @@ async def overview_handler(
                 merged_load.extend(serviced_rows)
         except Exception:
             pass
+
+        # Requirement:
+        # If the faculty already accepted (or the schedule was locked) but a new Serviced Class arrives,
+        # the schedule should be unlocked so RFC is available again.
+        try:
+            has_serviced_any = any(
+                (not bool(r.get("is_special_class"))) and bool(r.get("is_serviced"))
+                for r in (merged_load or [])
+            )
+        except Exception:
+            has_serviced_any = False
+
+        if has_serviced_any and (schedule_final or proposal_status_l in ("approved", "accepted")):
+            schedule_final = False
+            proposal_status = "Proposed"
+            proposal_status_l = "proposed"
+            summary["load_status"] = "Proposed"
 
         merged_load.sort(
             key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class"))))

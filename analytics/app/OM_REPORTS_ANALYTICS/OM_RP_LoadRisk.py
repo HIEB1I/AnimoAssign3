@@ -68,14 +68,23 @@ async def term_in_range(db: AsyncIOMotorDatabase, term_id: str, start_term_id: s
     return iS <= iT <= iE
 
 async def is_on_approved_leave(db: AsyncIOMotorDatabase, faculty_id: str, term_id: str) -> bool:
-    L = await db[COL_LEAVES].find_one({"faculty_id": faculty_id, "approval_status": "APPROVED"})
-    if not L:
+    """Return True if ANY approved leave record overlaps the given term."""
+    try:
+        cur = db[COL_LEAVES].find(
+            {"faculty_id": faculty_id, "approval_status": "APPROVED"},
+            projection={"start_term_id": 1, "end_term_id": 1},
+        )
+        async for L in cur:
+            st = L.get("start_term_id")
+            en = L.get("end_term_id")
+            if not st or not en:
+                continue
+            if await term_in_range(db, term_id, st, en):
+                return True
+    except Exception:
+        # be conservative: if leave data can't be read, treat as not on leave
         return False
-    st = L.get("start_term_id")
-    en = L.get("end_term_id")
-    if not st or not en:
-        return False
-    return await term_in_range(db, term_id, st, en)
+    return False
 
 async def resolve_baseline_term(db: AsyncIOMotorDatabase, target_term: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Baseline = same term_number, previous acad year."""
@@ -109,38 +118,83 @@ async def faculty_display_name(db: AsyncIOMotorDatabase, faculty_id: str) -> str
 
 async def faculty_capacity_units(db: AsyncIOMotorDatabase, faculty_id: str, term_id: str) -> int:
     """
-    Use faculty_preferences.preferred_units for the target term.
-    Fallback: faculty_profiles.min_units (FT=12, PT=0 in your DB).
+    Capacity units used by Load Risk.
+
+    Priority:
+    1) faculty_preferences.preferred_units (or load_units) for the target term
+    2) faculty_profiles.min_units (if present and >0)
+    3) sensible default: FT=12, PT=0
+
+    Rationale: many profiles store min_units as blank/0 in seeded data, which would incorrectly
+    drive capacity to 0 and inflate "RISK" counts.
     """
+
+    def _to_int(x: Any) -> Optional[int]:
+        if x is None:
+            return None
+        if isinstance(x, bool):
+            return int(x)
+        if isinstance(x, (int, float)):
+            return int(x)
+        s = str(x).strip()
+        if not s:
+            return None
+        try:
+            return int(float(s))
+        except Exception:
+            return None
+
     pref = await db[COL_FACULTY_PREFS].find_one(
         {"faculty_id": faculty_id, "term_id": term_id},
-        projection={"preferred_units": 1},
+        projection={"preferred_units": 1, "load_units": 1},
     )
-    if pref and pref.get("preferred_units") is not None:
-        try:
-            return int(pref["preferred_units"])
-        except Exception:
-            pass
 
-    fp = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, projection={"min_units": 1})
-    return int((fp or {}).get("min_units") or 0)
+    for k in ("preferred_units", "load_units"):
+        if pref and pref.get(k) is not None:
+            v = _to_int(pref.get(k))
+            if v is not None and v >= 0:
+                return int(v)
+
+    fp = await db[COL_FACULTY].find_one(
+        {"faculty_id": faculty_id},
+        projection={"min_units": 1, "employment_type": 1},
+    ) or {}
+
+    emp = str(fp.get("employment_type") or "").strip().upper()
+    mu = _to_int(fp.get("min_units"))
+
+    if mu is not None and mu > 0:
+        return int(mu)
+
+    # Default fallback (align with Load Assignment expectations)
+    if emp == "FT":
+        return 12
+    return 0
 
 async def faculty_employment_type(db: AsyncIOMotorDatabase, faculty_id: str) -> str:
     fp = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, projection={"employment_type": 1})
     return (fp.get("employment_type") or "").strip() if fp else ""
 
 async def get_deload_units(db: AsyncIOMotorDatabase, faculty_id: str, term_id: str) -> int:
-    """
-    Best-effort deload lookup.
-    - If you have a collection like 'deloadings' with {faculty_id, term_id, units}, we'll use it.
-    - Otherwise returns 0 safely.
-    """
+    """Best-effort deload lookup across common collection/field variants."""
+    field_candidates = [
+        "units_deloaded",
+        "units",
+        "deload_units",
+        "deloading_units",
+        "units_deloading",
+    ]
     for col in ["deloadings", "deloading", "faculty_deloadings"]:
         try:
             doc = await db[col].find_one({"faculty_id": faculty_id, "term_id": term_id})
-            if doc:
-                units = doc.get("units") or doc.get("deload_units") or doc.get("deloading_units") or 0
-                return int(units)
+            if not doc:
+                continue
+            for f in field_candidates:
+                if doc.get(f) is not None:
+                    try:
+                        return int(float(str(doc.get(f)).strip() or 0))
+                    except Exception:
+                        continue
         except Exception:
             continue
     return 0
@@ -338,23 +392,17 @@ async def compute_course_row(
     baseline_ft_sections_by_faculty = baseline_ft_sections_by_faculty or {}
     baseline_sections = baseline_sections or []
 
-    # This guarantees: AD-FUND (demand=2) => exactly 2 breakdown rows (unless DB truly has more).
+    # Only sections for this course + stable ordering
     baseline_sections = [s for s in baseline_sections if (s.get("course_id") == course_id)]
-    # stable ordering (optional but helpful)
     baseline_sections.sort(key=lambda x: str(x.get("section_code") or x.get("section_id") or ""))
 
-    # ---------------------------------------------------------
-    # SECTION-LEVEL breakdown:
-    # - One entry per baseline section (same term last AY)
-    # - Includes section_code + faculty + name + employment_type
-    # - Computes availability/reasons for that section's faculty now
-    # - Allocates FT capacity across sections so sections_can_cover is 0/1 per section
-    # ---------------------------------------------------------
+    # -----------------------------------------
+    # Build per-faculty state (leave, active, capacity)
+    # -----------------------------------------
     faculty_ids_in_sections = {s.get("faculty_id") for s in baseline_sections if s.get("faculty_id")}
     fac_state: Dict[str, Dict[str, Any]] = {}
-    remaining_sections_cap: Dict[str, int] = {}
 
-    for fid in faculty_ids_in_sections:
+    async def _build_fac_state(fid: str) -> Dict[str, Any]:
         on_leave = await is_on_approved_leave(db, fid, target_term["term_id"])
 
         active_hit_term: Optional[str] = None
@@ -371,7 +419,7 @@ async def compute_course_row(
 
         name = await faculty_display_name(db, fid)
 
-        fac_state[fid] = {
+        return {
             "faculty_id": fid,
             "name": name,
             "on_leave": bool(on_leave),
@@ -382,104 +430,156 @@ async def compute_course_row(
             "effective_units": int(effective_units),
             "now_sections_capacity": int(now_sections_cap),
         }
-        remaining_sections_cap[fid] = int(now_sections_cap)
+
+    for fid in faculty_ids_in_sections:
+        fac_state[fid] = await _build_fac_state(fid)
+
+    # Ensure baseline FT pool ids exist in state (defensive)
+    for fid in (baseline_ft_ids or []):
+        if fid and fid not in fac_state:
+            fac_state[fid] = await _build_fac_state(fid)
+
+    # -----------------------------------------
+    # Allocate FT pool capacity across ALL baseline sections
+    # (This prevents "PT last AY" from automatically creating uncovered sections.)
+    #
+    # Rule:
+    # - Prefer the baseline FT instructor for their own FT sections when possible.
+    # - Otherwise assign another available baseline FT with remaining capacity.
+    # -----------------------------------------
+    def _is_ft_available(fid: str) -> bool:
+        st = fac_state.get(fid) or {}
+        return (
+            bool(fid)
+            and (not st.get("on_leave"))
+            and bool(st.get("is_active"))
+            and int(st.get("now_sections_capacity") or 0) > 0
+            and int(st.get("effective_units") or 0) >= int(ups or 0)
+        )
+
+    remaining_pool_cap: Dict[str, int] = {}
+    for fid in (baseline_ft_ids or []):
+        if _is_ft_available(fid):
+            remaining_pool_cap[fid] = int(fac_state.get(fid, {}).get("now_sections_capacity") or 0)
+        else:
+            remaining_pool_cap[fid] = 0
+
+    def _pick_best_ft(exclude: Optional[str] = None) -> Optional[str]:
+        cands = [
+            fid
+            for fid, cap in remaining_pool_cap.items()
+            if cap > 0 and fid and (exclude is None or fid != exclude)
+        ]
+        if not cands:
+            return None
+        # pick most remaining capacity (stable by id as tiebreaker)
+        cands.sort(key=lambda f: (int(remaining_pool_cap.get(f, 0)), str(f)), reverse=True)
+        return cands[0]
 
     section_breakdown: List[Dict[str, Any]] = []
-    ft_coverable_sections = 0
+    coverable_sections_now = 0
 
-    # keep suggestions (faculty-level) without changing your API shape
+    # Keep baseline FT candidates for UI (faculty-level)
     cap_detail: List[Dict[str, Any]] = []
     used_for_cap_detail: set[str] = set()
+    for fid in (baseline_ft_ids or []):
+        if not fid or fid in used_for_cap_detail:
+            continue
+        used_for_cap_detail.add(fid)
+        st = fac_state.get(fid) or {}
+        cap_detail.append(
+            {
+                "faculty_id": fid,
+                "name": st.get("name") or await faculty_display_name(db, fid),
+                "standard_units": int(st.get("capacity_units") or 0),
+                "deload_units": int(st.get("deload_units") or 0),
+                "effective_units": int(st.get("effective_units") or 0),
+                "now_sections_capacity": int(st.get("now_sections_capacity") or 0),
+                "baseline_sections_for_course": int(baseline_ft_sections_by_faculty.get(fid, 0)),
+                "sections_can_cover": None,
+            }
+        )
 
+    # Assign coverage per section
     for s in baseline_sections:
         sid = s.get("section_id")
         scode = s.get("section_code") or sid
-        fid = s.get("faculty_id")
+        baseline_fid = s.get("faculty_id")
         et = (s.get("employment_type") or "").upper() if s.get("employment_type") else ""
 
-        if not fid:
-            section_breakdown.append(
-                {
-                    "section_id": sid,
-                    "section_code": scode,
-                    "faculty_id": None,
-                    "faculty_name": None,
-                    "baseline_employment_type": None,
-                    "status": "UNAVAILABLE",
-                    "reasons": ["NO_BASELINE_FACULTY_ASSIGNMENT"],
-                    "sections_can_cover": 0,
-                }
-            )
-            continue
-
-        st = fac_state.get(fid) or {}
         reasons: List[str] = []
-
-        # baseline PT section: show it explicitly
+        if not baseline_fid:
+            reasons.append("NO_BASELINE_FACULTY_ASSIGNMENT")
         if et == "PT":
             reasons.append("BASELINE_TAUGHT_BY_PT")
 
-        if st.get("on_leave"):
-            reasons.append("ON_APPROVED_LEAVE")
-        if not st.get("is_active"):
-            reasons.append("INACTIVE_RECENT_TERMS")
-        if ups > 0 and int(st.get("effective_units") or 0) < ups:
-            reasons.append("INSUFFICIENT_UNITS_FOR_1_SECTION")
-        if int(st.get("deload_units") or 0) > 0:
-            reasons.append("DELOAD_APPLIED")
+        baseline_state = fac_state.get(baseline_fid) if baseline_fid else None
+        if baseline_state:
+            if baseline_state.get("on_leave"):
+                reasons.append("ON_APPROVED_LEAVE")
+            if not baseline_state.get("is_active"):
+                reasons.append("INACTIVE_RECENT_TERMS")
+            if ups > 0 and int(baseline_state.get("effective_units") or 0) < ups:
+                reasons.append("INSUFFICIENT_UNITS_FOR_1_SECTION")
+            if int(baseline_state.get("deload_units") or 0) > 0:
+                reasons.append("DELOAD_APPLIED")
 
-        can_cover_this_section = 0
+        covered_by: Optional[str] = None
 
-        # only count FT coverage for sections that were FT last AY
-        if et == "FT":
-            if (not st.get("on_leave")) and st.get("is_active") and (remaining_sections_cap.get(fid, 0) > 0):
-                can_cover_this_section = 1
-                remaining_sections_cap[fid] = int(remaining_sections_cap.get(fid, 0)) - 1
-                ft_coverable_sections += 1
+        # Prefer baseline FT for FT baseline sections
+        if et == "FT" and baseline_fid and remaining_pool_cap.get(baseline_fid, 0) > 0 and _is_ft_available(baseline_fid):
+            covered_by = baseline_fid
+        else:
+            # Otherwise, use any other available baseline FT
+            covered_by = _pick_best_ft(exclude=baseline_fid if et == "FT" else None)
 
-        status = "AVAILABLE" if can_cover_this_section == 1 else "UNAVAILABLE"
+        if covered_by:
+            remaining_pool_cap[covered_by] = int(remaining_pool_cap.get(covered_by, 0)) - 1
+            coverable_sections_now += 1
+
+            if et == "PT":
+                reasons.append("COVERED_BY_FT_POOL")
+            elif et == "FT" and baseline_fid and covered_by != baseline_fid:
+                reasons.append("COVERED_BY_OTHER_FT")
+
+        status = "AVAILABLE" if covered_by else "UNAVAILABLE"
+
+        # baseline display name (what happened last AY)
+        baseline_name = None
+        if baseline_fid:
+            baseline_name = (fac_state.get(baseline_fid) or {}).get("name") or await faculty_display_name(db, baseline_fid)
+
+        covered_by_name = None
+        if covered_by:
+            covered_by_name = (fac_state.get(covered_by) or {}).get("name") or await faculty_display_name(db, covered_by)
 
         section_breakdown.append(
             {
                 "section_id": sid,
                 "section_code": scode,
-                "faculty_id": fid,
-                "faculty_name": st.get("name") or await faculty_display_name(db, fid),
+                "faculty_id": baseline_fid,
+                "faculty_name": baseline_name,
                 "baseline_employment_type": et or None,
                 "status": status,
                 "reasons": reasons,
                 "active_check_terms": active_terms,
-                "active_hit_term_id": st.get("active_hit_term_id"),
-                "is_active": bool(st.get("is_active")),
-                "on_leave": bool(st.get("on_leave")),
-                "capacity_units": int(st.get("capacity_units") or 0),
-                "deload_units": int(st.get("deload_units") or 0),
-                "effective_units": int(st.get("effective_units") or 0),
-                "now_sections_capacity": int(st.get("now_sections_capacity") or 0),
-                "baseline_sections_for_course": int(baseline_ft_sections_by_faculty.get(fid, 0)),
-                "sections_can_cover": int(can_cover_this_section),  # 0/1 per section
+                "active_hit_term_id": (baseline_state or {}).get("active_hit_term_id") if baseline_state else None,
+                "is_active": bool((baseline_state or {}).get("is_active")) if baseline_state else None,
+                "on_leave": bool((baseline_state or {}).get("on_leave")) if baseline_state else None,
+                "capacity_units": int((baseline_state or {}).get("capacity_units") or 0) if baseline_state else None,
+                "deload_units": int((baseline_state or {}).get("deload_units") or 0) if baseline_state else None,
+                "effective_units": int((baseline_state or {}).get("effective_units") or 0) if baseline_state else None,
+                "now_sections_capacity": int((baseline_state or {}).get("now_sections_capacity") or 0) if baseline_state else None,
+                "baseline_sections_for_course": int(baseline_ft_sections_by_faculty.get(baseline_fid, 0)) if baseline_fid else 0,
+                "sections_can_cover": 1 if covered_by else 0,
+                "covered_by_faculty_id": covered_by,
+                "covered_by_name": covered_by_name,
             }
         )
 
-        # suggestions: keep baseline FT (faculty-level)
-        if et == "FT" and fid in baseline_ft_ids and fid not in used_for_cap_detail:
-            used_for_cap_detail.add(fid)
-            cap_detail.append(
-                {
-                    "faculty_id": fid,
-                    "name": st.get("name") or await faculty_display_name(db, fid),
-                    "standard_units": int(st.get("capacity_units") or 0),
-                    "deload_units": int(st.get("deload_units") or 0),
-                    "effective_units": int(st.get("effective_units") or 0),
-                    "now_sections_capacity": int(st.get("now_sections_capacity") or 0),
-                    "baseline_sections_for_course": int(baseline_ft_sections_by_faculty.get(fid, 0)),
-                    "sections_can_cover": None,
-                }
-            )
-
     # demand = number of baseline sections for this course
-    ft_can_cover = min(int(baseline_demand), int(ft_coverable_sections))
-    uncovered = max(0, int(baseline_demand) - int(ft_can_cover))
+    coverable = min(int(baseline_demand), int(coverable_sections_now))
+    uncovered = max(0, int(baseline_demand) - int(coverable))
 
     # -----------------------------
     # Suggested Action
@@ -494,25 +594,25 @@ async def compute_course_row(
         ft_map: Dict[str, Dict[str, Any]] = {}
 
         for b in section_breakdown:
-            et = (b.get("baseline_employment_type") or "").upper()
-            fid = (b.get("faculty_id") or "").strip()
-            name = (b.get("faculty_name") or "").strip() or fid
-            if not fid:
+            et2 = (b.get("baseline_employment_type") or "").upper()
+            fid2 = (b.get("faculty_id") or "").strip()
+            name2 = (b.get("faculty_name") or "").strip() or fid2
+            if not fid2:
                 continue
 
-            if et == "PT":
-                cur = pt_map.get(fid)
+            if et2 == "PT":
+                cur = pt_map.get(fid2)
                 if not cur:
-                    pt_map[fid] = {"faculty_id": fid, "name": name, "sections": 1}
+                    pt_map[fid2] = {"faculty_id": fid2, "name": name2, "sections": 1}
                 else:
                     cur["sections"] += 1
 
-            if et == "FT":
-                cur = ft_map.get(fid)
+            if et2 == "FT":
+                cur = ft_map.get(fid2)
                 if not cur:
-                    ft_map[fid] = {
-                        "faculty_id": fid,
-                        "name": name,
+                    ft_map[fid2] = {
+                        "faculty_id": fid2,
+                        "name": name2,
                         "baseline_sections": int(b.get("baseline_sections_for_course") or 0) or 1,
                         "now_sections_capacity": int(b.get("now_sections_capacity") or 0),
                         "is_active": bool(b.get("is_active")),
@@ -556,9 +656,9 @@ async def compute_course_row(
     if relied_on_pt_last_year:
         flags.append("This course relied on part-time faculty last year")
     if len(baseline_ft_ids) <= 2 and baseline_demand > 0:
-        flags.append("Only 1–2 FT instructors covered this course last year")
+        flags.append("Only 1–2 FT instructors taught this course last year")
     if uncovered > 0 and baseline_demand > 0:
-        flags.append("Some baseline sections are not coverable by baseline FT availability/capacity now")
+        flags.append("Not enough baseline FT capacity to cover last AY sections")
 
     # Risk classification
     reason_bucket: List[str] = []
@@ -567,15 +667,59 @@ async def compute_course_row(
     else:
         if len(baseline_ft_ids) == 0:
             risk = "RISK"
-            reason_bucket.append("No baseline FT teaching history last year")
-        elif relied_on_pt_last_year:
-            risk = "RISK"
-            reason_bucket.append("PT covered at least 1 section last year")
+            reason_bucket.append("No baseline FT teaching history last AY")
         elif uncovered > 0:
             risk = "RISK"
-            reason_bucket.append("Baseline sections become uncovered with baseline FT availability/capacity now")
+            reason_bucket.append("Some last AY sections are not coverable by baseline FT now")
         else:
-            risk = "SAFE"
+            # WARNING bucket: fully covered, but fragile coverage signals and/or PT reliance last AY.
+            baseline_ft_count = len([x for x in baseline_ft_ids if x])
+            demand = int(baseline_demand or 0)
+
+            # PT reliance share last AY
+            pt_sections = sum(
+                1 for b in section_breakdown
+                if (b.get("baseline_employment_type") or "").upper() == "PT"
+            )
+            pt_share = (pt_sections / demand) if demand > 0 else 0.0
+
+            # How many distinct FT are used to cover sections now (pool allocation)
+            ft_covering_now: set[str] = set()
+            any_deload = False
+            for fid, st in fac_state.items():
+                if int(st.get("deload_units") or 0) > 0:
+                    any_deload = True
+
+            for b in section_breakdown:
+                cb = b.get("covered_by_faculty_id")
+                if cb:
+                    ft_covering_now.add(str(cb))
+
+            is_warning = False
+
+            if pt_share > 0:
+                is_warning = True
+                reason_bucket.append("Some sections relied on PT last AY")
+
+            if baseline_ft_count == 1 and demand >= 2:
+                is_warning = True
+                reason_bucket.append("Covered, but depends on a single baseline FT instructor")
+            elif baseline_ft_count == 2 and demand >= 4:
+                is_warning = True
+                reason_bucket.append("Covered, but depends on only 2 baseline FT instructors for a high-demand course")
+
+            if demand >= 3 and len(ft_covering_now) == 1:
+                is_warning = True
+                reason_bucket.append("Covered, but current FT coverage is concentrated in a single instructor")
+
+            if any_deload and demand >= 2 and baseline_ft_count <= 2:
+                is_warning = True
+                reason_bucket.append("Covered, but deloading reduces flexibility")
+
+            # keep it short
+            reason_bucket = reason_bucket[:3]
+
+            risk = "WARNING" if is_warning else "SAFE"
 
     # Suggestions
     ft_suggestions: List[Dict[str, Any]] = cap_detail[:suggest_top_n]
@@ -595,7 +739,7 @@ async def compute_course_row(
         if len(pt_suggestions) >= suggest_top_n:
             break
 
-    # Confidence
+    # Confidence (simple heuristic)
     if baseline_demand > 0 and len(baseline_ft_ids) > 0:
         confidence = 100
     elif baseline_demand > 0:
@@ -608,7 +752,7 @@ async def compute_course_row(
         "course": f"{course_code}".strip(),
         "course_title": (course_title or "").strip(),
         "baseline_demand_sections": int(baseline_demand),
-        "ft_can_cover_sections_est": int(ft_can_cover),
+        "ft_can_cover_sections_est": int(coverable),
         "risk": risk,
         "uncovered_sections": int(uncovered),
         "flags": flags,
@@ -620,7 +764,6 @@ async def compute_course_row(
             "baseline_relay_on_pt": bool(relied_on_pt_last_year),
             "baseline_needed_overload": False,
         },
-        # IMPORTANT: now BY SECTION (length should match baseline_demand if DB is consistent)
         "ft_breakdown": section_breakdown,
         "confidence": int(confidence),
         "suggested_action": suggested_action,
@@ -703,6 +846,17 @@ async def run_ft_coverage_review(params: Dict[str, Any]) -> Dict[str, Any]:
     warn_count = sum(1 for r in rows if r["risk"] == "WARNING")
     safe_count = sum(1 for r in rows if r["risk"] == "SAFE")
 
+    # Summary metrics for UI (decision-friendly)
+    total_baseline_sections = sum(int(r.get("baseline_demand_sections") or 0) for r in rows)
+    total_coverable_sections = sum(int(r.get("ft_can_cover_sections_est") or 0) for r in rows)
+    total_uncovered_sections = max(0, int(total_baseline_sections) - int(total_coverable_sections))
+    overall_coverage_pct = (
+        round(100 * total_coverable_sections / total_baseline_sections)
+        if total_baseline_sections > 0
+        else 0
+    )
+
+    # Keep avg_confidence for backward compatibility (older UI versions)
     avg_conf = round(sum(r["confidence"] for r in rows) / len(rows)) if rows else 0
 
     summary = {
@@ -710,6 +864,10 @@ async def run_ft_coverage_review(params: Dict[str, Any]) -> Dict[str, Any]:
         "warning": warn_count,
         "safe": safe_count,
         "avg_confidence": int(avg_conf),
+        "total_baseline_sections": int(total_baseline_sections),
+        "total_coverable_sections": int(total_coverable_sections),
+        "total_uncovered_sections": int(total_uncovered_sections),
+        "overall_coverage_pct": int(overall_coverage_pct),
     }
 
     return {
