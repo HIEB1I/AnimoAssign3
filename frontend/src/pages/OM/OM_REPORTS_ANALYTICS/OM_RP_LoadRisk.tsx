@@ -304,9 +304,9 @@ export default function OM_RP_LoadRisk() {
 
   const termLine = useMemo(() => {
     if (!data) return "";
-    return `Target: AY ${data.target.acad_year_start}-${
+    return `Loading Term: AY ${data.target.acad_year_start}-${
       data.target.acad_year_start + 1
-    } Term ${data.target.term_number}  |  Baseline: AY ${
+    } Term ${data.target.term_number}  |  Last AY: AY ${
       data.baseline.acad_year_start
     }-${data.baseline.acad_year_start + 1} Term ${data.baseline.term_number}`;
   }, [data]);
@@ -921,25 +921,6 @@ export default function OM_RP_LoadRisk() {
                           </div>
                         </div>
                       </div>
-
-                      <div className="rounded-lg border border-gray-200 bg-white p-3">
-                        <div className="text-sm font-semibold text-gray-900">Full-Time Faculty Pool</div>
-                        {(selected.history.full_time_faculty_pool || []).length ? (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {(selected.history.full_time_faculty_pool || []).map((name) => (
-                              <span
-                                key={name}
-                                className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700"
-                              >
-                                {name}
-                              </span>
-                            ))}
-                          </div>
-                        ) : (
-                          <div className="mt-2 text-xs text-gray-500">No full-time faculty found in the recent teaching window.</div>
-                        )}
-                      </div>
-
                       {(selected.reasons || []).length ? (
                         <div className="rounded-lg border border-gray-200 bg-white p-3 text-sm">
                           <div className="text-sm font-semibold text-gray-900">
@@ -1151,16 +1132,26 @@ export default function OM_RP_LoadRisk() {
                   ) : (
                     <div className="space-y-3 text-sm text-gray-700">
                       <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                        <div className="text-sm font-semibold text-gray-900">Full-Time Faculty Pool</div>
-                        <div className="mt-1 text-xs text-gray-600">{termLine}</div>
-                        <div className="mt-1 text-xs text-gray-600">
-                          Latest offered term: {selected.history.full_time_faculty_pool_timeline?.[0] ? fmtTermLabel(selected.history.full_time_faculty_pool_timeline[0]) : (selected.history.latest_offered_term_id || "—")}
+                        <div className="text-sm font-semibold text-gray-900">
+                          Full-Time Faculty Pool
                         </div>
-                        <div className="mt-1 text-xs text-gray-500">
-                          Window used: from the latest offered term back to the baseline term.
-                        </div>
-                      </div>
 
+                        {data && (
+                          <div className="mt-1 text-xs text-gray-600">
+                            Using recent course offerings from{" "}
+                            <span className="font-semibold text-emerald-700">
+                              AY {data.target.acad_year_start}-{data.target.acad_year_start + 1} Term{" "}
+                              {data.target.term_number}
+                            </span>{" "}
+                            to{" "}
+                            <span className="font-semibold text-emerald-700">
+                              AY {data.baseline.acad_year_start}-{data.baseline.acad_year_start + 1} Term{" "}
+                              {data.baseline.term_number}
+                            </span>
+                            .
+                          </div>
+                        )}
+                      </div>
                       <div className="space-y-3">
                         {(selected.history.full_time_faculty_pool_timeline || []).length ? (
                           (selected.history.full_time_faculty_pool_timeline || []).map((t) => (
