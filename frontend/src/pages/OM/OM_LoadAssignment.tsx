@@ -77,7 +77,6 @@ import {
   CalendarClock,
   Info,
   Plus,
-  MessageSquareText,
   Copy,
   Archive,
   Undo2,
