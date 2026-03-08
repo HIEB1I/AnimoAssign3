@@ -3419,13 +3419,44 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
                 for slot in slots:
                     yield day_idx, slot
 
-    # extract blocked_section_ids (optional, keep if you use it later)
+    # Resolve blocked section codes directly from the sections collection.
+    # The blocked-slot tuple may carry section_id in its 5th position on some code paths,
+    # so the DB should be the source of truth for the displayed section code.
     blocked_section_ids: set[str] = set()
     for _day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
         if isinstance(slot, (list, tuple)) and len(slot) >= 3:
             sid = str(slot[2] or "").strip()
             if sid:
                 blocked_section_ids.add(sid)
+
+    if blocked_section_ids:
+        try:
+            sec_docs = await db[COL_SECTIONS].find(
+                {"section_id": {"$in": list(blocked_section_ids)}},
+                {
+                    "_id": 0,
+                    "section_id": 1,
+                    "section_code": 1,
+                    "section": 1,
+                    "section_name": 1,
+                    "owner_program_id": 1,
+                    "owner_batch_id": 1,
+                },
+            ).to_list(None)
+            for d in sec_docs or []:
+                sid = str(d.get("section_id") or "").strip()
+                if not sid:
+                    continue
+                code = (
+                    str(d.get("section_code") or "").strip()
+                    or str(d.get("section") or "").strip()
+                    or str(d.get("section_name") or "").strip()
+                )
+                if code:
+                    section_code_by_id[sid] = code
+                sec_by_id[sid] = {**(sec_by_id.get(sid) or {}), **d}
+        except Exception:
+            pass
 
     # flatten blocked_ge_cmps2 (ONLY ONCE)
     for day_idx, slot in _iter_blocked_slots_for_cmps2(campus_blocked):
@@ -3453,10 +3484,10 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         prog_id = str(sec.get("owner_program_id") or "").strip()
         batch_id = str(sec.get("owner_batch_id") or "").strip()
         section_code = (
-            sec_code
-            or section_code_by_id.get(sid, "")
+            section_code_by_id.get(sid, "")
             or str(sec.get("section_code") or "").strip()
             or str(sec.get("section") or "").strip()
+            or (sec_code if sec_code and sec_code != sid else "")
             or sid
         )
 

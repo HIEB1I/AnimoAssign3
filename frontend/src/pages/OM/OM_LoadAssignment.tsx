@@ -4622,11 +4622,7 @@ const inferOmCampusId = useCallback((): string => {
       setCell(refRow.id, "selected", checked as any);
       return;
     }
-    // IMPORTANT:
-    // - Selection is UI-only and must never be treated as persisted state.
-    // - Selecting any row for a faculty should select ALL rows for that same faculty.
-    // - To prevent accidental cross-faculty sends (e.g., stale `selected` flags coming from DB restores),
-    //   when turning ON a faculty selection we clear selections for other faculties.
+    
     const next = rows.map((r) => {
       const rk = facultyKeyOf(r);
       if (rk === k) return { ...r, selected: checked };
@@ -6465,16 +6461,34 @@ async function handleSaveNewLineRow(r: Row) {
 
   const blockedSections: BlockedSectionRow[] = useMemo(() => {
     const bySection: Record<string, BlockedSectionRow> = {};
+    const rowBySectionId: Record<string, Row> = {};
+
+    (rows || []).forEach((r) => {
+      const sid = String((r as any)?.id || (r as any)?.section_id || "").trim();
+      if (!sid) return;
+      rowBySectionId[sid] = r;
+    });
 
     (blockedGeCmps2 || []).forEach((b) => {
       const sid = String(b.section_id || "").trim();
       if (!sid) return;
 
+      const rowMatch = rowBySectionId[sid];
+      const resolvedCourse =
+        String(rowMatch?.course || "").trim() ||
+        String(b.course_code || "").trim() ||
+        String(b.course_id || "").trim() ||
+        "—";
+      const resolvedSection =
+        String(rowMatch?.section || "").trim() ||
+        String(b.section_code || "").trim() ||
+        "—";
+
       if (!bySection[sid]) {
         bySection[sid] = {
           rowId: sid,
-          course: b.course_code || b.course_id || "—",
-          section: b.section_code || "—",
+          course: resolvedCourse,
+          section: resolvedSection,
           campusId: b.campus_id || "",
           campusName: b.campus_name || "",
           program: b.program || "",
@@ -6487,7 +6501,7 @@ async function handleSaveNewLineRow(r: Row) {
     return Object.values(bySection).filter(
       (x) => String(x.campusId || "").toUpperCase() === "CMPS0002"
     );
-  }, [blockedGeCmps2]);
+  }, [blockedGeCmps2, rows]);
 
   const blockedSectionsFiltered: BlockedSectionRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -6752,7 +6766,7 @@ const courseCodeToInfo = useMemo(() => {
                     disabled={!hasReco || isArchiveView || omDeadlinePassed || isAssigning}
                     onClick={handleSaveDraft}
                     className={cls(
-                      "inline-flex h-10 min-w-[160px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                      "inline-flex h-10 min-w-[90px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                       !(!hasReco || isArchiveView || omDeadlinePassed || isAssigning)
                         ? "bg-gray-800 text-white hover:brightness-110"
                         : "bg-gray-200 text-gray-400 cursor-not-allowed"
@@ -6768,7 +6782,7 @@ const courseCodeToInfo = useMemo(() => {
                     }
                   >
                     <Save className="h-4 w-4" />
-                    Save Draft
+                    Save
                   </button>
 
 
@@ -6835,7 +6849,7 @@ const courseCodeToInfo = useMemo(() => {
                         onClick={openShsImport}
                         disabled={!isRunning || isAssigning || isArchiveView || allCampusesDeadlinePassed}
                         className={cls(
-                          "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm",
+                          "inline-flex h-10 min-w-[100px] items-center justify-center gap-2 rounded-md bg-[#008e4e] px-4 py-2 text-sm font-medium text-white shadow-sm",
                           "hover:brightness-110",
                           (!isRunning || isAssigning || isArchiveView) &&
                             "opacity-50 cursor-not-allowed hover:brightness-100"
@@ -6881,7 +6895,7 @@ const courseCodeToInfo = useMemo(() => {
                         onClick={() => loadFromServer()}
                         disabled={isAssigning || allCampusesDeadlinePassed}
                         title={allCampusesDeadlinePassed ? "Locked: all campus deadlines have passed" : "Refresh data from server"}
-                        className={cls("inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50", (isAssigning || allCampusesDeadlinePassed) && "opacity-60 cursor-not-allowed hover:bg-white")}
+                        className={cls("inline-flex h-10 min-w-[100px] items-center justify-center gap-2 rounded-md border border-gray-300 bg-white px-4 py-2 text-sm font-medium hover:bg-gray-50", (isAssigning || allCampusesDeadlinePassed) && "opacity-60 cursor-not-allowed hover:bg-white")}
                       >
                         <RefreshCcw className="h-4 w-4" />
                         Refresh
@@ -6916,7 +6930,7 @@ const courseCodeToInfo = useMemo(() => {
                         setShowSend(true);
                       }}
                       className={cls(
-                        "inline-flex h-10 min-w-[140px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
+                        "inline-flex h-10 min-w-[100px] items-center justify-center gap-2 rounded-md px-4 py-2 text-sm font-medium shadow-sm",
                         anySelected && isRunning && !isArchiveView
                           ? "bg-blue-600 text-white hover:brightness-110"
                           : "bg-gray-200 text-gray-500 cursor-not-allowed"
@@ -8188,6 +8202,14 @@ const courseCodeToInfo = useMemo(() => {
                           </div>
                         ) : (
                           <table className="w-full text-sm table-fixed border-collapse">
+                            <colgroup>
+                              <col className="w-[14%]" />
+                              <col className="w-[16%]" />
+                              <col className="w-[12%]" />
+                              <col className="w-[10%]" />
+                              <col className="w-[36%]" />
+                              <col className="w-[12%]" />
+                            </colgroup>
                             <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
                               <tr className="whitespace-nowrap text-[13px] font-semibold">
                                 <th className="px-3 py-2 text-left border border-gray-300">
@@ -8229,7 +8251,7 @@ const courseCodeToInfo = useMemo(() => {
                                   <td className="px-3 py-2 text-center align-top text-gray-600 border border-gray-300">
                                     {a.section || "—"}
                                   </td>
-                                  <td className="px-3 py-2 align-top border border-gray-300">
+                                  <td className="px-3 py-2 align-top border border-gray-300 whitespace-normal break-words leading-6">
                                     {a.message}
                                   </td>
                                   <td className="px-3 py-2 text-center align-top border border-gray-300">
