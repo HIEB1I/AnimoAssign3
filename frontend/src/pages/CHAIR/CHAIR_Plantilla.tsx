@@ -8,7 +8,6 @@ import {
   FileText,
   FilePlus,
   BookMarked,
-  ListChecks,
   FileSpreadsheet,
   ClipboardList,
   Star,
