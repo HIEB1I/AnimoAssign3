@@ -501,83 +501,82 @@ export default function OM_RP_DeloadingUtilization() {
           <div className="p-4 space-y-8">
             {/* --- 2. ADMINISTRATIVE RISK ALERT (Moved to top) --- */}
             {adminWarnings && adminWarnings.length > 0 && (
-              <div className="p-4 bg-red-100 border border-red-400 rounded-lg shadow-sm">
-                <button
-                  type="button"
-                  className="w-full flex items-center justify-between mb-3 text-left"
-                  onClick={() => setIsRiskOpen(!isRiskOpen)}
-                  aria-expanded={isRiskOpen}
-                  aria-controls="admin-risk-warning-body"
-                >
-                  <div className="flex items-center">
-                    <AlertTriangle className="h-5 w-5 text-red-700 mr-2 flex-shrink-0" />
-                    <h2 className="text-lg font-semibold text-red-800">
-                      Administrative Continuity Risk Warning
-                    </h2>
-                  </div>
+            <div className="p-4 bg-amber-50 border border-amber-300 rounded-lg shadow-sm">
+              <button
+                type="button"
+                className="w-full flex items-center justify-between mb-3 text-left"
+                onClick={() => setIsRiskOpen(!isRiskOpen)}
+                aria-expanded={isRiskOpen}
+                aria-controls="admin-risk-warning-body"
+              >
+                <div className="flex items-center">
+                  <AlertTriangle className="h-5 w-5 text-amber-700 mr-2 flex-shrink-0" />
+                  <h2 className="text-lg font-semibold text-amber-900">
+                    Administrative Continuity Risk Warning
+                  </h2>
+                </div>
 
-                  <ChevronLeft
-                    className={`h-5 w-5 text-red-700 transition-transform ${
-                      isRiskOpen ? "-rotate-90" : "rotate-0"
-                    }`}
-                  />
-                </button>
-
-                <div
-                  id="admin-risk-warning-body"
-                  className={`transition-all duration-300 ease-in-out overflow-hidden ${
-                    isRiskOpen
-                      ? "max-h-[1000px] opacity-100"
-                      : "max-h-0 opacity-0"
+                <ChevronLeft
+                  className={`h-5 w-5 text-amber-700 transition-transform ${
+                    isRiskOpen ? "-rotate-90" : "rotate-0"
                   }`}
-                >
-                  <p className="text-sm text-red-700 mb-3">
-                    The following faculty received 'Admin'-related deloading in
-                    the{" "}
-                    <span className="font-semibold text-red-800">previous</span>{" "}
-                    term. Review their load for the current/next term to ensure
-                    administrative continuity and resource allocation.
-                  </p>
+                />
+              </button>
 
-                  <div className="border border-red-200 bg-red-50/70 shadow-sm overflow-hidden rounded-xl">
-                    <div className="overflow-x-auto rounded-xl">
-                      <table className="min-w-full text-sm">
-                        <thead className="bg-red-100 border-b border-red-200 text-red-900">
-                          <tr>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-red-900">
-                              Faculty
-                            </th>
-                            <th className="px-4 py-3 text-left text-xs font-semibold text-red-900">
-                              Deloading Type
-                            </th>
-                            <th className="px-4 py-3 text-center text-xs font-semibold text-red-900">
-                              Units
-                            </th>
+              <div
+                id="admin-risk-warning-body"
+                className={`transition-all duration-300 ease-in-out overflow-hidden ${
+                  isRiskOpen
+                    ? "max-h-[1000px] opacity-100"
+                    : "max-h-0 opacity-0"
+                }`}
+              >
+                <p className="text-sm text-amber-800 mb-3">
+                  The following faculty received 'Admin'-related deloading in the{" "}
+                  <span className="font-semibold text-amber-900">previous</span> term.
+                  Review their load for the current/next term to ensure administrative
+                  continuity and resource allocation.
+                </p>
+
+                <div className="border border-amber-200 bg-amber-50/80 shadow-sm overflow-hidden rounded-xl">
+                  <div className="overflow-x-auto rounded-xl">
+                    <table className="min-w-full text-sm">
+                      <thead className="bg-amber-100 border-b border-amber-200 text-amber-900">
+                        <tr>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-amber-900">
+                            Faculty
+                          </th>
+                          <th className="px-4 py-3 text-left text-xs font-semibold text-amber-900">
+                            Deloading Type
+                          </th>
+                          <th className="px-4 py-3 text-center text-xs font-semibold text-amber-900">
+                            Units
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-amber-200 bg-transparent">
+                        {adminWarnings.map((r, i) => (
+                          <tr
+                            key={`${r.faculty_id}-${i}`}
+                            className="hover:bg-amber-50"
+                          >
+                            <td className="px-4 py-3 text-left">
+                              {formatFacultyName(r.faculty_name) || "—"}
+                            </td>
+                            <td className="px-4 py-3 text-left">
+                              {r.deloading_type || "—"}
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {r.units ?? "—"}
+                            </td>
                           </tr>
-                        </thead>
-                        <tbody className="divide-y divide-red-200 bg-transparent">
-                          {adminWarnings.map((r, i) => (
-                            <tr
-                              key={`${r.faculty_id}-${i}`}
-                              className="hover:bg-red-50"
-                            >
-                              <td className="px-4 py-3 text-left">
-                                {formatFacultyName(r.faculty_name) || "—"}
-                              </td>
-                              <td className="px-4 py-3 text-left">
-                                {r.deloading_type || "—"}
-                              </td>
-                              <td className="px-4 py-3 text-center">
-                                {r.units ?? "—"}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
+                        ))}
+                      </tbody>
+                    </table>
                   </div>
                 </div>
               </div>
+            </div>
             )}
 
             {/* --- 4. RAW DATA TABLE (Collapsible) --- */}
