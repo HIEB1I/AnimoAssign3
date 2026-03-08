@@ -98,6 +98,146 @@ async def resolve_baseline_term(db: AsyncIOMotorDatabase, target_term: Dict[str,
 async def get_term_by_ay_term(db: AsyncIOMotorDatabase, acad_year_start: int, term_number: int) -> Optional[Dict[str, Any]]:
     return await db[COL_TERMS].find_one({"acad_year_start": acad_year_start, "term_number": term_number})
 
+
+async def build_recent_ft_pool_map(
+    db: AsyncIOMotorDatabase,
+    dept_id: str,
+    baseline_term_id: str,
+    target_term_id: str,
+) -> Dict[str, Dict[str, Any]]:
+    """
+    Build a recent FT pool per course using the terms from the most recent offering
+    of the course back to the baseline term (inclusive).
+    """
+    terms = await ordered_terms(db)
+    if not terms:
+        return {}
+
+    try:
+        i_baseline = _index_of_term(terms, baseline_term_id)
+        i_target = _index_of_term(terms, target_term_id)
+    except Exception:
+        return {}
+
+    if i_baseline > i_target:
+        return {}
+
+    window_terms = terms[i_baseline:i_target]
+    window_term_ids = [t.get("term_id") for t in window_terms if t.get("term_id")]
+    if not window_term_ids:
+        return {}
+
+    course_ids = [
+        c["course_id"]
+        async for c in db[COL_COURSES].find(
+            {"$or": [{"department_id": dept_id}, {"dept_id": dept_id}]},
+            projection={"course_id": 1},
+        )
+        if c.get("course_id")
+    ]
+    if not course_ids:
+        return {}
+
+    sec_cur = db[COL_SECTIONS].find(
+        {
+            "term_id": {"$in": window_term_ids},
+            "course_id": {"$in": course_ids},
+            "is_archived": {"$ne": True},
+        },
+        projection={"section_id": 1, "course_id": 1, "term_id": 1},
+    )
+    secs = [s async for s in sec_cur]
+    if not secs:
+        return {}
+
+    sec_by_id = {s["section_id"]: s for s in secs if s.get("section_id")}
+    assign_cur = db[COL_ASSIGN].find(
+        {"section_id": {"$in": list(sec_by_id.keys())}},
+        projection={"faculty_id": 1, "section_id": 1},
+    )
+    assigns = [a async for a in assign_cur]
+
+    faculty_ids = sorted({a.get("faculty_id") for a in assigns if a.get("faculty_id")})
+    emp_map: Dict[str, str] = {}
+    if faculty_ids:
+        async for fp in db[COL_FACULTY].find(
+            {"faculty_id": {"$in": faculty_ids}},
+            projection={"faculty_id": 1, "employment_type": 1},
+        ):
+            fid = fp.get("faculty_id")
+            if fid:
+                emp_map[fid] = str(fp.get("employment_type") or "").strip().upper()
+
+    name_cache: Dict[str, str] = {}
+    async def fname(fid: str) -> str:
+        if fid in name_cache:
+            return name_cache[fid]
+        val = await faculty_display_name(db, fid)
+        name_cache[fid] = val
+        return val
+
+    by_course: Dict[str, Dict[str, Any]] = {}
+    for cid in course_ids:
+        by_course[cid] = {"latest_ft_pool_ids": [], "latest_ft_pool": [], "pool_timeline": [], "latest_offered_term_id": None}
+
+    term_order = {tid: idx for idx, tid in enumerate(window_term_ids)}
+    course_term_ft_ids: Dict[str, Dict[str, set[str]]] = {}
+    offered_terms_by_course: Dict[str, set[str]] = {}
+
+    for a in assigns:
+        sid = a.get("section_id")
+        fid = a.get("faculty_id")
+        if not sid or not fid:
+            continue
+        s = sec_by_id.get(sid)
+        if not s:
+            continue
+        cid = s.get("course_id")
+        tid = s.get("term_id")
+        if not cid or not tid:
+            continue
+        offered_terms_by_course.setdefault(cid, set()).add(tid)
+        if emp_map.get(fid) == 'FT':
+            course_term_ft_ids.setdefault(cid, {}).setdefault(tid, set()).add(fid)
+
+    for cid in course_ids:
+        offered = sorted(list(offered_terms_by_course.get(cid, set())), key=lambda tid: term_order.get(tid, -1))
+        if not offered:
+            continue
+        latest_tid = offered[-1]
+        latest_idx = term_order.get(latest_tid, -1)
+        baseline_idx = term_order.get(baseline_term_id, -1)
+        if latest_idx < 0 or baseline_idx < 0:
+            continue
+
+        pool_ids: set[str] = set()
+        timeline: List[Dict[str, Any]] = []
+        for idx in range(latest_idx, baseline_idx - 1, -1):
+            tid = window_term_ids[idx]
+            term_doc = window_terms[idx]
+            ft_ids = sorted(list(course_term_ft_ids.get(cid, {}).get(tid, set())))
+            ft_names = [await fname(fid) for fid in ft_ids]
+            offered_now = tid in offered_terms_by_course.get(cid, set())
+            timeline.append({
+                "term_id": tid,
+                "acad_year_start": term_doc.get("acad_year_start"),
+                "term_number": term_doc.get("term_number"),
+                "offered": bool(offered_now),
+                "faculty_ids": ft_ids,
+                "faculty_names": ft_names,
+            })
+            pool_ids.update(ft_ids)
+
+        pool_names = [await fname(fid) for fid in sorted(pool_ids)]
+        by_course[cid] = {
+            "latest_offered_term_id": latest_tid,
+            "latest_ft_pool_ids": sorted(pool_ids),
+            "latest_ft_pool": pool_names,
+            "pool_timeline": timeline,
+        }
+
+    return by_course
+
 # -----------------------------
 # Course / faculty helpers
 # -----------------------------
@@ -358,6 +498,10 @@ async def compute_course_row(
     course_title: str,
     baseline_demand: int,
     baseline_ft_ids: List[str],
+    latest_ft_pool_ids: List[str],
+    latest_ft_pool_names: Optional[List[str]],
+    pool_timeline: Optional[List[Dict[str, Any]]],
+    latest_offered_term_id: Optional[str],
     relied_on_pt_last_year: bool,
     baseline_term: Dict[str, Any],
     target_term: Dict[str, Any],
@@ -391,6 +535,9 @@ async def compute_course_row(
 
     baseline_ft_sections_by_faculty = baseline_ft_sections_by_faculty or {}
     baseline_sections = baseline_sections or []
+    latest_ft_pool_ids = [fid for fid in (latest_ft_pool_ids or []) if fid]
+    latest_ft_pool_names = latest_ft_pool_names or []
+    pool_timeline = pool_timeline or []
 
     # Only sections for this course + stable ordering
     baseline_sections = [s for s in baseline_sections if (s.get("course_id") == course_id)]
@@ -434,8 +581,8 @@ async def compute_course_row(
     for fid in faculty_ids_in_sections:
         fac_state[fid] = await _build_fac_state(fid)
 
-    # Ensure baseline FT pool ids exist in state (defensive)
-    for fid in (baseline_ft_ids or []):
+    # Ensure latest FT pool ids exist in state (defensive)
+    for fid in (latest_ft_pool_ids or []):
         if fid and fid not in fac_state:
             fac_state[fid] = await _build_fac_state(fid)
 
@@ -458,7 +605,7 @@ async def compute_course_row(
         )
 
     remaining_pool_cap: Dict[str, int] = {}
-    for fid in (baseline_ft_ids or []):
+    for fid in (latest_ft_pool_ids or []):
         if _is_ft_available(fid):
             remaining_pool_cap[fid] = int(fac_state.get(fid, {}).get("now_sections_capacity") or 0)
         else:
@@ -479,10 +626,10 @@ async def compute_course_row(
     section_breakdown: List[Dict[str, Any]] = []
     coverable_sections_now = 0
 
-    # Keep baseline FT candidates for UI (faculty-level)
+    # Keep latest FT pool candidates for UI (faculty-level)
     cap_detail: List[Dict[str, Any]] = []
     used_for_cap_detail: set[str] = set()
-    for fid in (baseline_ft_ids or []):
+    for fid in (latest_ft_pool_ids or []):
         if not fid or fid in used_for_cap_detail:
             continue
         used_for_cap_detail.add(fid)
@@ -655,71 +802,59 @@ async def compute_course_row(
     flags: List[str] = []
     if relied_on_pt_last_year:
         flags.append("This course relied on part-time faculty last year")
-    if len(baseline_ft_ids) <= 2 and baseline_demand > 0:
-        flags.append("Only 1–2 FT instructors taught this course last year")
+    if len(latest_ft_pool_ids) == 0:
+        flags.append("No full-time faculty found in the recent teaching window")
+
+    available_ft_ids: List[str] = []
+    blocked_ft_ids: List[str] = []
+    unknown_ft_ids: List[str] = []
+
+    for fid in (latest_ft_pool_ids or []):
+        st = fac_state.get(fid) or {}
+        is_available = _is_ft_available(fid)
+        is_blocked = bool(st.get("on_leave")) or (not bool(st.get("is_active"))) or int(st.get("effective_units") or 0) < int(ups or 0) or int(st.get("now_sections_capacity") or 0) <= 0
+        if is_available:
+            available_ft_ids.append(fid)
+        elif is_blocked:
+            blocked_ft_ids.append(fid)
+        else:
+            unknown_ft_ids.append(fid)
+
+    if blocked_ft_ids:
+        flags.append("Some faculty in the full-time pool are currently unable to teach")
+    if unknown_ft_ids:
+        flags.append("Some faculty in the full-time pool still need follow-up")
     if uncovered > 0 and baseline_demand > 0:
-        flags.append("Not enough baseline FT capacity to cover last AY sections")
+        flags.append("Current full-time pool cannot fully cover expected sections")
 
     # Risk classification
     reason_bucket: List[str] = []
     if baseline_demand <= 0:
         risk: RiskLevel = "SAFE"
     else:
-        if len(baseline_ft_ids) == 0:
+        has_ft_pool = len(latest_ft_pool_ids) > 0
+        has_pt_history = bool(relied_on_pt_last_year)
+
+        if not has_ft_pool:
             risk = "RISK"
-            reason_bucket.append("No baseline FT teaching history last AY")
-        elif uncovered > 0:
+            reason_bucket.append("No full-time faculty found in the recent teaching window")
+        elif blocked_ft_ids:
             risk = "RISK"
-            reason_bucket.append("Some last AY sections are not coverable by baseline FT now")
+            reason_bucket.append("At least one faculty in the full-time pool is currently unable to teach")
+        elif has_pt_history and available_ft_ids:
+            risk = "WARNING"
+            reason_bucket.append("The course relied on part-time faculty last year, but the current full-time pool appears available")
+        elif available_ft_ids and uncovered > 0:
+            risk = "WARNING"
+            reason_bucket.append("The current full-time pool exists, but it does not fully cover expected sections yet")
+        elif available_ft_ids:
+            risk = "SAFE"
+            reason_bucket.append("The current full-time pool appears available to cover this course")
         else:
-            # WARNING bucket: fully covered, but fragile coverage signals and/or PT reliance last AY.
-            baseline_ft_count = len([x for x in baseline_ft_ids if x])
-            demand = int(baseline_demand or 0)
+            risk = "WARNING"
+            reason_bucket.append("The course has a recent full-time teaching pool, but availability still needs follow-up")
 
-            # PT reliance share last AY
-            pt_sections = sum(
-                1 for b in section_breakdown
-                if (b.get("baseline_employment_type") or "").upper() == "PT"
-            )
-            pt_share = (pt_sections / demand) if demand > 0 else 0.0
-
-            # How many distinct FT are used to cover sections now (pool allocation)
-            ft_covering_now: set[str] = set()
-            any_deload = False
-            for fid, st in fac_state.items():
-                if int(st.get("deload_units") or 0) > 0:
-                    any_deload = True
-
-            for b in section_breakdown:
-                cb = b.get("covered_by_faculty_id")
-                if cb:
-                    ft_covering_now.add(str(cb))
-
-            is_warning = False
-
-            if pt_share > 0:
-                is_warning = True
-                reason_bucket.append("Some sections relied on PT last AY")
-
-            if baseline_ft_count == 1 and demand >= 2:
-                is_warning = True
-                reason_bucket.append("Covered, but depends on a single baseline FT instructor")
-            elif baseline_ft_count == 2 and demand >= 4:
-                is_warning = True
-                reason_bucket.append("Covered, but depends on only 2 baseline FT instructors for a high-demand course")
-
-            if demand >= 3 and len(ft_covering_now) == 1:
-                is_warning = True
-                reason_bucket.append("Covered, but current FT coverage is concentrated in a single instructor")
-
-            if any_deload and demand >= 2 and baseline_ft_count <= 2:
-                is_warning = True
-                reason_bucket.append("Covered, but deloading reduces flexibility")
-
-            # keep it short
-            reason_bucket = reason_bucket[:3]
-
-            risk = "WARNING" if is_warning else "SAFE"
+    reason_bucket = reason_bucket[:3]
 
     # Suggestions
     ft_suggestions: List[Dict[str, Any]] = cap_detail[:suggest_top_n]
@@ -740,7 +875,7 @@ async def compute_course_row(
             break
 
     # Confidence (simple heuristic)
-    if baseline_demand > 0 and len(baseline_ft_ids) > 0:
+    if baseline_demand > 0 and len(latest_ft_pool_ids) > 0:
         confidence = 100
     elif baseline_demand > 0:
         confidence = 70
@@ -762,7 +897,11 @@ async def compute_course_row(
         "history": {
             "baseline_term_id": baseline_term["term_id"],
             "baseline_relay_on_pt": bool(relied_on_pt_last_year),
-            "baseline_needed_overload": False,
+            "baseline_needed_overload": bool(uncovered > 0),
+            "latest_offered_term_id": latest_offered_term_id,
+            "full_time_faculty_pool": latest_ft_pool_names,
+            "full_time_faculty_pool_ids": latest_ft_pool_ids,
+            "full_time_faculty_pool_timeline": pool_timeline,
         },
         "ft_breakdown": section_breakdown,
         "confidence": int(confidence),
@@ -794,6 +933,12 @@ async def run_ft_coverage_review(params: Dict[str, Any]) -> Dict[str, Any]:
     dept_name = (dept or {}).get("dept_name") or (dept or {}).get("department_name") or dept_id
 
     baseline_map = await build_baseline_course_map(db, dept_id=dept_id, baseline_term_id=baseline["term_id"])
+    recent_pool_map = await build_recent_ft_pool_map(
+        db,
+        dept_id=dept_id,
+        baseline_term_id=baseline["term_id"],
+        target_term_id=tgt["term_id"],
+    )
 
     rows: List[Dict[str, Any]] = []
     async for c in db[COL_COURSES].find(
@@ -824,6 +969,8 @@ async def run_ft_coverage_review(params: Dict[str, Any]) -> Dict[str, Any]:
         else:
             course_code = raw_code
 
+        recent_pool = recent_pool_map.get(cid) or {}
+
         row = await compute_course_row(
             db=db,
             dept_id=dept_id,
@@ -832,6 +979,10 @@ async def run_ft_coverage_review(params: Dict[str, Any]) -> Dict[str, Any]:
             course_title=str(c.get("course_title") or ""),
             baseline_demand=demand,
             baseline_ft_ids=ft_ids,
+            latest_ft_pool_ids=list(recent_pool.get("latest_ft_pool_ids") or []),
+            latest_ft_pool_names=list(recent_pool.get("latest_ft_pool") or []),
+            pool_timeline=list(recent_pool.get("pool_timeline") or []),
+            latest_offered_term_id=recent_pool.get("latest_offered_term_id"),
             relied_on_pt_last_year=relied_pt,
             baseline_term=baseline,
             target_term=tgt,

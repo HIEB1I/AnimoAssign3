@@ -367,7 +367,8 @@ const PLANTILLA_TABLE_WRAP =
 
 const PLANTILLA_TABLE =
   "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-middle [&_td]:whitespace-normal [&_td]:break-words";
-const PLANTILLA_TH = "px-4 py-2 text-left";
+// Column headers: center-aligned by default (override per-column when needed).
+const PLANTILLA_TH = "px-4 py-2 text-center";
 const PLANTILLA_TD = "px-4 py-3 text-center";
 const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border-b [&>td]:border-gray-200";
 
@@ -1780,18 +1781,18 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                       <span className="sr-only">Select</span>
                     </th>
                     <th className="px-4 py-2 text-left">Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Section<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Units</th>
-                    <th className="px-4 py-2 text-left">To<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className="px-4 py-2 text-left">Faculty</th>
-                    <th className="px-4 py-2 text-left">Day1</th>
-                    <th className="px-4 py-2 text-left">Begin1</th>
-                    <th className="px-4 py-2 text-left">End1</th>
-                    <th className="px-4 py-2 text-left">Day2</th>
-                    <th className="px-4 py-2 text-left">Begin2</th>
-                    <th className="px-4 py-2 text-left">End2</th>
-                    <th className="px-4 py-2 text-left">Remarks</th>
-                    <th className="px-4 py-2 text-left">Status</th>
+                    <th className={PLANTILLA_TH}>Section<span className="text-red-600 ml-0.5">*</span></th>
+                    <th className={PLANTILLA_TH}>Units</th>
+                    <th className={PLANTILLA_TH}>To<span className="text-red-600 ml-0.5">*</span></th>
+                    <th className={PLANTILLA_TH}>Faculty</th>
+                    <th className={PLANTILLA_TH}>Day1</th>
+                    <th className={PLANTILLA_TH}>Begin1</th>
+                    <th className={PLANTILLA_TH}>End1</th>
+                    <th className={PLANTILLA_TH}>Day2</th>
+                    <th className={PLANTILLA_TH}>Begin2</th>
+                    <th className={PLANTILLA_TH}>End2</th>
+                    <th className={PLANTILLA_TH}>Remarks</th>
+                    <th className={PLANTILLA_TH}>Status</th>
                   </tr>
                 </thead>
 

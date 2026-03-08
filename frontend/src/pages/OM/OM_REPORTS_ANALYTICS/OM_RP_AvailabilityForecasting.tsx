@@ -263,10 +263,14 @@ function colorForCount(count: number, min: number, max: number) {
   const span = Math.max(1, max - min);
   const ratio = (count - min) / span;
   const steps = [
+    // Red → Yellow → Green (middle must be yellow)
     "#fee2e2",
     "#fecaca",
     "#fca5a5",
-    "#f2f2f2",
+    "#f87171",
+    "#fef9c3",
+    "#fde047",
+    "#facc15",
     "#d1fae5",
     "#a7f3d0",
     "#6ee7b7",
@@ -276,6 +280,10 @@ function colorForCount(count: number, min: number, max: number) {
   const idx = Math.min(steps.length - 1, Math.max(0, Math.round(ratio * (steps.length - 1))));
   return steps[idx];
 }
+
+// Faculty-mode heatmap colors (selected faculty only)
+const FACULTY_SELECTED_BG = "#bbf7d0"; // green-200
+const FACULTY_OTHER_BG = "#fecaca"; // red-200
 
 function shouldUseDarkText(hex: string) {
   const h = hex.replace("#", "");
@@ -560,15 +568,17 @@ export default function OM_RP_AvailabilityForecasting() {
 
       {/* Controls (compact) */}
       <Card className="p-3">
-        <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <div className="flex items-center gap-2">
-              <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1">
+        {/* One-line controls (tabs + dropdowns + info). Uses horizontal scroll if the screen is too tight. */}
+        <div className="flex items-end gap-2 overflow-x-auto">
+          {/* Mode (Slot / Faculty) — same size feel as dropdowns */}
+          <div className="shrink-0 min-w-[180px]">
+            <div className="text-[11px] text-gray-500 mb-1">Mode</div>
+            <div className="inline-flex w-full rounded-lg border border-gray-300 bg-white shadow-sm overflow-hidden">
               <button
                 type="button"
                 onClick={() => setStartMode("slot")}
                 className={cls(
-                  "px-3 py-1.5 text-xs font-semibold rounded-md",
+                  "flex-1 px-3 py-2 text-sm font-semibold",
                   startMode === "slot" ? "bg-emerald-600 text-white" : "text-gray-700 hover:bg-gray-50"
                 )}
               >
@@ -578,127 +588,108 @@ export default function OM_RP_AvailabilityForecasting() {
                 type="button"
                 onClick={() => setStartMode("faculty")}
                 className={cls(
-                  "px-3 py-1.5 text-xs font-semibold rounded-md",
+                  "flex-1 px-3 py-2 text-sm font-semibold",
                   startMode === "faculty" ? "bg-emerald-600 text-white" : "text-gray-700 hover:bg-gray-50"
                 )}
               >
                 Faculty
               </button>
             </div>
-
-              {totalScope ? (
-                <Chip className="shrink-0">Faculty considered: {denomIncluded}/{totalScope}</Chip>
-              ) : null}
-            </div>
-
-            <button
-              type="button"
-              className="inline-flex items-center gap-1 text-xs text-gray-500 hover:text-gray-700"
-              title="Prediction based on preferences + teaching history patterns. Not confirmed calendar availability."
-            >
-              <Info className="h-4 w-4" />
-              Info
-            </button>
           </div>
 
           {startMode === "slot" ? (
-            // Match the Faculty tab layout: one line with Day + Schedule on the left
-            // and the same-width "Slots" dropdown on the right.
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
-              <div className="lg:col-span-7">
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <div className="text-[11px] text-gray-500 mb-1">Day</div>
-                    <SelectBox
-                      value={pairKey}
-                      options={DAY_PAIRS_LABELED.map((p) => p.label)}
-                      onChange={(v) => {
-                        setUserTouchedSlot(true);
-                        setPairKey(v);
-                        setStartMode("slot");
-                      }}
-                    />
-                  </div>
-
-                  <div>
-                    <div className="text-[11px] text-gray-500 mb-1">Schedule</div>
-                    <SelectBox
-                      value={slotKey}
-                      options={[...TIME_ROWS] as unknown as string[]}
-                      onChange={(v) => {
-                        setUserTouchedSlot(true);
-                        setSlotKey(v);
-                        setStartMode("slot");
-                      }}
-                    />
-                  </div>
-                </div>
-              </div>
-
-              <div className="lg:col-span-5">
-                <div className="text-[11px] text-gray-500 mb-1">Slots</div>
+            <>
+              <div className="shrink-0">
+                <div className="text-[11px] text-gray-500 mb-1">Day</div>
                 <SelectBox
-                  value={countingMode === "top1" ? "1" : "4"}
-                  options={["1", "4"]}
-                  onChange={(v) => setCountingMode(v === "4" ? "top4" : "top1")}
+                  className="min-w-[180px]"
+                  value={pairKey}
+                  options={DAY_PAIRS_LABELED.map((p) => p.label)}
+                  onChange={(v) => {
+                    setUserTouchedSlot(true);
+                    setPairKey(v);
+                    setStartMode("slot");
+                  }}
                 />
               </div>
-            </div>
+
+              <div className="shrink-0">
+                <div className="text-[11px] text-gray-500 mb-1">Schedule</div>
+                <SelectBox
+                  className="min-w-[180px]"
+                  value={slotKey}
+                  options={[...TIME_ROWS] as unknown as string[]}
+                  onChange={(v) => {
+                    setUserTouchedSlot(true);
+                    setSlotKey(v);
+                    setStartMode("slot");
+                  }}
+                />
+              </div>
+            </>
           ) : (
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-2">
-              <div className="lg:col-span-7">
-                <div className="text-[11px] text-gray-500 mb-1">Faculty</div>
-                <div className="relative">
-                  <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
-                  <input
-                    value={facultyQuery}
-                    onChange={(e) => {
-                      const v = e.target.value;
-                      setFacultyQuery(v);
-                      // If the user starts typing while a faculty is selected, treat it as a new search.
-                      if (!v.trim()) setSelectedFacultyId(null);
-                      else if (selectedFacultyId) setSelectedFacultyId(null);
-                      setStartMode("faculty");
-                    }}
-                    placeholder="Search by name…"
-                    className="w-full rounded-lg border border-gray-200 bg-white pl-9 pr-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-200"
-                  />
-
-                  {facultyQuery.trim() && !selectedFacultyId ? (
-                    <div className="absolute z-20 mt-1 w-full max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white shadow-sm">
-                      {facultySuggestions.length ? (
-                        facultySuggestions.slice(0, 50).map((f) => (
-                          <button
-                            key={f.faculty_id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedFacultyId(f.faculty_id);
-                              setFacultyQuery(f.name);
-                              setStartMode("faculty");
-                            }}
-                            className="w-full text-left px-3 py-2 hover:bg-gray-50"
-                          >
-                            <div className="text-sm text-gray-900 truncate">{f.name}</div>
-                          </button>
-                        ))
-                      ) : (
-                        <div className="px-3 py-2 text-sm text-gray-500">No matches.</div>
-                      )}
-                    </div>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="lg:col-span-5">
-                <div className="text-[11px] text-gray-500 mb-1">Slots</div>
-                <SelectBox
-                  value={countingMode === "top1" ? "1" : "4"}
-                  options={["1", "4"]}
-                  onChange={(v) => setCountingMode(v === "4" ? "top4" : "top1")}
+            <div className="relative min-w-[280px] flex-1">
+              <div className="text-[11px] text-gray-500 mb-1">Faculty</div>
+              <div className="relative">
+                <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <input
+                  value={facultyQuery}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setFacultyQuery(v);
+                    // If the user starts typing while a faculty is selected, treat it as a new search.
+                    if (!v.trim()) setSelectedFacultyId(null);
+                    else if (selectedFacultyId) setSelectedFacultyId(null);
+                    setStartMode("faculty");
+                  }}
+                  placeholder="Search by name…"
+                  className="w-full rounded-lg border border-gray-300 bg-white pl-9 pr-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-200"
                 />
+
+                {facultyQuery.trim() && !selectedFacultyId ? (
+                  <div className="absolute z-20 mt-1 w-full max-h-56 overflow-auto rounded-lg border border-gray-200 bg-white shadow-sm">
+                    {facultySuggestions.length ? (
+                      facultySuggestions.slice(0, 50).map((f) => (
+                        <button
+                          key={f.faculty_id}
+                          type="button"
+                          onClick={() => {
+                            setSelectedFacultyId(f.faculty_id);
+                            setFacultyQuery(f.name);
+                            setStartMode("faculty");
+                          }}
+                          className="w-full text-left px-3 py-2 hover:bg-gray-50"
+                        >
+                          <div className="text-sm text-gray-900 truncate">{f.name}</div>
+                        </button>
+                      ))
+                    ) : (
+                      <div className="px-3 py-2 text-sm text-gray-500">No matches.</div>
+                    )}
+                  </div>
+                ) : null}
               </div>
             </div>
           )}
+
+          <div className="shrink-0">
+            <div className="text-[11px] text-gray-500 mb-1">Slots</div>
+            <SelectBox
+              className="min-w-[120px]"
+              value={countingMode === "top1" ? "1" : "4"}
+              options={["1", "4"]}
+              onChange={(v) => setCountingMode(v === "4" ? "top4" : "top1")}
+            />
+          </div>
+
+          <button
+            type="button"
+            className="shrink-0 inline-flex items-center gap-1 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-600 shadow-sm hover:bg-gray-50"
+            title="Prediction based on preferences + teaching history patterns. Not confirmed calendar availability."
+          >
+            <Info className="h-4 w-4" />
+            Info
+          </button>
         </div>
       </Card>
 
@@ -711,6 +702,11 @@ export default function OM_RP_AvailabilityForecasting() {
               <div className="flex items-center justify-between gap-3">
                 <div className="min-w-0">
                   <div className="text-sm font-semibold text-gray-800">Top faculty for {pairKey} {slotKey}</div>
+                  {totalScope ? (
+                    <div className="mt-1">
+                      <Chip>Faculty considered: {denomIncluded}/{totalScope}</Chip>
+                    </div>
+                  ) : null}
                 </div>
               </div>
 
@@ -837,16 +833,29 @@ export default function OM_RP_AvailabilityForecasting() {
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-gray-800">Heatmap: predicted faculty support</div>
                 <div className="text-xs text-gray-500 mt-0.5">
-                  {countingMode === "top1"
-                    ? "Counts show how many included faculty have this as their #1 best-fit slot."
-                    : "Counts show how many included faculty include this slot in their top 4 best-fit slots (each faculty may appear in up to 4 slots)."}
+                  {startMode === "faculty" && selectedFacultyId
+                    ? "Green = selected faculty best-fit. Red = other slots."
+                    : countingMode === "top1"
+                      ? "Counts show how many included faculty have this as their #1 best-fit slot."
+                      : "Counts show how many included faculty include this slot in their top 4 best-fit slots (each faculty may appear in up to 4 slots)."}
                 </div>
               </div>
 
               <div className="flex items-center gap-2">
-                <span className="text-xs text-gray-500">Low ({pairMin})</span>
-                <div className="h-3 w-28 rounded bg-gradient-to-r from-[#fca5a5] via-[#f2f2f2] to-[#059669]" />
-                <span className="text-xs text-gray-500">Peak ({pairMax})</span>
+                {startMode === "faculty" && selectedFacultyId ? (
+                  <>
+                    <span className="text-xs text-gray-500">Other</span>
+                    <div className="h-3 w-6 rounded" style={{ background: FACULTY_OTHER_BG }} />
+                    <span className="text-xs text-gray-500">Selected</span>
+                    <div className="h-3 w-6 rounded" style={{ background: FACULTY_SELECTED_BG }} />
+                  </>
+                ) : (
+                  <>
+                    <span className="text-xs text-gray-500">Low ({pairMin})</span>
+                    <div className="h-3 w-28 rounded bg-gradient-to-r from-[#f87171] via-[#facc15] to-[#059669]" />
+                    <span className="text-xs text-gray-500">Peak ({pairMax})</span>
+                  </>
+                )}
               </div>
             </div>
 
@@ -886,8 +895,7 @@ export default function OM_RP_AvailabilityForecasting() {
 
                         {DAY_PAIRS_LABELED.map(({ d1, d2, label, title }) => {
                           const merged = mergePairCells(getSingleCell(data, d1, slot), getSingleCell(data, d2, slot));
-                          const bg = colorForCount(merged.count, pairMin, pairMax);
-                          const darkText = shouldUseDarkText(bg);
+                          const isFacultyModeColor = startMode === "faculty" && !!selectedFacultyId;
                           const denom = denomIncluded || 0;
                           const cellTitle = `${title} • ${slot} • ${merged.count}/${denom}`;
 
@@ -897,6 +905,11 @@ export default function OM_RP_AvailabilityForecasting() {
                           const isFacultyHighlight = startMode === "faculty" && highlightSet.has(`${d1}-${d2}-${slot}`);
                           const isSelectedSlot = startMode === "slot" && selectedSlotKeyForHeatmap === `${d1}-${d2}-${slot}`;
 
+                          const bg = isFacultyModeColor
+                            ? (isFacultyHighlight ? FACULTY_SELECTED_BG : FACULTY_OTHER_BG)
+                            : colorForCount(merged.count, pairMin, pairMax);
+                          const textColor = shouldUseDarkText(bg) ? "#111827" : "white";
+
                           return (
                             <td
                               key={`${d1}${d2}-${slot}`}
@@ -904,12 +917,12 @@ export default function OM_RP_AvailabilityForecasting() {
                               className={cls(
                                 "text-center align-middle select-none cursor-pointer",
                                 isSelectedSlot && "ring-2 ring-emerald-500 ring-offset-2",
-                                // Use a red box for faculty highlights (requested).
-                                isFacultyHighlight && "ring-2 ring-red-500 ring-offset-2"
+                                // In faculty mode, highlight the selected faculty's best-fit blocks.
+                                isFacultyHighlight && "ring-2 ring-emerald-700 ring-offset-2"
                               )}
                               style={{
                                 background: bg,
-                                color: darkText ? "#0b3d2e" : "white",
+                                color: textColor,
                                 fontWeight: 700,
                                 borderRadius: 0,
                                 padding: "10px 0",
