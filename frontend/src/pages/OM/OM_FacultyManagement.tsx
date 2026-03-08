@@ -615,7 +615,7 @@ export default function OM_FacultyManagement() {
                         <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
                         <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                        <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
+                        <th className="w-[14.2857%] text-center px-2 py-2"> </th>
                       </tr>
                     </thead>
 
