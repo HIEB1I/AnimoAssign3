@@ -3139,14 +3139,6 @@ const chairPlantillaFilename =
   (chairPlantillaHeader?.plantilla_file && String(chairPlantillaHeader.plantilla_file).replace(/\.pdf$/i, ".xls")) ||
   "Faculty_Plantilla.xls";
 
-const openChairPlantillaPreview = useCallback(() => {
-  if (!userId) {
-    alert("Missing user session.");
-    return;
-  }
-  setChairPlantillaOpen(true);
-}, [userId]);
-
 const closeChairPlantillaPreview = useCallback(() => {
   if (chairPlantillaLoading) return;
   setChairPlantillaOpen(false);
@@ -3184,6 +3176,7 @@ function closeConfirm(ok: boolean) {
 // Fetch plantilla data when modal opens (copied from CHAIR_Plantilla; no dependency on that page).
 useEffect(() => {
   if (!chairPlantillaOpen) return;
+  if (chairExportExcel) return;
 
   (async () => {
     try {
@@ -3211,7 +3204,7 @@ useEffect(() => {
       setChairPlantillaLoading(false);
     }
   })();
-}, [chairPlantillaOpen, userId]);
+}, [chairPlantillaOpen, chairExportExcel, userId]);
 
 const chairHandleExportExcel = useCallback(() => {
   if (!chairPlantillaFilteredRows || chairPlantillaFilteredRows.length === 0) {
@@ -5696,6 +5689,142 @@ async function handleSaveNewLineRow(r: Row) {
     });
     return map;
   }, [facultyList]);
+
+const chairRecommendationPlantillaRows = useMemo<ChairPlantillaRow[]>(() => {
+  const displayFacultyName = (r: Row) => {
+    const fid = String(r.faculty_id || "").trim();
+    const mapped = fid ? String(facultyById[fid]?.faculty_name_display || "").trim() : "";
+    const raw = String(r.faculty || "").trim();
+    return mapped || raw;
+  };
+
+  const toDayLabel = (raw: string) => {
+    const val = String(raw || "").trim().toUpperCase();
+    const map: Record<string, string> = {
+      M: "M",
+      T: "T",
+      W: "W",
+      H: "H",
+      TH: "H",
+      F: "F",
+      S: "S",
+      SU: "Su",
+      SUN: "Su",
+      SAT: "S",
+    };
+    return map[val] || val;
+  };
+
+  const formatTimeRange = (begin: string, end: string) => {
+    const b = String(begin || "").trim();
+    const e = String(end || "").trim();
+    if (!b && !e) return "";
+    if (!b) return e;
+    if (!e) return b;
+    return `${b}-${e}`;
+  };
+
+  const toNumberOrNull = (value: unknown): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const assigned = (rows || []).filter((r) => {
+    const facultyName = displayFacultyName(r).trim();
+    const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
+    if (!facultyName) return false;
+    if (/^(tba|unassigned|-|—)$/i.test(facultyName)) return false;
+    if (/^SPECIAL\s*CLASS$/i.test(remarks)) return false;
+    return isRowAssigned(r);
+  });
+
+  const sorted = [...assigned].sort((a, b) => {
+    const facultyCmp = displayFacultyName(a).localeCompare(displayFacultyName(b));
+    if (facultyCmp !== 0) return facultyCmp;
+    const courseCmp = String(a.course || "").localeCompare(String(b.course || ""));
+    if (courseCmp !== 0) return courseCmp;
+    return String(a.section || "").localeCompare(String(b.section || ""));
+  });
+
+  return sorted.map((r) => {
+    const facultyName = displayFacultyName(r);
+    const fid = String(r.faculty_id || "").trim();
+    const courseId = String(r.course_id || validationContext.sectionCourse?.[r.id] || "").trim();
+    const courseType = String(validationContext.courseTypeOfCourse?.[courseId] || "").trim();
+    const units = toNumberOrNull(r.units);
+    const level = getRowProgramLevel(r);
+    const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
+    const days = [toDayLabel(r.day1), toDayLabel(r.day2)].filter(Boolean).join("/");
+    const times = [formatTimeRange(r.begin1, r.end1), formatTimeRange(r.begin2, r.end2)].filter(Boolean).join("/");
+    const rooms = [String(r.room1 || "").trim(), String(r.room2 || "").trim()].filter(Boolean).join("/");
+    const onLeave = fid && onLeaveSet.has(fid) ? "Yes" : "No";
+
+    return {
+      rank: "",
+      faculty_name: facultyName,
+      course_code: String(r.course || "").trim(),
+      section_code: String(r.section || "").trim(),
+      day_text: days,
+      time_text: times,
+      room_text: rooms,
+      student_count: toNumberOrNull(r.capacity),
+      lec_hours: units,
+      lab_hours: null,
+      student_units: units,
+      on_leave: onLeave,
+      course_type: courseType,
+      nature_teaching: units,
+      nature_admin: 0,
+      nature_research: 0,
+      nature_faculty_units: units,
+      premium_grad: level === "GS" ? units : null,
+      premium_4th_prep: null,
+      premium_overload: null,
+      remarks,
+      source: "LOAD_RECOMMENDATION",
+      source_id: String(r.id || "").trim() || null,
+    };
+  });
+}, [
+  rows,
+  facultyById,
+  validationContext.sectionCourse,
+  validationContext.courseTypeOfCourse,
+  remarksDraftBySection,
+  remarksSavedBySection,
+  onLeaveSet,
+  getRowProgramLevel,
+  isRowAssigned,
+]);
+
+const openChairPlantillaPreview = useCallback(() => {
+  if (!userId) {
+    alert("Missing user session.");
+    return;
+  }
+
+  if (chairExportExcel) {
+    const deptLabel = String(
+      (session as any)?.dept_name ||
+        (session as any)?.dept_label ||
+        (session as any)?.deptName ||
+        (session as any)?.department?.dept_name ||
+        ""
+    ).trim();
+
+    setChairPlantillaHeader({
+      ok: true,
+      term_label: term || undefined,
+      dept_label: deptLabel || undefined,
+      plantilla_file: "Faculty_Load_Recommendation.xls",
+    });
+    setChairPlantillaRows(chairRecommendationPlantillaRows);
+    setChairPlantillaLoading(false);
+  }
+
+  setChairPlantillaOpen(true);
+}, [userId, chairExportExcel, session, term, chairRecommendationPlantillaRows]);
+
 
   const hasAnyErrors = useMemo(
     () =>
