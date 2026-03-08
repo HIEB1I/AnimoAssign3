@@ -38,6 +38,17 @@ type Row = {
     baseline_term_id: string;
     baseline_relay_on_pt: boolean;
     baseline_needed_overload: boolean;
+    latest_offered_term_id?: string | null;
+    full_time_faculty_pool?: string[];
+    full_time_faculty_pool_ids?: string[];
+    full_time_faculty_pool_timeline?: Array<{
+      term_id: string;
+      acad_year_start?: number;
+      term_number?: number;
+      offered: boolean;
+      faculty_ids?: string[];
+      faculty_names?: string[];
+    }>;
   };
   confidence: number;
   ft_breakdown?: SectionBreakdown[];
@@ -114,6 +125,7 @@ const REASON_LABELS: Record<string, string> = {
   INACTIVE_RECENT_TERMS: "No teaching activity in the checked terms",
   INSUFFICIENT_UNITS_FOR_1_SECTION: "Not enough remaining units for 1 section",
   DELOAD_APPLIED: "Has deloading this term",
+  NO_SUBMITTED_PREFERENCE_YET: "No submitted preference yet",
   COVERED_BY_FT_POOL: "Covered by FT capacity now",
   COVERED_BY_OTHER_FT: "Covered by another FT",
 };
@@ -127,6 +139,14 @@ function fmtReasons(xs: string[] | undefined | null) {
 function clampPct(n: number) {
   if (!Number.isFinite(n)) return 0;
   return Math.max(0, Math.min(100, Math.round(n)));
+}
+
+function fmtTermLabel(t: { acad_year_start?: number; term_number?: number; term_id?: string | null }) {
+  if (typeof t?.acad_year_start === "number" && typeof t?.term_number === "number") {
+    const ay = `${t.acad_year_start}-${String((t.acad_year_start || 0) + 1).slice(-2)}`;
+    return `AY ${ay} Term ${t.term_number}`;
+  }
+  return t?.term_id || "—";
 }
 
 function StatusBadge({ v }: { v: Row["risk"] }) {
@@ -171,6 +191,8 @@ function HoverInfo({ text }: { text: string }) {
 
 type Tab = "RISK" | "WARNING" | "SAFE";
 
+type PanelMode = "DETAILS" | "POOL" | "ACTIONS";
+
 export default function OM_RP_LoadRisk() {
   const PAGE_SIZE = 15;
   const [page, setPage] = useState(1);
@@ -184,9 +206,7 @@ export default function OM_RP_LoadRisk() {
   const [error, setError] = useState<string | null>(null);
   const [data, setData] = useState<CoverageResponse | null>(null);
   const [selectedCourseId, setSelectedCourseId] = useState<string | null>(null);
-  const [panelMode, setPanelMode] = useState<"DETAILS" | "HISTORY" | "ACTIONS">(
-    "DETAILS"
-  );
+  const [panelMode, setPanelMode] = useState<PanelMode>("DETAILS");
 
   const loadMyDepartment = async (): Promise<{ deptId: string; deptName: string }> => {
     const fallback = { deptId: "DEPT0001", deptName: "" };
@@ -221,7 +241,7 @@ export default function OM_RP_LoadRisk() {
     }
   };
 
-  type SortKey = "course" | "baseline" | "coverage" | "uncovered";
+  type SortKey = "course" | "baseline" | "ftCoverage";
   type SortDir = "asc" | "desc";
 
   const [sortKey, setSortKey] = useState<SortKey>("course");
@@ -230,8 +250,7 @@ export default function OM_RP_LoadRisk() {
   const toggleSort = (k: SortKey) => {
     setPage(1);
 
-    const defaultDir: SortDir =
-      k === "baseline" || k === "uncovered" ? "desc" : "asc";
+    const defaultDir: SortDir = k === "baseline" ? "desc" : "asc";
     if (sortKey !== k) {
       setSortKey(k);
       setSortDir(defaultDir);
@@ -318,22 +337,19 @@ export default function OM_RP_LoadRisk() {
         );
       }
 
-      if (sortKey === "uncovered") {
-        return dir * (Number(a.uncovered_sections) - Number(b.uncovered_sections));
+      if (sortKey === "ftCoverage") {
+        const aRatio =
+          a.baseline_demand_sections > 0
+            ? Number(a.ft_can_cover_sections_est) / Number(a.baseline_demand_sections)
+            : 0;
+        const bRatio =
+          b.baseline_demand_sections > 0
+            ? Number(b.ft_can_cover_sections_est) / Number(b.baseline_demand_sections)
+            : 0;
+        return dir * (aRatio - bRatio);
       }
 
-      // sortKey === "coverage"
-      const aPct =
-        a.baseline_demand_sections > 0
-          ? (100 * Number(a.ft_can_cover_sections_est)) /
-            Number(a.baseline_demand_sections)
-          : 0;
-      const bPct =
-        b.baseline_demand_sections > 0
-          ? (100 * Number(b.ft_can_cover_sections_est)) /
-            Number(b.baseline_demand_sections)
-          : 0;
-      return dir * (aPct - bPct);
+      return 0;
     });
 
     return arr;
@@ -448,7 +464,7 @@ export default function OM_RP_LoadRisk() {
                         {coverageSummary.pct}% ({coverageSummary.totalCoverable}/
                         {coverageSummary.totalBaseline} sections)
                       </span>
-                      <HoverInfo text="Percent of last-AY sections that baseline FT can cover now." />
+                      <HoverInfo text="Percent of expected sections that the current full-time faculty pool can cover now." />
                       <span className="text-gray-500">•</span>
                       <span>
                         <span className="font-semibold">Uncovered</span>: {coverageSummary.totalUncovered}
@@ -493,7 +509,7 @@ export default function OM_RP_LoadRisk() {
                 <span className="text-base font-semibold text-gray-900">
                   Risk
                 </span>
-                <HoverInfo text="Risk: at least 1 last-AY section cannot be covered by baseline FT now, or there is no baseline FT history last AY." />
+                <HoverInfo text="Risk: no full-time faculty was found in the recent teaching window, or at least one faculty in the current full-time pool is currently unable to teach." />
                 <span
                   className={cls(
                     "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
@@ -530,7 +546,7 @@ export default function OM_RP_LoadRisk() {
                 <span className="text-base font-semibold text-gray-900">
                   Warning
                 </span>
-                <HoverInfo text="Warning: covered now, but fragile (depends on few FT), or the course relied on PT last AY." />
+                <HoverInfo text="Warning: the course relied on part-time faculty last year, or the current full-time pool still needs follow-up." />
                 <span
                   className={cls(
                     "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
@@ -567,7 +583,7 @@ export default function OM_RP_LoadRisk() {
                 <span className="text-base font-semibold text-gray-900">
                   Safe
                 </span>
-                <HoverInfo text="Safe: last-AY sections are covered by baseline FT with no major fragility signs." />
+                <HoverInfo text="Safe: the current full-time faculty pool appears available for this course." />
                 <span
                   className={cls(
                     "ml-1 inline-flex items-center justify-center px-2.5 py-0.5 text-xs font-bold",
@@ -665,7 +681,7 @@ export default function OM_RP_LoadRisk() {
                           onClick={() => toggleSort("baseline")}
                           className="inline-flex items-center gap-1 hover:underline"
                         >
-	                          Last AY Sections
+	                          Expected Sections
                           <span
                             className={cls(
                               "text-[10px]",
@@ -683,51 +699,25 @@ export default function OM_RP_LoadRisk() {
                         </button>
                       </th>
                       <th className="px-4 py-2.5 text-center font-semibold border-b">
-                        Coverable
-                      </th>
-                      <th className="px-4 py-2.5 text-center font-semibold border-b">
                         <button
                           type="button"
-                          onClick={() => toggleSort("coverage")}
+                          onClick={() => toggleSort("ftCoverage")}
                           className="inline-flex items-center gap-1 hover:underline"
-                                                  >
-                          Coverage
+                        >
+                          FT Coverage
                           <span
                             className={cls(
                               "text-[10px]",
-                              sortKey === "coverage"
+                              sortKey === "ftCoverage"
                                 ? "text-gray-700"
                                 : "text-gray-300"
                             )}
                           >
-                            {sortKey === "coverage"
+                            {sortKey === "ftCoverage"
                               ? sortDir === "asc"
                                 ? "▲"
                                 : "▼"
                               : "▲"}
-                          </span>
-                        </button>
-                      </th>
-                      <th className="px-4 py-2.5 text-center font-semibold border-b">
-                        <button
-                          type="button"
-                          onClick={() => toggleSort("uncovered")}
-                          className="inline-flex items-center gap-1 hover:underline"
-                                                  >
-                          Uncovered
-                          <span
-                            className={cls(
-                              "text-[10px]",
-                              sortKey === "uncovered"
-                                ? "text-gray-700"
-                                : "text-gray-300"
-                            )}
-                          >
-                            {sortKey === "uncovered"
-                              ? sortDir === "asc"
-                                ? "▲"
-                                : "▼"
-                              : "▼"}
                           </span>
                         </button>
                       </th>
@@ -760,19 +750,8 @@ export default function OM_RP_LoadRisk() {
                           <td className="px-4 py-2.5 text-center tabular-nums">
                             {r.baseline_demand_sections}
                           </td>
-                          <td className="px-4 py-2.5 text-center tabular-nums">
-                            {r.ft_can_cover_sections_est}
-                          </td>
-                          <td className="px-4 py-2.5 text-center tabular-nums">
-                            {r.baseline_demand_sections > 0
-                              ? `${clampPct(
-                                  (100 * r.ft_can_cover_sections_est) /
-                                    r.baseline_demand_sections
-                                )}%`
-                              : "—"}
-                          </td>
-                          <td className="px-4 py-2.5 text-center tabular-nums">
-                            {r.uncovered_sections}
+                          <td className="px-4 py-2.5 text-center tabular-nums font-semibold">
+                            {r.ft_can_cover_sections_est} / {r.baseline_demand_sections}
                           </td>
                           <td className="px-4 py-2.5 text-center">
                             <StatusBadge v={r.risk} />
@@ -784,7 +763,7 @@ export default function OM_RP_LoadRisk() {
                     {!loading && data && filtered.length === 0 && (
                       <tr>
                         <td
-                          colSpan={6}
+                          colSpan={4}
                           className="px-4 py-8 text-center text-gray-500"
                         >
                           No courses found.
@@ -864,17 +843,17 @@ export default function OM_RP_LoadRisk() {
                       Details
                     </button>
 
-                    {/* <button
+                    <button
                       className={cls(
                         "pb-2",
-                        panelMode === "HISTORY"
+                        panelMode === "POOL"
                           ? "text-gray-900 border-b-2 border-emerald-400"
                           : "text-gray-500"
                       )}
-                      onClick={() => setPanelMode("HISTORY")}
+                      onClick={() => setPanelMode("POOL")}
                     >
-                      History
-                    </button> */}
+                      Full-Time Faculty Pool
+                    </button>
 
                     <button
                       className={cls(
@@ -901,25 +880,25 @@ export default function OM_RP_LoadRisk() {
                         <StatusBadge v={selected.risk} />
                         <div className="text-xs text-gray-500">
                           {selected.risk === "RISK"
-                            ? `Uncovered: ${selected.uncovered_sections}`
+                            ? "Staffing risk detected"
                             : selected.risk === "WARNING"
-                            ? "Covered, but fragile"
-                            : "Covered"}
+                            ? "Needs follow-up"
+                            : "Pool available"}
                         </div>
                       </div>
 
                       <div className="grid grid-cols-2 gap-2">
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                          <div className="text-xs text-gray-500">Demand (last AY)</div>
+                          <div className="text-xs text-gray-500">Expected Sections</div>
                           <div className="mt-1 text-lg font-semibold tabular-nums text-gray-900">
                             {selected.baseline_demand_sections}
                           </div>
                         </div>
 
                         <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
-                          <div className="text-xs text-gray-500">Coverable now (baseline FT)</div>
+                          <div className="text-xs text-gray-500">FT Coverage</div>
                           <div className="mt-1 text-lg font-semibold tabular-nums text-gray-900">
-                            {selected.ft_can_cover_sections_est}
+                            {selected.ft_can_cover_sections_est} / {selected.baseline_demand_sections}
                           </div>
                         </div>
 
@@ -943,6 +922,24 @@ export default function OM_RP_LoadRisk() {
                         </div>
                       </div>
 
+                      <div className="rounded-lg border border-gray-200 bg-white p-3">
+                        <div className="text-sm font-semibold text-gray-900">Full-Time Faculty Pool</div>
+                        {(selected.history.full_time_faculty_pool || []).length ? (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {(selected.history.full_time_faculty_pool || []).map((name) => (
+                              <span
+                                key={name}
+                                className="inline-flex items-center rounded-full bg-gray-100 px-2.5 py-1 text-xs font-medium text-gray-700"
+                              >
+                                {name}
+                              </span>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="mt-2 text-xs text-gray-500">No full-time faculty found in the recent teaching window.</div>
+                        )}
+                      </div>
+
                       {(selected.reasons || []).length ? (
                         <div className="rounded-lg border border-gray-200 bg-white p-3 text-sm">
                           <div className="text-sm font-semibold text-gray-900">
@@ -961,7 +958,7 @@ export default function OM_RP_LoadRisk() {
                           <div className="text-sm font-semibold text-gray-900">
                             Availability breakdown
                           </div>
-                          <HoverInfo text="Shows last-AY instructor and whether baseline FT capacity can cover the section now." />
+                          <HoverInfo text="Shows the last-AY instructor and whether the current full-time faculty pool can cover the section now." />
                         </div>
 
 {selected?.ft_breakdown?.length ? (
@@ -1008,7 +1005,7 @@ export default function OM_RP_LoadRisk() {
                                             : "bg-rose-50 text-rose-700"
                                         )}
                                       >
-                                        {canCover ? "CAN COVER" : "CANNOT COVER"}
+                                        {canCover ? "FT AVAILABLE" : "FT NOT AVAILABLE"}
                                       </span>
                                     </div>
 
@@ -1046,26 +1043,23 @@ export default function OM_RP_LoadRisk() {
                     <div className="space-y-3">
                       {selected.risk === "SAFE" ? (
                         <div className="rounded-lg border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-                          <div className="font-semibold">Covered.</div>
+                          <div className="font-semibold">Pool available.</div>
                           <div className="mt-1 text-xs text-emerald-900/80">
-                            No action needed based on baseline demand and current availability signals.
+                            The current full-time faculty pool appears available for this course.
                           </div>
                         </div>
                       ) : selected.risk === "WARNING" ? (
                         <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
-                          <div className="font-semibold">Covered, but fragile.</div>
+                          <div className="font-semibold">Needs follow-up.</div>
                           <div className="mt-1 text-xs text-amber-900/80">
-                            Consider preparing backups (PT or overload) in case availability changes.
+                            The course has a recent full-time pool, but there are still warning signals to review.
                           </div>
                         </div>
                       ) : (
                         <div className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-sm text-rose-900">
-                          <div className="font-semibold">
-                            Uncovered sections:{" "}
-                            <span className="tabular-nums">{selected.uncovered_sections}</span>
-                          </div>
+                          <div className="font-semibold">Staffing risk detected.</div>
                           <div className="mt-1 text-xs text-rose-900/80">
-                            Choose an option below to cover the remaining sections.
+                            At least one faculty in the current full-time pool is blocked, or no recent full-time pool was found.
                           </div>
                         </div>
                       )}
@@ -1155,11 +1149,41 @@ export default function OM_RP_LoadRisk() {
                       </div>
                     </div>
                   ) : (
-                    /* HISTORY (your existing HISTORY UI) */
-                    <div className="text-sm text-gray-700">
-                      <div className="font-semibold mb-2">Baseline Term</div>
-                      <div className="text-xs text-gray-500">
-                        Term ID: {selected.history.baseline_term_id}
+                    <div className="space-y-3 text-sm text-gray-700">
+                      <div className="rounded-lg border border-gray-200 bg-gray-50 p-3">
+                        <div className="text-sm font-semibold text-gray-900">Full-Time Faculty Pool</div>
+                        <div className="mt-1 text-xs text-gray-600">{termLine}</div>
+                        <div className="mt-1 text-xs text-gray-600">
+                          Latest offered term: {selected.history.full_time_faculty_pool_timeline?.[0] ? fmtTermLabel(selected.history.full_time_faculty_pool_timeline[0]) : (selected.history.latest_offered_term_id || "—")}
+                        </div>
+                        <div className="mt-1 text-xs text-gray-500">
+                          Window used: from the latest offered term back to the baseline term.
+                        </div>
+                      </div>
+
+                      <div className="space-y-3">
+                        {(selected.history.full_time_faculty_pool_timeline || []).length ? (
+                          (selected.history.full_time_faculty_pool_timeline || []).map((t) => (
+                            <div key={t.term_id} className="rounded-lg border border-gray-200 bg-white p-3">
+                              <div className="text-sm font-semibold text-gray-900">
+                                {fmtTermLabel(t)}
+                              </div>
+                              <div className="mt-2 text-xs text-gray-600">
+                                {t.offered
+                                  ? (t.faculty_names || []).length
+                                    ? (t.faculty_names || []).map((name) => (
+                                        <div key={name} className="mt-1 first:mt-0">
+                                          {name}
+                                        </div>
+                                      ))
+                                    : "Course offered during this term, but no full-time faculty were assigned."
+                                  : "Course not offered during this term."}
+                              </div>
+                            </div>
+                          ))
+                        ) : (
+                          <div className="text-xs text-gray-500">No recent teaching history available.</div>
+                        )}
                       </div>
                     </div>
                   )}

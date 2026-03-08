@@ -114,6 +114,13 @@ export interface RowFlag {
 
 export type RowFlagsById = Record<string, RowFlag[]>;
 
+type AssignmentMetadata = {
+  assigned_faculty?: string;
+  assigned_faculty_id?: string;
+  reason_label?: string;
+  reason_sentence?: string;
+};
+
 interface FacultyPref {
   day: string;
   begin: number;
@@ -121,22 +128,17 @@ interface FacultyPref {
 }
 
 interface ValidationContext {
-  courseToKac: Record<string, string>; // course_id → kac_id
+  courseToKacs: Record<string, string[]>; // course_id → kac_ids[]
   facultyToKacs: Record<string, string[]>; // faculty_id → allowed kac_ids
 
-  facultyPrefWindows: Record<string, FacultyPref[]>; // faculty_id → time windows
-  facultyAllowedModes: Record<string, string[]>; // faculty_id → ["F2F","HYB","FOL"]
-
-  // optional: section/course allowed modes if different
+  facultyPrefWindows: Record<string, FacultyPref[]>;
+  facultyAllowedModes: Record<string, string[]>;
   courseAllowedModes?: Record<string, string[]>;
-
   courseProgramLevel?: Record<string, string>;
   facultyHasPhd?: Record<string, boolean>;
-
   sectionCampus?: Record<string, string>;
   sectionCourse?: Record<string, string>;
   courseTypeOfCourse?: Record<string, string>;
-
   campusNames?: Record<string, string>;
 }
 
@@ -525,7 +527,7 @@ function DayInput({
   value,
   onChange,
   options,
-  placeholder = "e.g. M or Monday",
+  placeholder = "M",
   className = "",
 }: {
   value: string;
@@ -906,6 +908,128 @@ function ComboBox({
     </div>
   );
 }
+
+function AssignmentReasonBadge({ meta }: { meta?: AssignmentMetadata }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const panelRef = useRef<HTMLDivElement | null>(null);
+  const [panelPos, setPanelPos] = useState<{
+    top: number;
+    left: number;
+    width: number;
+  } | null>(null);
+
+  const recalcPanel = useCallback(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+
+    const rect = el.getBoundingClientRect();
+    const width = 320;
+    const gap = 8;
+
+    let left = rect.right - width;
+    if (left < 8) left = 8;
+    if (left + width > window.innerWidth - 8) {
+      left = window.innerWidth - width - 8;
+    }
+
+    let top = rect.bottom + gap;
+
+    // If not enough space below, show above
+    const estimatedHeight = 120;
+    if (top + estimatedHeight > window.innerHeight - 8) {
+      top = rect.top - estimatedHeight - gap;
+      if (top < 8) top = 8;
+    }
+
+    setPanelPos({
+      top: Math.round(top),
+      left: Math.round(left),
+      width,
+    });
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const onDoc = (ev: MouseEvent) => {
+      const target = ev.target as Node;
+      if (
+        wrapRef.current?.contains(target) ||
+        panelRef.current?.contains(target)
+      ) {
+        return;
+      }
+      setOpen(false);
+    };
+
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  useLayoutEffect(() => {
+    if (!open) return;
+
+    recalcPanel();
+
+    const onScrollOrResize = () => recalcPanel();
+    window.addEventListener("scroll", onScrollOrResize, true);
+    window.addEventListener("resize", onScrollOrResize);
+
+    return () => {
+      window.removeEventListener("scroll", onScrollOrResize, true);
+      window.removeEventListener("resize", onScrollOrResize);
+    };
+  }, [open, recalcPanel]);
+
+  if (!meta?.reason_label && !meta?.reason_sentence) return null;
+
+  return (
+    <div className="relative shrink-0" ref={wrapRef}>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100"
+        title="Why this assignment?"
+        aria-label="Why this assignment?"
+      >
+        <Info size={14} />
+      </button>
+
+      {open && panelPos &&
+        createPortal(
+          <div
+            ref={panelRef}
+            className="fixed z-[5000] rounded-xl border border-gray-200 bg-white p-3 text-sm shadow-xl"
+            style={{
+              top: panelPos.top,
+              left: panelPos.left,
+              width: panelPos.width,
+            }}
+          >
+            <div className="mb-2 font-semibold text-gray-900">
+              Why this assignment?
+            </div>
+
+            <div className="text-gray-700">
+              <div className="mb-2">
+                <span className="font-medium">Reason:</span>{" "}
+                <span className="font-semibold text-emerald-600">
+                  {meta.reason_label || "—"}
+                </span>
+              </div>
+
+              <div className="leading-relaxed text-gray-600">
+                {meta.reason_sentence || "—"}
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+    </div>
+  );
+}
+
 /* ---------------- Types + helpers ---------------- */
 type Row = {
   id: string;
@@ -938,6 +1062,7 @@ type Row = {
     | "Pending"
     | "Unassigned"
     | "Conflict";
+  assignment_metadata?: AssignmentMetadata;
   pending_rfc?: boolean;
   conflictNote?: string;
   editable?: boolean;
@@ -1392,26 +1517,34 @@ export type MissingFieldRow = {
 };
 
 // --- Validation helpers & engine (row-level flags) ---
-
 function checkKacMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
-  if (!row.faculty_id) return null;
+  const fid = row.faculty_id;
+  if (!fid) return null;
 
-  // Prefer course_id (from backend), fall back to course code if needed
+  // Prefer course_id from backend; fall back to course code if needed
   const courseKey = (row as any).course_id || row.course;
   if (!courseKey) return null;
 
-  const courseKac = ctx.courseToKac[courseKey];
-  const allowedKacs = ctx.facultyToKacs[row.faculty_id] || [];
+  const courseKacs = (ctx.courseToKacs[courseKey] || [])
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
 
-  if (courseKac && !allowedKacs.includes(courseKac)) {
-    return {
-      type: "KAC_MISMATCH",
-      severity: "error",
-      message:
-        "KAC mismatch: this course is outside the faculty’s KAC cluster.",
-    };
-  }
-  return null;
+  const facultyKacs = (ctx.facultyToKacs[fid] || [])
+    .map((x) => String(x || "").trim())
+    .filter(Boolean);
+
+  // Match backend behavior: only validate when both sides have KAC data
+  if (courseKacs.length === 0 || facultyKacs.length === 0) return null;
+
+  const hasOverlap = courseKacs.some((k) => facultyKacs.includes(k));
+  if (hasOverlap) return null;
+
+  return {
+    type: "KAC_MISMATCH",
+    severity: "error",
+    message:
+      "KAC mismatch: this course is outside the faculty’s KAC cluster.",
+  };
 }
 
 function checkDayMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
@@ -1765,12 +1898,12 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
 }
 
 const DAY_OPTIONS = [
-  { value: "M", label: "Monday" },
-  { value: "T", label: "Tuesday" },
-  { value: "W", label: "Wednesday" },
-  { value: "H", label: "Thursday" },
-  { value: "F", label: "Friday" },
-  { value: "S", label: "Saturday" },
+  { value: "M", label: "Mon" },
+  { value: "T", label: "Tues" },
+  { value: "W", label: "Wed" },
+  { value: "H", label: "Thu" },
+  { value: "F", label: "Fri" },
+  { value: "S", label: "Sat" },
 ];
 const MODE_OPTIONS = ["FOL", "HYB", "F2F"];
 const ROOM_OPTIONS = ["Online", "Classroom", "Comlab"];
@@ -4017,20 +4150,18 @@ const inferOmCampusId = useCallback((): string => {
   const [savingRemarkBySection, setSavingRemarkBySection] = useState<
     Record<string, boolean>
   >({});
-  const [validationContext, setValidationContext] = useState<ValidationContext>(
-    {
-      courseToKac: {},
-      facultyToKacs: {},
-      facultyPrefWindows: {},
-      facultyAllowedModes: {},
-      courseAllowedModes: {},
-      courseProgramLevel: {},
-      facultyHasPhd: {},
-      sectionCampus: {},
-      sectionCourse: {},
-      courseTypeOfCourse: {},
-    }
-  );
+  const [validationContext, setValidationContext] = useState<ValidationContext>({
+    courseToKacs: {},
+    facultyToKacs: {},
+    facultyPrefWindows: {},
+    facultyAllowedModes: {},
+    courseAllowedModes: {},
+    courseProgramLevel: {},
+    facultyHasPhd: {},
+    sectionCampus: {},
+    sectionCourse: {},
+    courseTypeOfCourse: {},
+  });
 
   const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
 
@@ -4830,7 +4961,7 @@ const inferOmCampusId = useCallback((): string => {
 
     // hydrate validation context for row flags
     setValidationContext({
-      courseToKac: (res as any)?.courseToKac || {},
+      courseToKacs: (res as any)?.courseToKacs || {},
       facultyToKacs: (res as any)?.facultyToKacs || {},
       facultyPrefWindows: (res as any)?.facultyPrefWindows || {},
       facultyAllowedModes: (res as any)?.facultyAllowedModes || {},
@@ -6851,9 +6982,9 @@ const courseCodeToInfo = useMemo(() => {
                         {/* 4) Section (WIDENED) */}
                         <col className="w-[100px]" />
                         {/* 5) Faculty */}
-                        <col className="w-[280px]" />
+                        <col className="w-[300px]" />
                         {/* 6) Day 1 */}
-                        <col className="w-[72px]" />
+                        <col className="w-[56px]" />
                         {/* 7) Begin 1 */}
                         <col className="w-[96px]" />
                         {/* 8) End 1 */}
@@ -6861,7 +6992,7 @@ const courseCodeToInfo = useMemo(() => {
                         {/* 9) Room 1 */}
                         <col className="w-[140px]" />
                         {/* 10) Day 2 */}
-                        <col className="w-[72px]" />
+                        <col className="w-[56px]" />
                         {/* 11) Begin 2 */}
                         <col className="w-[96px]" />
                         {/* 12) End 2 */}
@@ -7033,48 +7164,47 @@ const courseCodeToInfo = useMemo(() => {
                                 {getEditFlags(r).course ? (
                                   <div className="flex flex-col gap-1">
                                     {/* Course code & title (submitted offerings only; searchable) */}
-<ComboBox
-  // UI change: dropdown shows only Course Code
-  value={String(r.course || "")}
-  onChange={(code) => {
-    const picked = String(code || "").trim();
-    // IMPORTANT: allow clearing the selection. If we don't, the input can look
-    // cleared, but the row value stays the old course and the ComboBox will
-    // snap back to it ("revert") on blur.
-    if (!picked) {
-      updateRow(
-        r.id,
-        {
-          course: "" as any,
-          course_id: "" as any,
-          title: "" as any,
-          units: "" as any,
-          capacity: "" as any,
-        },
-        { markDirty: true }
-      );
-      return;
-    }
+                                <ComboBox
+                                  // UI change: dropdown shows only Course Code
+                                  value={String(r.course || "")}
+                                  onChange={(code) => {
+                                    const picked = String(code || "").trim();
+                                    // IMPORTANT: allow clearing the selection. If we don't, the input can look
+                                    // cleared, but the row value stays the old course and the ComboBox will
+                                    // snap back to it ("revert") on blur.
+                                    if (!picked) {
+                                      updateRow(
+                                        r.id,
+                                        {
+                                          course: "" as any,
+                                          course_id: "" as any,
+                                          title: "" as any,
+                                          units: "" as any,
+                                          capacity: "" as any,
+                                        },
+                                        { markDirty: true }
+                                      );
+                                      return;
+                                    }
 
-    const info = courseCodeToInfo[picked];
-    if (!info) return;
-    updateRow(
-      r.id,
-      {
-        course: info.code,
-        title: info.title as any,
-        units: String(info.units ?? "") as any,
-        capacity: String(info.capacity ?? "") as any,
-      },
-      { markDirty: true }
-    );
-  }}
-  options={courseChoiceOptions}
-  placeholder="— Select course —"
-  className="w-[240px]"
-  commitOnSelectOnly
-/>
-
+                                    const info = courseCodeToInfo[picked];
+                                    if (!info) return;
+                                    updateRow(
+                                      r.id,
+                                      {
+                                        course: info.code,
+                                        title: info.title as any,
+                                        units: String(info.units ?? "") as any,
+                                        capacity: String(info.capacity ?? "") as any,
+                                      },
+                                      { markDirty: true }
+                                    );
+                                  }}
+                                  options={courseChoiceOptions}
+                                  placeholder="— Select course —"
+                                  className="w-[240px]"
+                                  commitOnSelectOnly
+                                />
 
                                     {/* Auto-filled course title (read-only text) */}
                                     <div className="text-gray-600 text-xs max-w-xs truncate">
@@ -7135,29 +7265,33 @@ const courseCodeToInfo = useMemo(() => {
                               )}
 
                               </td>
+                              <td className="px-2 py-2">
+                                <div className="flex items-center">
+                                  {e.faculty ? (
+                                    <ComboBox
+                                      value={r.faculty ?? ""}
+                                      onChange={(v) => {
+                                        const fid = facultyNameToId[v] || "";
+                                        updateRow(
+                                          r.id,
+                                          { faculty: v, faculty_id: fid as any },
+                                          { markDirty: true }
+                                        );
+                                      }}
+                                      options={facultyOptions}
+                                      className="w-[250px]"
+                                    />
+                                  ) : (
+                                    <span className="block w-[250px] truncate">
+                                      {r.faculty || "—"}
+                                    </span>
+                                  )}
 
-                              <td className="px-4 py-2">
-                                {e.faculty ? (
-                                  <ComboBox
-                                    value={r.faculty ?? ""}
-                                    onChange={(v) => {
-                                      const fid = facultyNameToId[v] || "";
-                                      updateRow(
-                                        r.id,
-                                        { faculty: v, faculty_id: fid as any },
-                                        { markDirty: true }
-                                      );
-                                    }}
-                                    options={facultyOptions}
-                                    className="w-[200px] md:w-[240px] lg:w-[280px]"
-                                  />
-                                ) : (
-                                  <span className="block w-[200px] md:w-[240px] lg:w-[280px] truncate">
-                                    {r.faculty || "—"}
-                                  </span>
-                                )}
+                                  <div className="ml-1 w-8 flex justify-center">
+                                    <AssignmentReasonBadge meta={r.assignment_metadata} />
+                                  </div>
+                                </div>
                               </td>
-
                               <td className="px-2 py-2 text-center">
                                 {e.day1 ? (
                                   <DayInput
@@ -7176,7 +7310,7 @@ const courseCodeToInfo = useMemo(() => {
                                       }
                                     }}
                                     options={DAY_OPTIONS}
-                                    className="w-[150px]"
+                                    className="w-[70px]"
                                   />
                                 ) : (
                                   <span>{r.day1 || "—"}</span>
@@ -7252,7 +7386,7 @@ const courseCodeToInfo = useMemo(() => {
                                       setCell(r.id, "day2", v as any);
                                     }}
                                     options={DAY_OPTIONS}
-                                    className="w-[150px]"
+                                    className="w-[70px]"
                                   />
                                 ) : (
                                   <span>{r.day2 || "—"}</span>

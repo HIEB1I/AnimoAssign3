@@ -929,6 +929,12 @@ async def _faculty_on_leave_map(db, active_term_id: str) -> set[str]:
 
     return blocked
 
+AA_DEBUG_KAC = True
+
+def _aa_kac_log(msg: str):
+    if AA_DEBUG_KAC:
+        print(msg)
+
 # --- APO-set deadline window (OM/GS schedule + faculty encoding) -------------
 
 def _parse_iso_dt(s: str) -> Optional[datetime]:
@@ -1943,6 +1949,45 @@ def _term_label(t: dict) -> str:
     if n and ay_int is not None and aye is not None:
         return f"Term {n} · AY {ay_int}-{aye}"
     return str(t.get('term_id') or '')
+
+def _aa_reason_label(reason: str) -> str:
+    reason = str(reason or "").strip()
+
+    if reason == "recent_history":
+        return "Recently Taught"
+
+    if reason in {
+        "older_history",
+        "ft_extra_history",
+        "pt_history",
+        "history_rescue",
+    }:
+        return "Taught in the Past"
+
+    if reason in {
+        "kac_fallback",
+        "ft_extra_kac",
+        "pt_kac",
+        "rescue_overload",
+    }:
+        return "KAC Match"
+
+    return "KAC Match"
+
+def _aa_reason_sentence(reason: str, term_label: str = "") -> str:
+    label = _aa_reason_label(reason)
+
+    if label == "Recently Taught":
+        if term_label:
+            return f"This professor was assigned because they taught this course recently ({term_label})."
+        return "This professor was assigned because they taught this course recently."
+
+    if label == "Taught in the Past":
+        if term_label:
+            return f"This professor was assigned because they previously taught this course ({term_label})."
+        return "This professor was assigned because they previously taught this course."
+
+    return "This professor was assigned because their area of expertise matches the course requirements."
 
 def _row_is_locked(r: dict) -> bool:
     """
@@ -3268,17 +3313,23 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         if windows:
             faculty_pref_windows[fid] = windows
 
-    # --- NEW: KAC mappings for frontend flags ---
-    # course_to_kacs from phase0_load: course_id -> set(kac_id)
-    course_to_kacs = getattr(ctx, "course_to_kacs", {}) or {}
+    raw_course_to_kacs = getattr(ctx, "course_to_kacs", {}) or {}
 
-    # Simplify to a single "primary" KAC per course for the frontend
-    course_kac_simple: dict[str, str] = {}
-    for cid, kset in course_to_kacs.items():
-        if not kset:
+    course_to_kacs_payload: dict[str, list[str]] = {}
+    for cid, kset in raw_course_to_kacs.items():
+        cid_str = str(cid or "").strip()
+        if not cid_str:
             continue
-        # pick a deterministic one (e.g., first sorted)
-        course_kac_simple[cid] = sorted(list(kset))[0]
+
+        vals = sorted(
+            {
+                str(kid or "").strip()
+                for kid in (kset or [])
+                if str(kid or "").strip()
+            }
+        )
+        if vals:
+            course_to_kacs_payload[cid_str] = vals
 
     # faculty_id -> list of KACs (union of qualified_kacs, kac_ids, preferred_kacs)
     faculty_to_kacs: dict[str, list[str]] = {}
@@ -3538,7 +3589,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
         "on_leave_faculty_ids": on_leave_faculty_ids,
-        "courseToKac": course_kac_simple,
+        "courseToKacs": course_to_kacs_payload,
         "facultyToKacs": faculty_to_kacs,
         "facultyAllowedModes": faculty_allowed_modes,
         "facultyPrefWindows": faculty_pref_windows,
@@ -5145,7 +5196,13 @@ async def run_auto_assignment(
         _add_used(fid, r.get("day1"), r.get("begin1"), r.get("end1"))
         _add_used(fid, r.get("day2"), r.get("begin2"), r.get("end2"))
 
-    sugg = await compute_load_recommendations(term_id=term_id, db=db)
+    sugg = await compute_load_recommendations(
+        term_id=term_id,
+        db=db,
+        department_id=department_id,
+        protected_section_ids=locked_section_ids,
+        source_rows=rows,
+    )
     debug = sugg.get("debug", {}) or {}
     phase7_no_time = (debug.get("phase7_no_time_details") or {}) if isinstance(debug, dict) else {}
 
@@ -5257,29 +5314,6 @@ async def run_auto_assignment(
         else:
             why.setdefault("slot2", "left_blank")
 
-        # Compatibility w/ OM_LoadAssignment v1 UI expectations:
-        # If the suggestion only produced a single meeting (slot1) but the day is
-        # part of a known paired pattern (M/H, T/F, W/S), auto-fill slot2 using
-        # the paired day with the same time window, as long as it does not create
-        # an exact duplicate slot for this faculty.
-        if (
-            fid
-            and (r.get("day1") and r.get("begin1") and r.get("end1"))
-            and not (r.get("day2") and r.get("begin2") and r.get("end2"))
-        ):
-            try:
-                d2_fill = DAY_PAIR.get(str(r.get("day1")).upper().strip())
-            except Exception:
-                d2_fill = None
-
-            if d2_fill:
-                b1_fill = r.get("begin1")
-                e1_fill = r.get("end1")
-                # Avoid creating an exact duplicate slot in the used-set
-                if not _would_reuse(fid, d2_fill, b1_fill, e1_fill):
-                    r["day2"], r["begin2"], r["end2"] = d2_fill, b1_fill, e1_fill
-                    _add_used(fid, d2_fill, b1_fill, e1_fill)
-                    why.setdefault("slot2", "autofilled_paired_day_from_slot1")
 
         # --- GOAL 2: if faculty has NO valid slots left for this section, drop assignment ---
         if not (r.get("day1") or r.get("day2")) and fid:
@@ -5297,20 +5331,20 @@ async def run_auto_assignment(
                 r[key] = ""
             why["dropped_faculty_goal2"] = "no_valid_slots_available_after_overlay"
 
-        # --- NEW: ensure mode is set so room derivation works on run, too ---
-        if not (r.get("mode") or "").strip():
+        # --- ensure mode follows the chosen assignment/faculty preference ---
+        suggested_mode = (a.get("mode") or "").strip().upper()
+        if suggested_mode:
+            r["mode"] = suggested_mode
+        elif not (r.get("mode") or "").strip():
             sid = r.get("id") or r.get("section_id")
             crt = (sid_to_crt.get(sid) or "").strip().upper()  # course room type
-            # 1st priority: faculty preferred mode if available
             fac_mode = (fac_pref_mode.get(fid) or "").strip().upper() if fid else ""
             if fac_mode:
                 r["mode"] = fac_mode
             else:
-                # 2nd priority: course room type
                 if crt == "ONLINE":
                     r["mode"] = "FOL"
                 else:
-                    # default fallback, adjust if you like
                     r["mode"] = "HYB"
 
         # --- derive rooms from row-level mode + campus (only if blank) ---
@@ -5683,13 +5717,35 @@ async def run_auto_assignment(
         else:
             r["pending_rfc"] = bool(fid and sid and (fid, sid) in open_rfc_keys)
 
+    trace_by_section: dict[str, dict] = {}
+    try:
+        for t in ((debug or {}).get("assignment_trace") or []):
+            sid = str(t.get("section_id") or "").strip()
+            if sid:
+                trace_by_section[sid] = dict(t)
+    except Exception:
+        trace_by_section = {}
+
     for r in rows:
+        sid = str(r.get("id") or r.get("section_id") or "").strip()
         fid = (r.get("faculty_id") or r.get("facultyId") or "").strip()
         fname = (r.get("faculty") or r.get("facultyName") or "").strip()
+
+        md = trace_by_section.get(sid)
+        if md and fid:
+            r["assignment_metadata"] = {
+                "assigned_faculty": md.get("faculty") or fname or "",
+                "assigned_faculty_id": md.get("faculty_id") or fid or "",
+                "reason_label": md.get("reason_label") or "",
+                "reason_sentence": md.get("reason_sentence") or "",
+            }
+        else:
+            r.pop("assignment_metadata", None)
 
         if (not fid) or (not fname):
             for k in ("day1", "begin1", "end1", "day2", "begin2", "end2", "room1", "room2"):
                 r[k] = ""
+            r.pop("assignment_metadata", None)
             if not fid:
                 r["status"] = "Unassigned"
 
@@ -5961,35 +6017,35 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
 
-    # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
-    print("DEBUG-PREF-SUMMARY: ============================")
-    for fid, pref in prefs_by_faculty.items():
-        days = pref.get("availability_days") or []
-        times_raw = pref.get("preferred_times") or []
+    # # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
+    # print("DEBUG-PREF-SUMMARY: ============================")
+    # for fid, pref in prefs_by_faculty.items():
+    #     days = pref.get("availability_days") or []
+    #     times_raw = pref.get("preferred_times") or []
         
-        # Normalize time windows to HH:MM-HH:MM for clean debugging
-        times_norm = []
-        for w in times_raw:
-            hhmm = None
-            if isinstance(w, dict):
-                hhmm = (_mm_to_hhmm(_to_min(w.get("start") or w.get("begin"))),
-                        _mm_to_hhmm(_to_min(w.get("end") or w.get("finish"))))
-            elif isinstance(w, (list, tuple)) and len(w) == 2:
-                hhmm = (_mm_to_hhmm(_to_min(w[0])),
-                        _mm_to_hhmm(_to_min(w[1])))
-            elif isinstance(w, str) and "-" in w:
-                s = w.replace("–", "-").replace("—", "-")
-                a, b = s.split("-", 1)
-                hhmm = (_mm_to_hhmm(_to_min(a)), _mm_to_hhmm(_to_min(b)))
+    #     # Normalize time windows to HH:MM-HH:MM for clean debugging
+    #     times_norm = []
+    #     for w in times_raw:
+    #         hhmm = None
+    #         if isinstance(w, dict):
+    #             hhmm = (_mm_to_hhmm(_to_min(w.get("start") or w.get("begin"))),
+    #                     _mm_to_hhmm(_to_min(w.get("end") or w.get("finish"))))
+    #         elif isinstance(w, (list, tuple)) and len(w) == 2:
+    #             hhmm = (_mm_to_hhmm(_to_min(w[0])),
+    #                     _mm_to_hhmm(_to_min(w[1])))
+    #         elif isinstance(w, str) and "-" in w:
+    #             s = w.replace("–", "-").replace("—", "-")
+    #             a, b = s.split("-", 1)
+    #             hhmm = (_mm_to_hhmm(_to_min(a)), _mm_to_hhmm(_to_min(b)))
 
-            if hhmm and hhmm[0] and hhmm[1]:
-                times_norm.append(f"{hhmm[0]}-{hhmm[1]}")
+    #         if hhmm and hhmm[0] and hhmm[1]:
+    #             times_norm.append(f"{hhmm[0]}-{hhmm[1]}")
         
-        print(
-            f"DEBUG-PREF-SUMMARY: Faculty {fid} "
-            f"days={days} | windows={times_norm}"
-        )
-    print("DEBUG-PREF-SUMMARY: ============================")
+    #     print(
+    #         f"DEBUG-PREF-SUMMARY: Faculty {fid} "
+    #         f"days={days} | windows={times_norm}"
+    #     )
+    # print("DEBUG-PREF-SUMMARY: ============================")
 
     # after prefs_by_faculty (DEBUG)
     debug_pref_windows = {}
@@ -6075,10 +6131,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         for fid, prow in latest_by_fac.items():
             if fid not in prefs_by_faculty:
                 prefs_by_faculty[fid] = prow
-                print(
-                    f"DEBUG-PREF-FALLBACK: using previous-term preferences for "
-                    f"faculty {fid} from term {prow.get('term_id')}"
-                )
+                # print(
+                #     f"DEBUG-PREF-FALLBACK: using previous-term preferences for "
+                #     f"faculty {fid} from term {prow.get('term_id')}"
+                # )
 
 
     # Case-insensitive "approved" + only the fields we need
@@ -6187,45 +6243,44 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
                 and f["faculty_id"] not in blocked_fids]
 
     # ------------------------------
-    # 6) Teaching history — optimized (no term cap; include archived)
-    #     • Faculty: only those in this run’s eligible pool
-    #     • Courses: only those that actually appear this term
-    #     • lineage: faculty_assignments(faculty_id, section_id) → sections(section_id→course_id)
+    # 6) Teaching history — optimized (join faculty_assignments.section_id -> sections.section_id)
+    #     • Count history for all non-null historical faculty assignments on courses that appear this term.
+    #     • Do NOT rely on faculty_assignments.term_id; historical lineage is resolved from sections.term_id.
     # ------------------------------
-    eligible_fids = [f["faculty_id"] for f in (ctx.faculty or []) if f.get("faculty_id")]
     candidate_cids = sorted({s["course_id"] for s in (ctx.sections or []) if s.get("course_id")})
 
     history_map: dict[tuple[str, str], int] = {}
     hist_by_course: dict[str, int] = {}
 
-    if eligible_fids and candidate_cids:
-        # 1) fetch assignments for eligible faculty (include archived, no term filter)
+    if candidate_cids:
+        # 1) Fetch all historical assignments with a real faculty and section id.
         asg_rows = await db[COL_ASSIGN].find(
-            {"faculty_id": {"$in": eligible_fids}},
-            {"_id": 0, "faculty_id": 1, "section_id": 1}
+            {
+                "faculty_id": {"$nin": [None, ""]},
+                "section_id": {"$nin": [None, ""]},
+            },
+            {"_id": 0, "faculty_id": 1, "section_id": 1, "created_at": 1},
         ).to_list(None)
 
-        # 2) join to sections to recover course_id
-        section_ids = sorted({r["section_id"] for r in (asg_rows or []) if r.get("section_id")})
+        # 2) Join to sections to recover course_id (and historical term when needed elsewhere).
+        section_ids = sorted({str(r.get("section_id")) for r in (asg_rows or []) if r.get("section_id")})
         if section_ids:
             sec_rows = await db[COL_SECTIONS].find(
                 {"section_id": {"$in": section_ids}},
-                {"_id": 0, "section_id": 1, "course_id": 1}
+                {"_id": 0, "section_id": 1, "course_id": 1, "term_id": 1},
             ).to_list(None)
             sec_to_course = {
-                s["section_id"]: s.get("course_id")
+                str(s["section_id"]): str(s.get("course_id") or "")
                 for s in (sec_rows or [])
                 if s.get("section_id") and s.get("course_id")
             }
 
-            # 3) tally counts only for candidate courses (keeps it relevant)
+            # 3) Tally counts only for current-run candidate courses.
             for r in (asg_rows or []):
-                fid = r.get("faculty_id")
-                sid = r.get("section_id")
-                cid = sec_to_course.get(sid)
-                if not fid or not cid:
-                    continue
-                if cid not in candidate_cids:
+                fid = str(r.get("faculty_id") or "").strip()
+                sid = str(r.get("section_id") or "").strip()
+                cid = sec_to_course.get(sid, "")
+                if not fid or not cid or cid not in candidate_cids:
                     continue
                 history_map[(fid, cid)] = history_map.get((fid, cid), 0) + 1
                 hist_by_course[cid] = hist_by_course.get(cid, 0) + 1
@@ -6233,6 +6288,22 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     # 4) attach to context (consumed by Phases 3–5 and 6A)
     ctx.history_map = history_map          # type: ignore[attr-defined]
     ctx.hist_by_course = hist_by_course    # type: ignore[attr-defined]
+
+    # DEBUG: show history gathered for one course
+    target_cid = "CRS0020"
+
+    course_total = hist_by_course.get(target_cid, 0)
+    per_faculty = sorted(
+        [
+            (fid, cnt)
+            for (fid, cid), cnt in history_map.items()
+            if cid == target_cid
+        ],
+        key=lambda x: (-x[1], x[0])
+    )
+
+    print(f"[HISTORY DEBUG] course={target_cid} total_history_rows={course_total}")
+    print(f"[HISTORY DEBUG] per_faculty={per_faculty}")
        
     # Attach for debugging/visibility
     ctx.excluded_no_prefs = no_pref_fids
@@ -6303,6 +6374,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
         "eligible:", len(eligible),
         "no_prefs:", len(no_pref_fids),
         "on_leave:", len(blocked_fids))
+        
     return ctx
 
 def phase1_kac_helpers(ctx: ContextA, weights: dict[str, int] | None = None) -> None:
@@ -6836,7 +6908,7 @@ def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
       - If no preferred_times set: accept any time on allowed days.
     """
     if not fpref:
-        print("DEBUG-PREF: fpref empty → ACCEPT (no preferences)")
+        # print("DEBUG-PREF: fpref empty → ACCEPT (no preferences)")
         return True
 
     start, end = interval
@@ -6856,7 +6928,7 @@ def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
             elif k == "S": allowed.add(6)
 
         if di not in allowed:
-            print(f"DEBUG-PREF: Day {di} not in availability_days {avail} → REJECT")
+            # print(f"DEBUG-PREF: Day {di} not in availability_days {avail} → REJECT")
             return False
 
     # --- Time-window strict filtering ---
@@ -6883,15 +6955,15 @@ def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
                 windows.append((st_min, en_min))
 
     if not windows:
-        print("DEBUG-PREF: No preferred_times → ACCEPT (day allowed)")
+        # print("DEBUG-PREF: No preferred_times → ACCEPT (day allowed)")
         return True
 
     for ws, we in windows:
         if start >= ws and end <= we:
-            print(f"DEBUG-PREF: interval {interval} fits inside preferred window {(ws,we)} → ACCEPT")
+            # print(f"DEBUG-PREF: interval {interval} fits inside preferred window {(ws,we)} → ACCEPT")
             return True
 
-    print(f"DEBUG-PREF: interval {interval} does NOT fit preferred windows {windows} → REJECT")
+    # print(f"DEBUG-PREF: interval {interval} does NOT fit preferred windows {windows} → REJECT")
     return False
 
 # --- IDs / normalize helpers (place near _fmt_time / _mm_to_hhmm) ---
@@ -8714,7 +8786,7 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
         return str(t).strip().upper() == "SHS"
 
     # Build a dict from section_id -> (faculty_id, course_id) using the latest compute run
-    sugg = await compute_load_recommendations(term_id=term_id, db=db)
+    sugg = await compute_load_recommendations(term_id=term_id, db=db, department_id=department_id, protected_section_ids=locked_section_ids)
     by_sid = {a["section_id"]: a for a in (sugg.get("assignments") or [])}
 
     # --- NEW: preflight used slots to prevent duplicates across the batch ---
@@ -9615,35 +9687,1131 @@ async def run_milestone_b(term_id: str, db, department_id: str | None = None) ->
     }
 
 # =============  END MILESTONE B  =============
+def _aa_faculty_name(ctx: ContextA, faculty_id: str) -> str:
+    return _display_name_from_users((ctx.users_by_faculty or {}).get(faculty_id) or {})
+
+
+def _aa_pref_units(pref: dict | None) -> int:
+    pref = pref or {}
+    raw = pref.get("preferred_units") or pref.get("load_units") or 12
+    try:
+        return max(0, int(raw))
+    except Exception:
+        return 12
+
+
+def _aa_collect_faculty_kacs(faculty_doc: dict, pref_doc: dict | None) -> set[str]:
+    vals: set[str] = set()
+    for src in (faculty_doc.get("qualified_kacs") or []), (faculty_doc.get("kac_ids") or []), ((pref_doc or {}).get("preferred_kacs") or []):
+        for item in src:
+            s = str(item or "").strip()
+            if s:
+                vals.add(s)
+    return vals
+
+
+def _aa_course_type(course_doc: dict) -> str:
+    return str(course_doc.get("type_of_course") or course_doc.get("type") or "").strip().upper() or "OTHER"
+
+
+def _aa_course_priority_value(course_doc: dict) -> int:
+    ctype = _aa_course_type(course_doc)
+    if ctype == "FOUNDATION":
+        return 4
+    if ctype == "MAJOR":
+        return 3
+    if ctype == "SHS":
+        return 2
+    if ctype == "GS":
+        return 2
+    return 1
+
+
+def _aa_parse_pref_time_windows(pref: dict | None) -> list[tuple[int, int]]:
+    pref = pref or {}
+    raw = pref.get("preferred_times") or []
+    seq = raw if isinstance(raw, list) else [raw]
+    out: list[tuple[int, int]] = []
+    for item in seq:
+        st = en = None
+        if isinstance(item, dict):
+            st = _to_min(item.get("start") or item.get("begin"))
+            en = _to_min(item.get("end") or item.get("finish"))
+        elif isinstance(item, (list, tuple)) and len(item) == 2:
+            st = _to_min(item[0]); en = _to_min(item[1])
+        elif isinstance(item, str) and "-" in item:
+            a, b = item.replace("–", "-").replace("—", "-").split("-", 1)
+            st = _to_min(a); en = _to_min(b)
+        if st is not None and en is not None and en > st:
+            out.append((st, en))
+    return out
+
+
+def _aa_pref_days(pref: dict | None) -> list[str]:
+    vals = []
+    for d in ((pref or {}).get("availability_days") or []):
+        s = str(d or "").strip().upper()
+        if s:
+            vals.append(s)
+    return vals
+
+
+def _aa_slot_to_pair(slot: dict) -> tuple[str | None, str | None, str | None]:
+    d = (slot.get("day") or "").strip().upper() or None
+    st = slot.get("begin") or slot.get("start")
+    en = slot.get("end") or slot.get("finish")
+    if isinstance(st, int):
+        st = _mm_to_hhmm(st)
+    if isinstance(en, int):
+        en = _mm_to_hhmm(en)
+    return d, st, en
+
+
+async def _aa_history_bundle(term_id: str, db, faculty_ids: list[str], course_ids: list[str]) -> dict[str, Any]:
+    """Build history using the real lineage:
+    faculty_assignments.section_id -> sections.section_id -> {course_id, term_id}
+
+    Notes:
+    - Many faculty_assignments docs do not carry term_id, so term recency must come from sections.term_id.
+    - Keep only historical sections from terms older than the current planning term.
+    - Preserve schedule history from section_schedules using start_time/end_time.
+    """
+    terms = await db[COL_TERMS].find({}, {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1}).sort([("acad_year_start", 1), ("term_number", 1)]).to_list(None)
+    term_rank = {str(t.get("term_id")): i for i, t in enumerate(terms or []) if t.get("term_id")}
+    cur_rank = term_rank.get(term_id, 10**9)
+
+    asg_query = {
+        "faculty_id": {"$nin": [None, ""]},
+        "section_id": {"$nin": [None, ""]},
+    }
+    if faculty_ids:
+        asg_query["faculty_id"] = {"$in": faculty_ids}
+
+    asg_rows = await db[COL_ASSIGN].find(
+        asg_query,
+        {"_id": 0, "faculty_id": 1, "section_id": 1, "created_at": 1},
+    ).to_list(None)
+
+    section_ids = sorted({str(r.get("section_id")) for r in (asg_rows or []) if r.get("section_id")})
+    sec_docs = []
+    sched_docs = []
+    if section_ids:
+        sec_docs = await db[COL_SECTIONS].find(
+            {"section_id": {"$in": section_ids}},
+            {"_id": 0, "section_id": 1, "course_id": 1, "term_id": 1, "campus_id": 1, "owner_batch_id": 1, "owner_program_id": 1},
+        ).to_list(None)
+        sched_docs = await db[COL_SCHED].find(
+            {"section_id": {"$in": section_ids}},
+            {"_id": 0, "section_id": 1, "day": 1, "start_time": 1, "begin_time": 1, "end_time": 1},
+        ).to_list(None)
+
+    sec_by_id = {str(s.get("section_id")): s for s in sec_docs if s.get("section_id")}
+    sched_by_sid: dict[str, list[dict]] = {}
+    for sch in (sched_docs or []):
+        sid = str(sch.get("section_id") or "")
+        if sid:
+            sched_by_sid.setdefault(sid, []).append(sch)
+
+    course_history: dict[str, list[dict]] = {}
+    faculty_course_history: dict[str, dict[str, dict]] = {}
+    schedule_history: dict[tuple[str, str], list[dict]] = {}
+
+    for row in (asg_rows or []):
+        fid = str(row.get("faculty_id") or "").strip()
+        sid = str(row.get("section_id") or "").strip()
+        if not fid or not sid:
+            continue
+        sec = sec_by_id.get(sid) or {}
+        cid = str(sec.get("course_id") or "").strip()
+        t_id = str(sec.get("term_id") or "").strip()
+        if not cid or not t_id or (course_ids and cid not in course_ids):
+            continue
+        rank = term_rank.get(t_id)
+        if rank is None or rank >= cur_rank:
+            continue
+
+        item = faculty_course_history.setdefault(
+            fid,
+            {}
+        ).setdefault(
+            cid,
+            {
+                "latest_rank": -1,
+                "latest_term_id": "",
+                "latest_term_label": "",
+                "count": 0,
+                "slots": [],
+            },
+        )
+        item["count"] += 1
+        if rank > item["latest_rank"]:
+            item["latest_rank"] = rank
+            item["latest_term_id"] = t_id
+            term_doc = next((t for t in (terms or []) if str(t.get("term_id") or "").strip() == t_id), None)
+            item["latest_term_label"] = _term_label(term_doc or {"term_id": t_id})
+            item["slots"] = []
+            for sch in sched_by_sid.get(sid, []):
+                d = str(sch.get("day") or "").strip().upper()
+                st = _to_min(sch.get("start_time") or sch.get("begin_time"))
+                en = _to_min(sch.get("end_time"))
+                if d and st is not None and en is not None and en > st:
+                    item["slots"].append({"day": d, "begin": st, "end": en})
+        course_history.setdefault(cid, [])
+
+    for fid, cmap in faculty_course_history.items():
+        for cid, info in cmap.items():
+            course_history.setdefault(cid, []).append({
+                "faculty_id": fid,
+                "latest_rank": info.get("latest_rank", -1),
+                "count": info.get("count", 0),
+            })
+            schedule_history[(fid, cid)] = list(info.get("slots") or [])
+
+    for cid, items in course_history.items():
+        items.sort(key=lambda x: (x.get("latest_rank", -1), x.get("count", 0)), reverse=True)
+
+    return {
+        "term_rank": term_rank,
+        "course_history": course_history,
+        "faculty_course_history": faculty_course_history,
+        "schedule_history": schedule_history,
+    }
+
+
+def _aa_is_gs_qualified(course_doc: dict, faculty_doc: dict) -> bool:
+    lvl = str(course_doc.get("program_level") or "").strip().upper()
+    if lvl != "GS":
+        return True
+    certs = {str(x or "").strip().upper() for x in (faculty_doc.get("certifications") or [])}
+    return "PHD" in certs
+
+
+def _aa_schedule_conflict(used_slots: dict[str, list[tuple[str, int, int, str]]], faculty_id: str, day: str, start_min: int, end_min: int) -> bool:
+    for d, st, en, _sid in used_slots.get(faculty_id, []):
+        if d != day:
+            continue
+        if max(st, start_min) < min(en, end_min):
+            return True
+    return False
+
+
+def _aa_respects_pref_window(pref: dict | None, day: str, start_min: int, end_min: int) -> bool:
+    days = _aa_pref_days(pref)
+    if days and day not in days:
+        return False
+    windows = _aa_parse_pref_time_windows(pref)
+    if not windows:
+        return True
+    for st, en in windows:
+        if start_min >= st and end_min <= en:
+            return True
+    return False
+
+
+def _aa_candidate_course_order(section_pool: list[dict], ctx: ContextA, course_history: dict[str, list[dict]]) -> list[dict]:
+    counts: dict[str, int] = {}
+    for sec in section_pool:
+        counts[sec["course_id"]] = counts.get(sec["course_id"], 0) + 1
+    for sec in section_pool:
+        cid = sec["course_id"]
+        cdoc = (ctx.courses or {}).get(cid) or {}
+        sec["_priority"] = (
+            counts.get(cid, 0),
+            _aa_course_priority_value(cdoc),
+            -len(course_history.get(cid, []) or []),
+        )
+    return sorted(section_pool, key=lambda s: s.get("_priority") or (0,0,0), reverse=True)
+
+
+def _aa_reason_confidence(reason: str) -> str:
+    if reason in {"recent_history", "pt_history", "history_rescue"}:
+        return "high"
+    if reason in {"older_history", "kac_fallback", "pt_kac", "ft_extra_history"}:
+        return "medium"
+    return "low"
+
+
+
+
+def _aa_remove_assigned_section_id(faculty_state: dict, section_id: str) -> None:
+    kept = [sid for sid in (faculty_state.get("assigned_section_ids") or []) if str(sid) != str(section_id)]
+    faculty_state["assigned_section_ids"] = kept
+
+
+def _aa_course_key_for_section(section: dict) -> str:
+    return str(section.get("course_id") or "").strip()
+
+
+def _aa_prep_sets_from_assignments(assignments: list[dict], section_lookup: dict[str, dict]) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for item in (assignments or []):
+        fid = str(item.get("faculty_id") or "").strip()
+        sec = section_lookup.get(str(item.get("section_id") or "")) or {}
+        course_key = _aa_course_key_for_section(sec)
+        if not fid or not course_key:
+            continue
+        out.setdefault(fid, set()).add(course_key)
+    return out
+
+
+def _aa_pick_rebalance_target(
+    source_fid: str,
+    item: dict,
+    faculty_states: list[dict],
+    faculty_state_by_id: dict[str, dict],
+    section_lookup: dict[str, dict],
+    ctx: ContextA,
+    prep_sets: dict[str, set[str]],
+) -> dict | None:
+    sec = section_lookup.get(str(item.get("section_id") or "")) or {}
+    course_key = _aa_course_key_for_section(sec)
+    if not course_key:
+        return None
+    ranked: list[tuple[tuple, dict]] = []
+    for fstate in faculty_states:
+        fid = str(fstate.get("faculty_id") or "").strip()
+        if not fid or fid == source_fid:
+            continue
+        if not _aa_faculty_can_take_section(fstate, sec, ctx, require_pref_for_pt=(fstate.get("employment_type") == "PT")):
+            continue
+        current_preps = set(prep_sets.get(fid) or set())
+        already_has_prep = course_key in current_preps
+        next_prep_count = len(current_preps) if already_has_prep else len(current_preps) + 1
+        if next_prep_count > 3:
+            continue
+        desired_units = int(fstate.get("desired_teaching_units") or 0)
+        assigned_units = int(fstate.get("assigned_teaching_units") or 0)
+        sec_units = int(sec.get("units") or 0)
+        overload_after = max(0, assigned_units + sec_units - desired_units)
+        key = (
+            0 if already_has_prep else 1,
+            next_prep_count,
+            overload_after,
+            assigned_units,
+            str(fstate.get("employment_type") or "") != "FT",
+            fid,
+        )
+        ranked.append((key, fstate))
+    ranked.sort(key=lambda x: x[0])
+    return ranked[0][1] if ranked else None
+
+
+def _aa_rebalance_max_preps(
+    assignments: list[dict],
+    section_lookup: dict[str, dict],
+    faculty_states: list[dict],
+    faculty_state_by_id: dict[str, dict],
+    ctx: ContextA,
+    trace: list[dict],
+) -> dict[str, Any]:
+    prep_limit = 3
+    moves: list[dict] = []
+    if not assignments:
+        return {"max_preps_rebalance": {"moves": moves, "over_limit_after": {}}}
+
+    while True:
+        prep_sets = _aa_prep_sets_from_assignments(assignments, section_lookup)
+        over_limit = sorted(
+            [
+                (fid, len(courses))
+                for fid, courses in prep_sets.items()
+                if len(courses) > prep_limit
+            ],
+            key=lambda x: (x[1], x[0]),
+            reverse=True,
+        )
+        if not over_limit:
+            break
+        moved_any = False
+        for source_fid, _prep_count in over_limit:
+            source_state = faculty_state_by_id.get(source_fid)
+            if not source_state:
+                continue
+            source_items = [a for a in assignments if str(a.get("faculty_id") or "") == source_fid]
+            by_course: dict[str, list[dict]] = {}
+            for item in source_items:
+                sec = section_lookup.get(str(item.get("section_id") or "")) or {}
+                course_key = _aa_course_key_for_section(sec)
+                if course_key:
+                    by_course.setdefault(course_key, []).append(item)
+            if len(by_course) <= prep_limit:
+                continue
+            ranked_courses = sorted(by_course.items(), key=lambda kv: (len(kv[1]), kv[0]))
+            keep_courses = {course for course, _items in sorted(by_course.items(), key=lambda kv: (-len(kv[1]), kv[0]))[:prep_limit]}
+            candidate_items: list[dict] = []
+            for course_key, items in ranked_courses:
+                if course_key in keep_courses:
+                    continue
+                candidate_items.extend(sorted(items, key=lambda a: str(a.get("section_id") or "")))
+            for item in candidate_items:
+                sec = section_lookup.get(str(item.get("section_id") or "")) or {}
+                course_key = _aa_course_key_for_section(sec)
+                target_state = _aa_pick_rebalance_target(source_fid, item, faculty_states, faculty_state_by_id, section_lookup, ctx, prep_sets)
+                if not target_state:
+                    continue
+                target_fid = str(target_state.get("faculty_id") or "")
+                units = int(sec.get("units") or 0)
+                source_state["assigned_teaching_units"] = max(0, int(source_state.get("assigned_teaching_units") or 0) - units)
+                source_state["total_credited_units"] = max(int(source_state.get("deload_units") or 0), int(source_state.get("total_credited_units") or 0) - units)
+                _aa_remove_assigned_section_id(source_state, str(item.get("section_id") or ""))
+                target_state["assigned_teaching_units"] = int(target_state.get("assigned_teaching_units") or 0) + units
+                target_state["total_credited_units"] = int(target_state.get("total_credited_units") or 0) + units
+                target_state.setdefault("assigned_section_ids", []).append(str(item.get("section_id") or ""))
+                old_faculty = item.get("faculty")
+                item["faculty_id"] = target_fid
+                item["faculty"] = target_state.get("name")
+                item["reason"] = "max_preps_rebalance"
+                item["round"] = "postpass_max_preps"
+                for tr in reversed(trace):
+                    if tr.get("section_id") == item.get("section_id") and tr.get("faculty_id") == source_fid:
+                        tr["rebalanced"] = True
+                        tr["rebalance_reason"] = "MAX_PREPS"
+                        tr["rebalance_target_faculty_id"] = target_fid
+                        tr["rebalance_target_faculty"] = target_state.get("name")
+                        break
+                trace.append({
+                    "section_id": item.get("section_id"),
+                    "course_id": item.get("course_id"),
+                    "faculty_id": target_fid,
+                    "faculty": target_state.get("name"),
+                    "round": "postpass_max_preps",
+                    "reason_type": "max_preps_rebalance",
+                    "reason_label": "MAX_PREPS rebalance",
+                    "reason_sentence": f"Reassigned from {old_faculty or source_fid} to reduce prep overload.",
+                    "history_term_label": "",
+                    "confidence": "medium",
+                    "below_12_before": False,
+                    "teaching_units_before": int(target_state.get("assigned_teaching_units") or 0) - units,
+                    "teaching_units_after": int(target_state.get("assigned_teaching_units") or 0),
+                    "total_units_before": int(target_state.get("total_credited_units") or 0) - units,
+                    "total_units_after": int(target_state.get("total_credited_units") or 0),
+                    "rebalanced_from_faculty_id": source_fid,
+                    "rebalanced_from_faculty": old_faculty,
+                })
+                moves.append({
+                    "section_id": item.get("section_id"),
+                    "course_id": item.get("course_id"),
+                    "from_faculty_id": source_fid,
+                    "to_faculty_id": target_fid,
+                    "course_key": course_key,
+                })
+                moved_any = True
+                break
+            if moved_any:
+                break
+        if not moved_any:
+            break
+
+    final_prep_sets = _aa_prep_sets_from_assignments(assignments, section_lookup)
+    over_limit_after = {
+        fid: sorted(list(courses))
+        for fid, courses in final_prep_sets.items()
+        if len(courses) > prep_limit
+    }
+    return {
+        "max_preps_rebalance": {
+            "moves": moves,
+            "over_limit_after": over_limit_after,
+        }
+    }
+
+def _aa_assign_section(
+    faculty_state: dict,
+    section: dict,
+    reason: str,
+    round_name: str,
+    trace: list[dict],
+    assignments: list[dict]
+):
+    before_teaching = faculty_state["assigned_teaching_units"]
+    before_total = faculty_state["total_credited_units"]
+    units = int(section.get("units") or 0)
+
+    faculty_state["assigned_teaching_units"] += units
+    faculty_state["total_credited_units"] += units
+    faculty_state["assigned_section_ids"].append(section["section_id"])
+
+    assignments.append({
+        "section_id": section["section_id"],
+        "course_id": section["course_id"],
+        "faculty_id": faculty_state["faculty_id"],
+        "faculty": faculty_state["name"],
+        "day1": None, "begin1": None, "end1": None,
+        "day2": None, "begin2": None, "end2": None,
+        "reason": reason,
+        "round": round_name,
+    })
+
+    # INSERT HERE
+    if reason in {"kac_fallback", "ft_extra_kac", "pt_kac"}:
+        course_id = str(section.get("course_id") or "").strip()
+        faculty_id = str(faculty_state.get("faculty_id") or "").strip()
+        section_id = str(section.get("section_id") or "").strip()
+        course_code = str(section.get("course_code") or section.get("course") or "").strip()
+
+        fkacs = sorted(list(set(faculty_state.get("kacs") or [])))
+
+        _aa_kac_log(
+            f"[AA KAC ASSIGN] "
+            f"reason={reason} "
+            f"faculty_id={faculty_id} "
+            f"faculty={faculty_state.get('name')} "
+            f"section_id={section_id} "
+            f"course_id={course_id} "
+            f"course={course_code} "
+            f"faculty_kacs={fkacs} "
+        )
+
+    history_info = ((faculty_state.get("history") or {}).get(section["course_id"]) or {})
+    history_term_label = str(history_info.get("latest_term_label") or "").strip()
+
+    trace.append({
+        "section_id": section["section_id"],
+        "course_id": section["course_id"],
+        "faculty_id": faculty_state["faculty_id"],
+        "faculty": faculty_state["name"],
+        "round": round_name,
+        "reason_type": reason,
+        "reason_label": _aa_reason_label(reason),
+        "reason_sentence": _aa_reason_sentence(reason, history_term_label),
+        "history_term_label": history_term_label,
+        "confidence": _aa_reason_confidence(reason),
+        "below_12_before": before_total < 12,
+        "teaching_units_before": before_teaching,
+        "teaching_units_after": faculty_state["assigned_teaching_units"],
+        "total_units_before": before_total,
+        "total_units_after": faculty_state["total_credited_units"],
+    })
+
+
+def _aa_pick_history_section(faculty_state: dict, remaining_sections: list[dict], course_history: dict[str, list[dict]], *, latest_only: bool) -> dict | None:
+    fid = faculty_state["faculty_id"]
+    best = None
+    best_key = None
+    for sec in remaining_sections:
+        hist = course_history.get(sec["course_id"], [])
+        rank = None
+        for idx, item in enumerate(hist):
+            if item.get("faculty_id") == fid:
+                rank = idx
+                if latest_only and idx != 0:
+                    rank = None
+                break
+        if rank is None:
+            continue
+        key = (-(sec.get("_priority") or (0,0,0))[0], rank, -int(sec.get("units") or 0), sec.get("section_id"))
+        if best is None or key < best_key:
+            best = sec
+            best_key = key
+    return best
+
+
+def _aa_history_candidates_for_faculty(faculty_state: dict, remaining_sections: list[dict], course_history: dict[str, list[dict]], *, latest_only: bool) -> list[dict]:
+    fid = faculty_state["faculty_id"]
+    ranked: list[tuple[tuple, dict]] = []
+    for sec in remaining_sections:
+        hist = course_history.get(sec["course_id"], [])
+        rank = None
+        for idx, item in enumerate(hist):
+            if item.get("faculty_id") == fid:
+                if latest_only and idx != 0:
+                    rank = None
+                else:
+                    rank = idx
+                break
+        if rank is None:
+            continue
+        key = (-(sec.get("_priority") or (0,0,0))[0], rank, -int(sec.get("units") or 0), sec.get("section_id"))
+        ranked.append((key, sec))
+    ranked.sort(key=lambda x: x[0])
+    return [sec for _key, sec in ranked]
+
+
+def _aa_faculty_can_take_section(faculty_state: dict, section: dict, ctx: ContextA, *, require_pref_for_pt: bool = False) -> bool:
+    faculty_doc = faculty_state["faculty_doc"]
+    pref = faculty_state["pref"]
+    fid = str(faculty_state.get("faculty_id") or "")
+    sec_id = str(section.get("section_id") or "")
+    if not fid:
+        # print(f"[AA REJECT] sec={sec_id} fac={fid or '<blank>'} reason=blank_faculty_id")
+        return False
+    if fid in (getattr(ctx, "leave_blocked", set()) or set()):
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=leave_blocked")
+        return False
+    if require_pref_for_pt and not pref:
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=pt_no_preference_doc")
+        return False
+    if faculty_state.get("employment_type") == "PT" and require_pref_for_pt and not _aa_pref_days(pref) and not _aa_parse_pref_time_windows(pref):
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=pt_no_pref_days_or_times")
+        return False
+    if not _aa_is_gs_qualified((ctx.courses or {}).get(section["course_id"], {}) or {}, faculty_doc):
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=gs_rule course_id={section.get('course_id')}")
+        return False
+    sec_mode = str(section.get("mode") or "").strip().upper()
+    pref_mode = str(((pref or {}).get("mode") or {}).get("mode") or "").strip().upper()
+    if sec_mode and pref_mode and sec_mode != pref_mode:
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=mode_mismatch section_mode={sec_mode} pref_mode={pref_mode}")
+        return False
+    sec_campus = str(section.get("campus_id") or "").strip().upper()
+    pref_campus = str((pref or {}).get("campus_id") or "").strip().upper()
+    if sec_campus and pref_campus and sec_campus != pref_campus:
+        # print(f"[AA REJECT] sec={sec_id} fac={fid} reason=campus_mismatch section_campus={sec_campus} pref_campus={pref_campus}")
+        return False
+    return True
+
+
+def _aa_pick_kac_section(faculty_state: dict, remaining_sections: list[dict], ctx: ContextA) -> dict | None:
+    fkacs = faculty_state["kacs"]
+    fid = str(faculty_state.get("faculty_id") or "")
+    # print(f"[ROUND2 KAC] fac={fid} faculty_kacs={sorted(list(fkacs)) if fkacs else []}")
+    best = None
+    best_key = None
+    for sec in remaining_sections:
+        if not _aa_faculty_can_take_section(faculty_state, sec, ctx):
+            continue
+        ckacs = set(((getattr(ctx, "course_to_kacs", {}) or {}).get(sec["course_id"]) or set()))
+        # print(f"[ROUND2 KAC] fac={fid} sec={sec.get('section_id')} course={sec.get('course_id')} course_kacs={sorted(list(ckacs)) if ckacs else []}")
+        if fkacs and ckacs and not (fkacs & ckacs):
+            _aa_kac_log(
+                f"[AA KAC REJECT] "
+                f"faculty_id={fid} "
+                f"faculty={faculty_state.get('name')} "
+                f"section_id={sec.get('section_id')} "
+                f"course_id={sec.get('course_id')} "
+                f"faculty_kacs={sorted(list(fkacs))} "
+                f"course_kacs={sorted(list(ckacs))} "
+                f"overlap=[]"
+            )
+            continue
+        scarcity = len(ckacs) if ckacs else 99
+        key = (-(sec.get("_priority") or (0,0,0))[0], scarcity, sec.get("section_id"))
+        if best is None or key < best_key:
+            best = sec
+            best_key = key
+    return best
+
+def _aa_pick_pt_section(faculty_state: dict, remaining_sections: list[dict], course_history: dict[str, list[dict]], ctx: ContextA) -> tuple[dict | None, str | None]:
+    sec = _aa_pick_history_section(faculty_state, remaining_sections, course_history, latest_only=False)
+    if sec and _aa_faculty_can_take_section(faculty_state, sec, ctx, require_pref_for_pt=True):
+        return sec, "pt_history"
+    sec = _aa_pick_kac_section(faculty_state, remaining_sections, ctx)
+    if sec and _aa_faculty_can_take_section(faculty_state, sec, ctx, require_pref_for_pt=True):
+        return sec, "pt_kac"
+    return None, None
+
+
+def _aa_normalize_pref_days(pref: dict | None) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for d in _aa_pref_days(pref):
+        s = str(d or "").strip().upper()
+        if s == "TH":
+            s = "H"
+        if s in {"M", "T", "W", "H", "F", "S"} and s not in seen:
+            seen.add(s)
+            out.append(s)
+    return out
+
+
+def _aa_mode_for_assignment(section: dict, faculty_state: dict) -> str:
+    pref = faculty_state.get("pref") or {}
+    pref_mode = str(((pref.get("mode") or {}).get("mode") or pref.get("mode") or "")).strip().upper()
+    if pref_mode:
+        return pref_mode
+    return str(section.get("mode") or "").strip().upper()
+
+
+def _aa_slot_candidates(section: dict, faculty_state: dict, ctx: ContextA, schedule_history: dict[tuple[str, str], list[dict]]) -> list[dict]:
+    sid = section["section_id"]
+    cid = section["course_id"]
+    fid = faculty_state["faculty_id"]
+    pref = faculty_state.get("pref") or {}
+    candidates: list[dict] = []
+    seen: set[tuple[str, str | None, str, str]] = set()
+
+    def add(day1: str, begin: str, end: str, basis: str, day2: str | None = None):
+        d1 = str(day1 or "").strip().upper()
+        d2 = str(day2 or "").strip().upper() or None
+        b = str(begin or "").strip()
+        e = str(end or "").strip()
+        if not (d1 and b and e):
+            return
+        key = (d1, d2, b, e)
+        if key in seen:
+            return
+        seen.add(key)
+        candidates.append({"day1": d1, "day2": d2, "begin": b, "end": e, "basis": basis})
+
+    pref_days = _aa_normalize_pref_days(pref)
+    pref_windows = _aa_parse_pref_time_windows(pref)
+    pair_buckets = (("M", "H"), ("T", "F"), ("W", "S"))
+
+    if pref_days and pref_windows:
+        day_set = set(pref_days)
+        for st, en in pref_windows:
+            begin = _mm_to_hhmm(st)
+            end = _mm_to_hhmm(en)
+            for anchor, mate in pair_buckets:
+                has_anchor = anchor in day_set
+                has_mate = mate in day_set
+                if has_anchor and has_mate:
+                    add(anchor, begin, end, "preference_based_slot", mate)
+                elif has_anchor:
+                    add(anchor, begin, end, "preference_based_slot")
+                elif has_mate:
+                    add(mate, begin, end, "preference_based_slot")
+        return candidates
+
+    for sch in (schedule_history.get((fid, cid)) or []):
+        d, b, e = _aa_slot_to_pair(sch)
+        if d and b and e:
+            add(d, b, e, "reused_course_history")
+
+    for sch in (ctx.schedules_by_section or {}).get(sid, []):
+        d = (sch.get("day") or "").strip().upper()
+        b = sch.get("begin_time") or sch.get("start_time")
+        e = sch.get("end_time")
+        if d and b and e:
+            add(d, b, e, "existing_section_schedule")
+
+    days = pref_days or ["M", "T", "W", "H", "F", "S"]
+    if pref_windows:
+        for st, en in pref_windows:
+            for d in days:
+                add(d, _mm_to_hhmm(st), _mm_to_hhmm(en), "preference_based_slot")
+
+    if not candidates:
+        for d in days:
+            for begin, end in [("07:30", "09:00"), ("09:15", "10:45"), ("11:00", "12:30"), ("12:45", "14:15"), ("14:30", "16:00"), ("16:15", "17:45")]:
+                add(d, begin, end, "balance_based_slot")
+    return candidates
+
+
+def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used_slots: dict[str, list[tuple[str, int, int, str]]], course_day_usage: dict[str, dict[str, int]]) -> int:
+    day1 = candidate["day1"]
+    day2 = candidate.get("day2")
+    begin = candidate["begin"]
+    end = candidate["end"]
+    basis = candidate.get("basis") or ""
+    st = _to_min(begin); en = _to_min(end)
+    if st is None or en is None or en <= st:
+        return -10**6
+    score = 0
+    if basis == "reused_course_history":
+        score += 90
+    elif basis == "existing_section_schedule":
+        score += 60
+    elif basis == "preference_based_slot":
+        score += 45
+    if _aa_respects_pref_window(faculty_state.get("pref"), day1, st, en):
+        score += 25
+    if day2 and _aa_respects_pref_window(faculty_state.get("pref"), day2, st, en):
+        score += 10
+    score -= 20 * course_day_usage.get(section["course_id"], {}).get(day1, 0)
+    if day2:
+        score -= 20 * course_day_usage.get(section["course_id"], {}).get(day2, 0)
+    score -= 5 * len(used_slots.get(faculty_state["faculty_id"], []))
+    return score
+
+
+def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict], faculty_state_by_id: dict[str, dict], ctx: ContextA, schedule_history: dict[tuple[str, str], list[dict]], trace: list[dict]) -> dict[str, Any]:
+    used_slots: dict[str, list[tuple[str, int, int, str]]] = {}
+    course_day_usage: dict[str, dict[str, int]] = {}
+    no_time: dict[str, dict] = {}
+
+    def _streak_violation(used: dict[str, list[tuple[str, int, int, str]]], faculty_id: str, day: str | None, start_min: int | None, end_min: int | None) -> bool:
+        if not (faculty_id and day and start_min is not None and end_min is not None and end_min > start_min):
+            return False
+        existing = [(st, en) for d, st, en, _sid in used.get(faculty_id, []) if d == day]
+        return not _streak_ok_for_day(existing, [(start_min, end_min)])
+
+    protected_ids = set(getattr(ctx, "protected_section_ids", set()) or set())
+    current_assignment_by_section = getattr(ctx, "current_assignment_by_section", {}) or {}
+
+    # seed with protected/current table schedules already present in DB context
+    for sid, scheds in (ctx.schedules_by_section or {}).items():
+        if protected_ids and sid not in protected_ids:
+            continue
+        fid = str(current_assignment_by_section.get(sid) or "")
+        if not fid:
+            continue
+        for sch in (scheds or []):
+            day = str(sch.get("day") or "").strip().upper()
+            st = _to_min(sch.get("begin_time") or sch.get("start_time") or sch.get("begin"))
+            en = _to_min(sch.get("end_time") or sch.get("end") or sch.get("finish"))
+            if not day or st is None or en is None or en <= st:
+                continue
+            used_slots.setdefault(fid, []).append((day, st, en, sid))
+            sec = section_lookup.get(sid) or {}
+            cid = str(sec.get("course_id") or "")
+            if cid:
+                course_day_usage.setdefault(cid, {}).setdefault(day, 0)
+                course_day_usage[cid][day] += 1
+
+    for item in assignments:
+        sec = section_lookup.get(item["section_id"]) or {}
+        fid = item["faculty_id"]
+        fstate = faculty_state_by_id.get(fid) or {}
+        chosen = None
+        best_score = None
+        for cand in _aa_slot_candidates(sec, fstate, ctx, schedule_history):
+            day1 = cand["day1"]
+            day2 = cand.get("day2")
+            st = _to_min(cand["begin"])
+            en = _to_min(cand["end"])
+            if st is None or en is None or en <= st:
+                continue
+            if _aa_schedule_conflict(used_slots, fid, day1, st, en):
+                continue
+            if day2 and _aa_schedule_conflict(used_slots, fid, day2, st, en):
+                continue
+            if not _aa_respects_pref_window(fstate.get("pref"), day1, st, en):
+                continue
+            if day2 and not _aa_respects_pref_window(fstate.get("pref"), day2, st, en):
+                continue
+            if _streak_violation(used_slots, fid, day1, st, en):
+                continue
+            if day2 and _streak_violation(used_slots, fid, day2, st, en):
+                continue
+            score = _aa_schedule_score(cand, fstate, sec, used_slots, course_day_usage)
+            if chosen is None or score > best_score:
+                chosen = cand
+                best_score = score
+        if not chosen:
+            no_time[item["section_id"]] = {
+                "reason": "no_free_slot_from_pool",
+                "faculty_id": fid,
+                "course_id": item.get("course_id"),
+            }
+            continue
+        day1 = chosen["day1"]
+        day2 = chosen.get("day2")
+        begin = chosen["begin"]
+        end = chosen["end"]
+        item["day1"], item["begin1"], item["end1"] = day1, begin, end
+        item["day2"], item["begin2"], item["end2"] = None, None, None
+        item["mode"] = _aa_mode_for_assignment(sec, fstate)
+        used_slots.setdefault(fid, []).append((day1, _to_min(begin), _to_min(end), item["section_id"]))
+        course_day_usage.setdefault(item["course_id"], {}).setdefault(day1, 0)
+        course_day_usage[item["course_id"]][day1] += 1
+        if day2:
+            item["day2"], item["begin2"], item["end2"] = day2, begin, end
+            used_slots.setdefault(fid, []).append((day2, _to_min(begin), _to_min(end), item["section_id"]))
+            course_day_usage.setdefault(item["course_id"], {}).setdefault(day2, 0)
+            course_day_usage[item["course_id"]][day2] += 1
+        for tr in reversed(trace):
+            if tr.get("section_id") == item["section_id"] and tr.get("faculty_id") == fid:
+                tr["schedule_basis"] = chosen.get("basis")
+                tr["schedule_quality_score"] = best_score
+                break
+    return {"phase7_no_time_details": no_time}
+
+
+async def _compute_load_recommendations_v2(
+    term_id: str,
+    db,
+    *,
+    department_id: str | None = None,
+    protected_section_ids: set[str] | None = None,
+    source_rows: list[dict] | None = None,
+) -> dict:
+    protected_section_ids = set(protected_section_ids or set())
+    ctx = await phase0_load(term_id, db, department_id)
+
+    faculty_ids = [str(f.get("faculty_id")) for f in (ctx.faculty or []) if f.get("faculty_id")]
+    row_universe = [dict(r) for r in (source_rows or [])]
+    if row_universe:
+        course_ids = sorted({str(r.get("course_id") or "") for r in row_universe if r.get("course_id")})
+    else:
+        course_ids = sorted({str(s.get("course_id")) for s in (ctx.sections or []) if s.get("course_id")})
+    history_bundle = await _aa_history_bundle(term_id, db, faculty_ids, course_ids)
+    course_history = history_bundle["course_history"]
+    faculty_course_history = history_bundle["faculty_course_history"]
+    schedule_history = history_bundle["schedule_history"]
+
+    deload_rows = await db["deloadings"].find({"term_id": term_id}, {"_id": 0, "faculty_id": 1, "units_deloaded": 1}).to_list(None)
+    deload_by_faculty: dict[str, int] = {}
+    for row in (deload_rows or []):
+        fid = str(row.get("faculty_id") or "")
+        if fid:
+            try:
+                deload_by_faculty[fid] = deload_by_faculty.get(fid, 0) + int(row.get("units_deloaded") or 0)
+            except Exception:
+                pass
+
+    faculty_states: list[dict] = []
+    faculty_state_by_id: dict[str, dict] = {}
+    for fdoc in (ctx.faculty or []):
+        fid = str(fdoc.get("faculty_id") or "")
+        if not fid:
+            continue
+        pref = (ctx.prefs_by_faculty or {}).get(fid) or {}
+        current_teaching = int((getattr(ctx, "current_assigned_units", {}) or {}).get(fid, 0) or 0)
+        deload_units = int(deload_by_faculty.get(fid, 0) or 0)
+        desired_teaching_units = _aa_pref_units(pref)
+        state = {
+            "faculty_id": fid,
+            "name": _aa_faculty_name(ctx, fid),
+            "employment_type": str(fdoc.get("employment_type") or "").strip().upper(),
+            "faculty_doc": fdoc,
+            "pref": pref,
+            "kacs": _aa_collect_faculty_kacs(fdoc, pref),
+            "current_teaching_units": current_teaching,
+            "assigned_teaching_units": current_teaching,
+            "deload_units": deload_units,
+            "total_credited_units": current_teaching + deload_units,
+            "desired_teaching_units": desired_teaching_units,
+            "assigned_section_ids": [],
+            "history": faculty_course_history.get(fid, {}),
+        }
+        faculty_states.append(state)
+        faculty_state_by_id[fid] = state
+
+    section_lookup: dict[str, dict] = {}
+    section_pool: list[dict] = []
+
+    if row_universe:
+        for row in row_universe:
+            sid = str(row.get("id") or row.get("section_id") or "")
+            cid = str(row.get("course_id") or "")
+            if not sid or not cid:
+                continue
+            course_doc = (ctx.courses or {}).get(cid) or {}
+            try:
+                units = int(row.get("units") or course_doc.get("units") or 3)
+            except Exception:
+                units = int(course_doc.get("units") or 3)
+            batch_val = row.get("batch_id") or row.get("owner_batch_id") or row.get("batch_number") or None
+            section = {
+                "section_id": sid,
+                "course_id": cid,
+                "units": units,
+                "campus_id": str(row.get("campus_id") or ""),
+                "mode": row.get("mode") or course_doc.get("mode") or "",
+                "batch_id": batch_val,
+                "program_id": row.get("program_id") or row.get("owner_program_id") or None,
+                "status": row.get("status") or "",
+                "faculty_id": row.get("faculty_id") or "",
+            }
+            section_lookup[sid] = section
+            if sid in protected_section_ids:
+                continue
+            section_pool.append(section)
+    else:
+        for sec in (ctx.sections or []):
+            sid = str(sec.get("section_id") or "")
+            cid = str(sec.get("course_id") or "")
+            if not sid or not cid or sid in protected_section_ids:
+                continue
+            course_doc = (ctx.courses or {}).get(cid) or {}
+            units = int(sec.get("units") or course_doc.get("units") or 3)
+            section = {
+                "section_id": sid,
+                "course_id": cid,
+                "units": units,
+                "campus_id": str(sec.get("campus_id") or ""),
+                "mode": sec.get("mode") or course_doc.get("mode") or "",
+                "batch_id": sec.get("owner_batch_id") or sec.get("batch_number") or None,
+                "program_id": sec.get("owner_program_id") or None,
+            }
+            section_lookup[sid] = section
+            section_pool.append(section)
+
+    section_pool = _aa_candidate_course_order(section_pool, ctx, course_history)
+    print("[AA DEBUG] total sections in pool =", len(section_pool))
+    print("[AA DEBUG] protected sections =", len(protected_section_ids or set()))
+    print("[AA DEBUG] FT faculty count =", len([f for f in faculty_states if (f.get("employment_type") or "").upper() == "FT"]))
+    print("[AA DEBUG] PT faculty count =", len([f for f in faculty_states if (f.get("employment_type") or "").upper() == "PT"]))
+    print("[AA DEBUG] history courses loaded =", len(course_history or {}))
+    print("[AA DEBUG] KAC course map size =", len((getattr(ctx, "course_to_kacs", {}) or {})))
+    ctx.protected_section_ids = set(protected_section_ids)
+    assignments: list[dict] = []
+    trace: list[dict] = []
+
+    def remaining() -> list[dict]:
+        assigned_ids = {a["section_id"] for a in assignments}
+        return [sec for sec in section_pool if sec["section_id"] not in assigned_ids]
+
+    ft_states = [s for s in faculty_states if s["employment_type"] == "FT"]
+    pt_states = [s for s in faculty_states if s["employment_type"] == "PT"]
+
+    # Round 1: FT minimum via history, 1 section per faculty per pass
+    while True:
+        progress = False
+        active_ft = sorted([s for s in ft_states if s["total_credited_units"] < 12], key=lambda s: (s["total_credited_units"], s["assigned_teaching_units"], s["faculty_id"]))
+        if not active_ft:
+            break
+        rem = remaining()
+        if not rem:
+            break
+        for fstate in active_ft:
+            print(f"[ROUND1] fac={fstate['faculty_id']} total_units={fstate.get('total_credited_units', 0)} teaching={fstate.get('assigned_teaching_units', 0)}")
+            latest_candidates = _aa_history_candidates_for_faculty(fstate, rem, course_history, latest_only=True)
+            print(f"[ROUND1] fac={fstate['faculty_id']} latest_history_candidates={len(latest_candidates)} candidate_section_ids={[s.get('section_id') for s in latest_candidates[:10]]}")
+            sec = None
+            reason = None
+            for cand in latest_candidates:
+                if _aa_faculty_can_take_section(fstate, cand, ctx):
+                    sec = cand
+                    reason = "recent_history"
+                    break
+            if sec is None:
+                older_candidates = _aa_history_candidates_for_faculty(fstate, rem, course_history, latest_only=False)
+                print(f"[ROUND1] fac={fstate['faculty_id']} older_history_candidates={len(older_candidates)} candidate_section_ids={[s.get('section_id') for s in older_candidates[:10]]}")
+                for cand in older_candidates:
+                    if _aa_faculty_can_take_section(fstate, cand, ctx):
+                        sec = cand
+                        reason = "older_history"
+                        break
+            if sec is None:
+                print(f"[ROUND1 MISS] fac={fstate['faculty_id']} no valid history-based section assigned")
+                continue
+            _aa_assign_section(fstate, sec, reason or "older_history", "round1_ft_history", trace, assignments)
+            rem = remaining()
+            progress = True
+        if not progress:
+            break
+
+    assigned_now = sum(1 for s in section_pool if s["section_id"] in {a["section_id"] for a in assignments})
+    unassigned_now = len(section_pool) - assigned_now
+    print(f"[AA STAGE DONE] stage=round1_history assigned={assigned_now} unassigned={unassigned_now}")
+
+    # Round 2a: FT minimum via KAC fallback
+    while True:
+        progress = False
+        rem = remaining()
+        if not rem:
+            break
+        for fstate in sorted([s for s in ft_states if s["total_credited_units"] < 12], key=lambda s: (s["total_credited_units"], s["faculty_id"])):
+            sec = _aa_pick_kac_section(fstate, rem, ctx)
+            if sec is None or not _aa_faculty_can_take_section(fstate, sec, ctx):
+                continue
+            _aa_assign_section(fstate, sec, "kac_fallback", "round2_ft_kac", trace, assignments)
+            rem = remaining()
+            progress = True
+        if not progress:
+            break
+
+    assigned_now = sum(1 for s in section_pool if s["section_id"] in {a["section_id"] for a in assignments})
+    unassigned_now = len(section_pool) - assigned_now
+    print(f"[AA STAGE DONE] stage=round2_ft_kac assigned={assigned_now} unassigned={unassigned_now}")
+
+    # Round 2b: FT extra loads up to desired teaching ceiling
+    while True:
+        progress = False
+        rem = remaining()
+        if not rem:
+            break
+        for fstate in sorted(ft_states, key=lambda s: (s["assigned_teaching_units"], s["faculty_id"])):
+            if fstate["assigned_teaching_units"] >= fstate["desired_teaching_units"]:
+                continue
+            sec = _aa_pick_history_section(fstate, rem, course_history, latest_only=False)
+            reason = "ft_extra_history"
+            if sec is None:
+                sec = _aa_pick_kac_section(fstate, rem, ctx)
+                reason = "ft_extra_kac"
+            if sec is None or not _aa_faculty_can_take_section(fstate, sec, ctx):
+                continue
+            if fstate["assigned_teaching_units"] + int(sec.get("units") or 0) > fstate["desired_teaching_units"]:
+                continue
+            _aa_assign_section(fstate, sec, reason, "round2_ft_extra", trace, assignments)
+            rem = remaining()
+            progress = True
+        if not progress:
+            break
+
+    assigned_now = sum(1 for s in section_pool if s["section_id"] in {a["section_id"] for a in assignments})
+    unassigned_now = len(section_pool) - assigned_now
+    print(f"[AA STAGE DONE] stage=round3_ft_extra assigned={assigned_now} unassigned={unassigned_now}")
+
+    # Round 3: PT assignment
+    while True:
+        progress = False
+        rem = remaining()
+        if not rem:
+            break
+        for pstate in sorted(pt_states, key=lambda s: (s["assigned_teaching_units"], s["faculty_id"])):
+            sec, reason = _aa_pick_pt_section(pstate, rem, course_history, ctx)
+            if sec is None:
+                continue
+            _aa_assign_section(pstate, sec, reason or "pt_kac", "round3_pt", trace, assignments)
+            rem = remaining()
+            progress = True
+        if not progress:
+            break
+
+    assigned_now = sum(1 for s in section_pool if s["section_id"] in {a["section_id"] for a in assignments})
+    unassigned_now = len(section_pool) - assigned_now
+    print(f"[AA STAGE DONE] stage=round4_pt assigned={assigned_now} unassigned={unassigned_now}")
+
+    # Round 4: rescue remaining blanks -> history again, PT kac, FT overload last
+    rem = remaining()
+    for sec in rem:
+        chosen = None
+        reason = None
+        for hist in course_history.get(sec["course_id"], []):
+            fid = hist.get("faculty_id")
+            fstate = faculty_state_by_id.get(fid)
+            if fstate and _aa_faculty_can_take_section(fstate, sec, ctx, require_pref_for_pt=(fstate["employment_type"] == "PT")):
+                chosen = fstate
+                reason = "history_rescue"
+                break
+        if chosen is None:
+            for pstate in pt_states:
+                cand = _aa_pick_kac_section(pstate, [sec], ctx)
+                if cand is not None and _aa_faculty_can_take_section(pstate, sec, ctx, require_pref_for_pt=True):
+                    chosen = pstate
+                    reason = "pt_kac"
+                    break
+        if chosen is None:
+            for fstate in sorted(ft_states, key=lambda s: (s["total_credited_units"], s["faculty_id"])):
+                if _aa_faculty_can_take_section(fstate, sec, ctx):
+                    chosen = fstate
+                    reason = "rescue_overload"
+                    break
+        if chosen is not None:
+            _aa_assign_section(chosen, sec, reason or "rescue_overload", "round4_rescue", trace, assignments)
+
+    assigned_now = sum(1 for s in section_pool if s["section_id"] in {a["section_id"] for a in assignments})
+    unassigned_now = len(section_pool) - assigned_now
+    print(f"[AA STAGE DONE] stage=round5_rescue assigned={assigned_now} unassigned={unassigned_now}")
+
+    debug = _aa_rebalance_max_preps(assignments, section_lookup, faculty_states, faculty_state_by_id, ctx, trace)
+    debug.update(_aa_assign_schedule(assignments, section_lookup, faculty_state_by_id, ctx, schedule_history, trace))
+    debug.update({
+        "assignment_trace": trace,
+        "protected_section_ids": sorted(protected_section_ids),
+        "remaining_unassigned_sections": [s["section_id"] for s in remaining()],
+    })
+    print("[AA FINAL] total rows =", len(section_pool))
+    print("[AA FINAL] assigned rows =", len(assignments))
+    print("[AA FINAL] unassigned rows =", len(section_pool) - len(assignments))
+    print("[AA FINAL] assignment_trace count =", len(trace))
+    return {
+        "term_id": term_id,
+        "courses_order": [s["course_id"] for s in section_pool],
+        "by_course": {},
+        "assignments": assignments,
+        "debug": debug,
+    }
+
+
 async def compute_load_recommendations(
     term_id: str,
     db,
     *,
     department_id: str | None = None,
     respect_locks: bool = True,
+    protected_section_ids: set[str] | None = None,
+    source_rows: list[dict] | None = None,
 ) -> dict:
-    """
-    Switchable milestones:
-      A → data prep only
-      B → prioritization only (no assignments)
-      C+ → matching (later)
-    """
-    MILESTONE = "E"
-    if MILESTONE == "A":
-        dbg = await run_milestone_a(term_id, db, department_id)
-        return {
-            "term_id": term_id,
-            "courses_order": dbg.get("course_order", []),
-            "by_course": {},
-            "assignments": [],
-        }
-    if MILESTONE == "B":
-        return await run_milestone_b(term_id, db, department_id)
-    if MILESTONE == "C":
-        return await run_milestone_c_phase6a(term_id, db, department_id)
-    if MILESTONE == "D":
-        return await run_milestone_d_phase6b(term_id, db, department_id)
-    if MILESTONE == "E":
-        return await run_milestone_e_phase7(term_id, db, department_id)
+    return await _compute_load_recommendations_v2(
+        term_id,
+        db,
+        department_id=department_id,
+        protected_section_ids=protected_section_ids if respect_locks else set(),
+        source_rows=source_rows,
+    )
 
-    return {"term_id": term_id, "courses_order": [], "by_course": {}, "assignments": []}
+
+# ================== END NEW AUTO-ASSIGNMENT ENGINE ==================
