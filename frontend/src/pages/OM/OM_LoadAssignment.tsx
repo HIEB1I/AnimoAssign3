@@ -68,6 +68,8 @@ async function getOmPlanningTermIds(): Promise<{ current_term_id?: string; plann
 import { cls } from "../../utilities/cls";
 import {
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   Search as SearchIcon,
   Play,
   RefreshCcw,
@@ -75,7 +77,6 @@ import {
   CalendarClock,
   Info,
   Plus,
-  MessageSquareText,
   Copy,
   Archive,
   Undo2,
@@ -85,6 +86,7 @@ import {
   Download,
   Save,
   Trash2,
+  Inbox,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -2170,7 +2172,7 @@ const SendBlockedModal = ({
       <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-2 flex items-start gap-3">
           <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-            <MessageSquareText className="h-5 w-5" />
+            <Inbox className="h-5 w-5" />
           </div>
           <div className="min-w-0">
             <h3 className="text-lg font-semibold text-gray-900">
@@ -2823,6 +2825,61 @@ const ChairRoomCell: React.FC<{ raw: string }> = ({ raw }) => {
 export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
   const { embedded = false, hideForwardToChair = false, chairExportExcel = false } = props;
+
+
+// Hover edge scroll indicators for the wide load assignment table (different from the scrollbars)
+const loadTableScrollRef = useRef<HTMLDivElement>(null);
+const loadTableInnerRef = useRef<HTMLTableElement>(null);
+const [loadTableHoverSide, setLoadTableHoverSide] = useState<"left" | "right" | null>(null);
+const [loadTableCanScrollLeft, setLoadTableCanScrollLeft] = useState(false);
+const [loadTableCanScrollRight, setLoadTableCanScrollRight] = useState(false);
+
+const updateLoadTableScrollHints = useCallback(() => {
+  const el = loadTableScrollRef.current;
+  if (!el) return;
+  const max = el.scrollWidth - el.clientWidth;
+  const left = el.scrollLeft;
+  setLoadTableCanScrollLeft(left > 1);
+  setLoadTableCanScrollRight(left < max - 1);
+}, []);
+
+const handleLoadTableMouseMove = useCallback(
+  (e: React.MouseEvent<HTMLDivElement>) => {
+    const el = loadTableScrollRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const x = e.clientX - rect.left;
+    const edge = 36; // px hover zone on left/right edges
+    if (x < edge) setLoadTableHoverSide("left");
+    else if (x > rect.width - edge) setLoadTableHoverSide("right");
+    else setLoadTableHoverSide(null);
+  },
+  []
+);
+
+useEffect(() => {
+  updateLoadTableScrollHints();
+
+  const el = loadTableScrollRef.current;
+  if (!el) return;
+
+  const ro = new ResizeObserver(() => updateLoadTableScrollHints());
+  ro.observe(el);
+
+  const tbl = loadTableInnerRef.current;
+  if (tbl) ro.observe(tbl);
+
+  const onWinResize = () => updateLoadTableScrollHints();
+  window.addEventListener("resize", onWinResize);
+
+  const raf = requestAnimationFrame(updateLoadTableScrollHints);
+
+  return () => {
+    cancelAnimationFrame(raf);
+    window.removeEventListener("resize", onWinResize);
+    ro.disconnect();
+  };
+}, [updateLoadTableScrollHints]);
 
   const [onLeaveFacultyIds, setOnLeaveFacultyIds] = useState<string[]>([]);
   const onLeaveSet = useMemo(() => new Set(onLeaveFacultyIds), [onLeaveFacultyIds]);
@@ -6690,12 +6747,19 @@ const courseCodeToInfo = useMemo(() => {
                 {isArchiveView ? (
                   <ArchivedLoadsSummary rows={filtered} termLabel={term} />
                 ) : (
-                  <div className="mt-3 max-h-[58vh] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+                  <div className="relative mt-3 rounded-xl border border-gray-300 bg-white shadow-sm">
+                    <div
+                      ref={loadTableScrollRef}
+                      className="max-h-[58vh] overflow-x-auto overflow-y-auto"
+                      onScroll={updateLoadTableScrollHints}
+                      onMouseMove={handleLoadTableMouseMove}
+                      onMouseLeave={() => setLoadTableHoverSide(null)}
+                    >
                     {/*
                       NOTE: Use w-max/min-w-max so the table can exceed the container width.
                       This makes horizontal scrolling ("move") always work when columns are wide.
                     */}
-                    <table className="w-max min-w-max text-sm table-fixed border-collapse">
+                    <table ref={loadTableInnerRef} className="w-max min-w-max text-sm table-fixed border-collapse">
                       <colgroup>
                         {/* 1) Select */}
                         <col className="w-[46px]" />
@@ -7266,7 +7330,7 @@ const courseCodeToInfo = useMemo(() => {
                                               isArchiveView &&
                                                 "opacity-40 cursor-not-allowed hover:brightness-100"
                                             )}
-                                            title="Message"
+                                            title="RFC"
                                             onClick={() => {
                                               if (isArchiveView) return;
                                               setReqChange({
@@ -7279,7 +7343,7 @@ const courseCodeToInfo = useMemo(() => {
                                               });
                                             }}
                                           >
-                                            <MessageSquareText className="h-5 w-5" />
+                                            <Inbox className="h-5 w-5" />
                                             {unread && (
                                               <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
                                             )}
@@ -7336,10 +7400,33 @@ const courseCodeToInfo = useMemo(() => {
                             </td>
                           </tr>
                         )}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
+      </tbody>
+    </table>
+    </div>
+
+    {loadTableHoverSide === "left" && loadTableCanScrollLeft && (
+      <>
+        <div className="pointer-events-none absolute inset-y-0 left-0 w-16 bg-gradient-to-r from-white/80 to-transparent" />
+        <div className="pointer-events-none absolute inset-y-0 left-2 flex items-center">
+          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
+            <ChevronLeft className="h-5 w-5 text-white" />
+          </div>
+        </div>
+      </>
+    )}
+
+    {loadTableHoverSide === "right" && loadTableCanScrollRight && (
+      <>
+        <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-white/80 to-transparent" />
+        <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
+          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
+            <ChevronRight className="h-5 w-5 text-white" />
+          </div>
+        </div>
+      </>
+    )}
+  </div>
+)}
 
                 <div className="border-t px-4 py-3">
                   <div className="flex items-center justify-between gap-3">

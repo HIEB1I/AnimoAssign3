@@ -788,18 +788,19 @@ async def _create_term_calendar_for_user(
         # Include a stable marker + kind, so overwrite can selectively remove events.
         # Do NOT remove the "Created by AnimoAssign" marker because it is used by legacy searches.
         desc_lines = [
-            "Created by AnimoAssign.",
             f"Mode: {(mode or '').strip()}",
-            f"Room: {location}"
+            "Created by AnimoAssign.",
+            f"AA_KIND: {kind_norm}",
         ]
         if kind_norm == "special":
-            desc_lines.append("NOTE: Special Class")
+            desc_lines.append("AA_NOTE: Special Class")
         desc_lines.append(f"Login: {_aa_login_link()}")
+        desc = "\n".join(desc_lines)
 
         return {
             "summary": title,
             "location": location,
-            "description": "\n".join(desc_lines),
+            "description": desc,
             "start": {"dateTime": start_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "end": {"dateTime": end_dt.isoformat(), "timeZone": _DEFAULT_TZ},
             "recurrence": [f"RRULE:FREQ=WEEKLY;COUNT={int(week_count)}"],
@@ -1014,9 +1015,10 @@ async def _sync_term_calendar_for_user(
         aa_key = f"{base_key}|{meeting_suffix}"
 
         desc_lines = [
-            "Created by AnimoAssign.",
             f"Mode: {(mode or '').strip()}",
-            f"Room: {location}",
+            "Created by AnimoAssign.",
+            "AA_KIND: regular",
+            f"Login: {_aa_login_link()}",
         ]
 
         return {
@@ -1328,6 +1330,10 @@ async def _fetch_reflected_special_classes_for_faculty(
         {
             "_id": 0,
             "special_id": 1,
+            "faculty_response": 1,
+            "faculty_status": 1,
+            "faculty_accepted_at": 1,
+            "faculty_rejected_at": 1,
             "user_id": 1,
             "student_number": 1,
             "reason": 1,
@@ -1375,6 +1381,14 @@ async def _fetch_reflected_special_classes_for_faculty(
         if special_id in seen_special:
             continue
         seen_special.add(special_id)
+
+        # Faculty acceptance state (default: PENDING)
+        fac_state = str(d.get("faculty_response") or d.get("faculty_status") or "PENDING").strip().upper()
+        if fac_state in {"REJECTED", "REJECT"}:
+            # Requirement: rejected special classes disappear from the faculty list.
+            continue
+        if fac_state not in {"PENDING", "ACCEPTED"}:
+            fac_state = "PENDING"
 
         # Determine owning faculty
         assignment_id = (d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
@@ -1510,6 +1524,7 @@ async def _fetch_reflected_special_classes_for_faculty(
             "section_id": f"SPECIAL:{special_id}",
             "special_id": special_id,
             "is_special_class": True,
+            "special_faculty_status": fac_state,
             "student": student_name or "—",
             "reason": reason_display,
             "course_code": course_code,
@@ -1529,6 +1544,117 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+@router.post("/special-class/respond")
+async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
+    """Faculty Accept/Reject Special Class request.
+
+    Behavior:
+    - Accept: marks the request as accepted by faculty; enables editing on the Faculty UI.
+    - Reject: marks as rejected; it disappears from faculty list.
+    - Both actions notify OM/Chair via in-app + Gmail.
+    """
+
+    user_id = str(payload.get("user_id") or "").strip()
+    special_id = str(payload.get("special_id") or "").strip()
+    action = str(payload.get("action") or "").strip().lower()
+    if not user_id or not special_id or action not in {"accept", "reject"}:
+        raise HTTPException(status_code=400, detail="Missing required fields")
+
+    sc = await db[COL_SPECIAL_CLASS].find_one(
+        {"special_id": special_id, "status": "Approved"},
+        {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1},
+    )
+    if not sc:
+        raise HTTPException(status_code=404, detail="Special class not found")
+
+    now = _now_utc()
+    fac_status = "ACCEPTED" if action == "accept" else "REJECTED"
+
+    term_id = str(sc.get("term_id") or "").strip()
+    q = {"special_id": special_id, "status": "Approved"}
+    if term_id:
+        q["term_id"] = term_id
+
+    set_doc: Dict[str, Any] = {
+        "faculty_response": fac_status,
+        "faculty_status": fac_status,
+        "faculty_user_id": user_id,
+        "updated_at": now,
+    }
+    if action == "accept":
+        set_doc["faculty_accepted_at"] = now
+    else:
+        set_doc["faculty_rejected_at"] = now
+
+    await db[COL_SPECIAL_CLASS].update_many(q, {"$set": set_doc})
+
+    # Notify OM + Chair (best-effort; broad roles)
+    actor = "Faculty"
+    try:
+        fac = await db[COL_USERS].find_one(
+            {"user_id": user_id},
+            {"_id": 0, "first_name": 1, "last_name": 1, "name": 1},
+        ) or {}
+        fn = (fac.get("first_name") or "").strip()
+        ln = (fac.get("last_name") or "").strip()
+        actor = (f"{fn} {ln}".strip() or (fac.get("name") or "Faculty")).strip() or "Faculty"
+    except Exception:
+        actor = "Faculty"
+
+    subj = f"Special Class {('accepted' if action=='accept' else 'rejected')} by Faculty"
+    details = f"{actor} {('accepted' if action=='accept' else 'rejected')} a Special Class request (special_id: {special_id})."
+
+    recipients = set()
+    for uid in await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"]):
+        recipients.add(uid)
+    for uid in await _role_user_ids_by_name_patterns([r"^chair$", r"chair"]):
+        recipients.add(uid)
+
+    email_sent_any = False
+    email_errors: List[str] = []
+    if recipients:
+        for rid in sorted(recipients):
+            try:
+                await create_notification(
+                    user_id=rid,
+                    title=subj,
+                    details=details,
+                    meta={
+                        "type": "SPECIAL_CLASS_FACULTY_RESPONSE",
+                        "action": fac_status,
+                        "special_id": special_id,
+                        "term_id": term_id,
+                        "actor_user_id": user_id,
+                        "when": now.isoformat(),
+                        "route": "/om/special-class",
+                        "kind": "special_class_faculty_response",
+                    },
+                    send_email=True,
+                    email_from_user_id=user_id,
+                )
+                email_sent_any = True
+            except Exception as e:
+                email_errors.append(str(e))
+    else:
+        ok, err = await _send_email_via_user_gmail(
+            user_id=user_id,
+            to_email=_RFC_EMAIL_TO,
+            subject=subj,
+            body=details,
+        )
+        email_sent_any = bool(ok)
+        if err:
+            email_errors.append(err)
+
+    return {
+        "ok": True,
+        "special_id": special_id,
+        "faculty_status": fac_status,
+        "email_sent": email_sent_any,
+        "email_error": ("; ".join(email_errors) if email_errors else None),
+    }
 
 
 def _payload_bool(v: Any, default: bool = False) -> bool:
@@ -1952,7 +2078,7 @@ def _term_label(t: Dict[str, Any]) -> str:
 
 def _aa_web_base() -> str:
     # Prefer your deployed URL if set; fallback to localhost
-    base = (os.getenv("ANIMOASSIGN_WEB_URL") or os.getenv("FRONTEND_URL") or "http://ccscloud.dlsu.edu.ph:11160/login").strip()
+    base = (os.getenv("ANIMOASSIGN_WEB_URL") or os.getenv("FRONTEND_URL") or "http://localhost:5173").strip()
     return base.rstrip("/")
 
 def _aa_login_link() -> str:
@@ -3202,6 +3328,23 @@ async def overview_handler(
         except Exception:
             pass
 
+        # Requirement:
+        # If the faculty already accepted (or the schedule was locked) but a new Serviced Class arrives,
+        # the schedule should be unlocked so RFC is available again.
+        try:
+            has_serviced_any = any(
+                (not bool(r.get("is_special_class"))) and bool(r.get("is_serviced"))
+                for r in (merged_load or [])
+            )
+        except Exception:
+            has_serviced_any = False
+
+        if has_serviced_any and (schedule_final or proposal_status_l in ("approved", "accepted")):
+            schedule_final = False
+            proposal_status = "Proposed"
+            proposal_status_l = "proposed"
+            summary["load_status"] = "Proposed"
+
         merged_load.sort(
             key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class"))))
         )
@@ -3209,18 +3352,6 @@ async def overview_handler(
         # IMPORTANT: Special Classes must be reflected in the Faculty schedule views,
         # but they must NOT be included in the teaching units and course prep calculations.
         calc_load = [r for r in (merged_load or []) if not bool(r.get("is_special_class"))]
-        room_changed_since_accept = False
-        try:
-            accepted_sig = str((proposal or {}).get("accepted_room_sig") or "").strip()
-
-            # Backfill baseline if missing (older accepts)
-            if (not accepted_sig) and proposal and isinstance((proposal or {}).get("rows"), list):
-                accepted_sig = _room_signature_from_rows((proposal or {}).get("rows") or [])
-
-            if accepted_sig and proposal_status_l in ("approved", "accepted"):
-                room_changed_since_accept = (_room_signature_from_rows(calc_load) != accepted_sig)
-        except Exception:
-            room_changed_since_accept = False
         total_units, course_preps = _calc_units_and_preps(calc_load)
 
         summary["teaching_units"] = f"{int(round(total_units))}/{int(pref_units_for_calc)}"
@@ -3235,18 +3366,17 @@ async def overview_handler(
         summary["course_preps_over_by"] = max(0, int(course_preps - preps_max)) if summary["exceeded_course_preps"] else 0
 
 
-        return {
-            "ok": True,
-            "term": term,
-            "summary": summary,
-            "teaching_load": merged_load,
-            # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
-            "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
-            "proposal_status": proposal_status,
-            "rfc": rfc_norm,
-            "schedule_final": schedule_final,
-            "room_changed_since_accept": room_changed_since_accept,
-        }
+    return {
+        "ok": True,
+        "term": term,
+        "summary": summary,
+        "teaching_load": merged_load,
+        # Only report "proposed" state if we have a valid (non-stale) proposal payload to show.
+        "is_proposed": bool(proposed_load and proposal_status_l in ("proposed", "reply", "replied")),
+        "proposal_status": proposal_status,
+        "rfc": rfc_norm,
+        "schedule_final": schedule_final,
+    }
     raise HTTPException(status_code=400, detail="Invalid action parameter.")
 
 
@@ -4303,72 +4433,55 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
             },
         )
 
-        # RESYNC calendar
-        calendar_ok: Optional[bool] = None
-        calendar_error: Optional[str] = None
-        calendar_term_id: Optional[str] = None
-        term_start_at = None
-        week_count = _TERM_WEEK_COUNT
-        created = updated = deleted = skipped = 0
+    # RESYNC calendar
+    calendar_ok: Optional[bool] = None
+    calendar_error: Optional[str] = None
+    calendar_term_id: Optional[str] = None
+    term_start_at = None
+    week_count = _TERM_WEEK_COUNT
+    created = updated = deleted = skipped = 0
 
-        if send_to_gcal:
-            nxt_term = await _next_term_from_current()
-            if not nxt_term:
+    if send_to_gcal:
+        nxt_term = await _next_term_from_current()
+        if not nxt_term:
+            calendar_ok = False
+            calendar_error = "No next term found after current term."
+        else:
+            calendar_term_id = (nxt_term.get("term_id") or "").strip()
+            term_start_at = _coerce_dt(nxt_term.get("start_at"))
+            term_end_at = _coerce_dt(nxt_term.get("end_at"))
+
+            if not term_start_at:
                 calendar_ok = False
-                calendar_error = "No next term found after current term."
+                calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
             else:
-                calendar_term_id = (nxt_term.get("term_id") or "").strip()
-                term_start_at = _coerce_dt(nxt_term.get("start_at"))
-                term_end_at = _coerce_dt(nxt_term.get("end_at"))
+                rows_for_calendar = [rr for rr in (proposal_rows or []) if not bool((rr or {}).get("is_special_class"))]
+                ok, stats, err = await _sync_term_calendar_for_user(
+                    user_id=userId,
+                    calendar_term_id=calendar_term_id,
+                    term_start_at=term_start_at,
+                    term_end_at=term_end_at,
+                    rows=rows_for_calendar,
+                    action=gcal_action,      # cleanup removes deleted schedule rows
+                    week_count=week_count,
+                )
+                calendar_ok = ok
+                calendar_error = err
+                created = int((stats or {}).get("created") or 0)
+                updated = int((stats or {}).get("updated") or 0)
+                deleted = int((stats or {}).get("deleted") or 0)
+                skipped = int((stats or {}).get("skipped") or 0)
 
-                if not term_start_at:
-                    calendar_ok = False
-                    calendar_error = f"Next term {calendar_term_id or ''} has no start_at."
-                else:
-                    # ✅ Regular Accept should NOT sync special class rows
-                    rows_for_calendar = [
-                        rr for rr in (proposal_rows or [])
-                        if not bool((rr or {}).get("is_special_class"))
-                    ]
-
-                    ok, stats, err = await _sync_term_calendar_for_user(
-                        user_id=userId,
-                        calendar_term_id=calendar_term_id,
-                        term_start_at=term_start_at,
-                        term_end_at=term_end_at,
-                        rows=rows_for_calendar,
-                        action=gcal_action,
-                        week_count=week_count,
-                    )
-                    calendar_ok = ok
-                    calendar_error = err
-                    created = int((stats or {}).get("created") or 0)
-                    updated = int((stats or {}).get("updated") or 0)
-                    deleted = int((stats or {}).get("deleted") or 0)
-                    skipped = int((stats or {}).get("skipped") or 0)
-
-        # ✅ Always return here so we never execute the legacy duplicate code below
         return {
             "ok": True,
-            "status": "ACCEPTED",
-            "send_to_gcal": bool(send_to_gcal),
-
+            "status": "SYNC_ONLY",
+            "send_to_gcal": True,
             "calendar_ok": calendar_ok,
-            "calendar_events_created": int(created or 0),  # ✅ FIX: never use undefined calendar_events_created
-            "calendar_events_updated": int(updated or 0),
-            "calendar_events_deleted": int(deleted or 0),
-            "calendar_events_skipped": int(skipped or 0),
-
+            "calendar_events_created": calendar_events_created,
             "calendar_error": calendar_error,
             "calendar_term_id": calendar_term_id,
             "term_start_at": (term_start_at.isoformat() if term_start_at else None),
             "week_count": week_count,
-
-            # keep these (already computed above in your function)
-            "email_sent": email_sent,
-            "email_error": email_error,
-            "om_mailbox_sent": om_mailbox_sent,
-            "om_mailbox_error": om_mailbox_error,
         }
 
     proposal = await db[COL_LOAD_PROPOSALS].find_one({"faculty_id": fid, "term_id": term_id}, {"_id": 0})
