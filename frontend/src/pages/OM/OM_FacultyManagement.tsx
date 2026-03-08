@@ -818,7 +818,7 @@ export default function OM_FacultyManagement() {
                     <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
                       <div className="flex items-center gap-2 text-gray-900">
                         <GraduationCap className="h-4 w-4 text-emerald-700" />
-                        <h3 className="font-semibold">Teaching Snapshot</h3>
+                        <h3 className="font-semibold">Faculty Teaching Overview</h3>
                       </div>
 
                       <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
