@@ -140,6 +140,21 @@ interface ValidationContext {
   sectionCourse?: Record<string, string>;
   courseTypeOfCourse?: Record<string, string>;
   campusNames?: Record<string, string>;
+  sectionOwnerProgram?: Record<string, string>;
+  sectionOwnerBatch?: Record<string, string>;
+  blockedGeCmps2?: Array<{
+    campus_id?: string;
+    campus_name?: string;
+    course_id?: string;
+    course_code?: string;
+    section_id?: string;
+    section_code?: string;
+    day?: string;
+    begin?: string;
+    end?: string;
+    program?: string;
+    batch?: string;
+  }>;
 }
 
 
@@ -1067,6 +1082,8 @@ type Row = {
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  owner_program_id?: string;
+  owner_batch_id?: string;
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
 
@@ -1707,84 +1724,67 @@ function checkGeBlockedSlots(
 ): RowFlagsById {
   const result: RowFlagsById = {};
 
+  const blockedSlots = Array.isArray(ctx.blockedGeCmps2) ? ctx.blockedGeCmps2 : [];
+  if (blockedSlots.length === 0) return result;
+
   const sectionCampus = ctx.sectionCampus || {};
-  const sectionCourse = ctx.sectionCourse || {};
-  const courseType = ctx.courseTypeOfCourse || {};
+  const sectionOwnerProgram = ctx.sectionOwnerProgram || {};
+  const sectionOwnerBatch = ctx.sectionOwnerBatch || {};
 
-  type BlockOwner = {
-    rowId: string;
-    label: string; // e.g., "CCPROG1 S11"
-  };
+  const toMinutes = (v?: string): number | null => _hhmmToMinutes(v);
 
-  // key = "DAY|BEGIN|END" => owner (GE @ CMPS0002 row)
-  const blocked: Record<string, BlockOwner> = {};
-
-  const makeKey = (
-    day?: string,
-    begin?: string,
-    end?: string
-  ): string | null => {
-    const d = (day || "").trim().toUpperCase();
-    const b = (begin || "").trim();
-    const e = (end || "").trim();
-    if (!d || !b || !e) return null;
-    return `${d}|${b}|${e}`;
-  };
-
-  // 1) First pass: record all GE @ CMPS0002 slots as "blocked"
   for (const row of rows) {
-    const sid = row.id;
+    const sid = String(row.id || "").trim();
     if (!sid) continue;
 
-    const campus = (sectionCampus[sid] || "").toUpperCase();
+    const campus = String(_rowCampusId(row, ctx) || sectionCampus[sid] || "").trim().toUpperCase();
     if (campus !== "CMPS0002") continue;
 
-    const cid = sectionCourse[sid];
-    const toc = (courseType[cid] || "").toUpperCase();
-    if (toc !== "GE") continue; // only GE courses create blocked slots
-
-    const label = `${row.course || "?"} ${row.section || ""}`.trim();
-
-    const k1 = makeKey(row.day1, row.begin1, row.end1);
-    if (k1) blocked[k1] = { rowId: sid, label };
-
-    const k2 = makeKey(row.day2, row.begin2, row.end2);
-    if (k2) blocked[k2] = { rowId: sid, label };
-  }
-
-  if (Object.keys(blocked).length === 0) return result;
-
-  // 2) Second pass: for ALL CMPS0002 rows, if they use a blocked slot from another section → flag
-  for (const row of rows) {
-    const sid = row.id;
-    if (!sid) continue;
-
-    const campus = (sectionCampus[sid] || "").toUpperCase();
-    if (campus !== "CMPS0002") continue; // only CMPS0002 rows are affected
+    const rowProgram = String(row.owner_program_id || sectionOwnerProgram[sid] || "").trim();
+    const rowBatch = String(row.owner_batch_id || sectionOwnerBatch[sid] || "").trim();
 
     const rowFlags: RowFlag[] = [];
+    const checked = new Set<string>();
 
     const checkSlot = (day?: string, begin?: string, end?: string) => {
-      const key = makeKey(day, begin, end);
-      if (!key) return;
+      const d = String(day || "").trim().toUpperCase();
+      const st = toMinutes(begin);
+      const en = toMinutes(end);
+      if (!d || st == null || en == null || en <= st) return;
 
-      const owner = blocked[key];
-      if (!owner) return;
-      if (owner.rowId === sid) return; // it's the same GE section, allowed
+      for (const blocked of blockedSlots) {
+        if (String(blocked.campus_id || "").trim().toUpperCase() !== "CMPS0002") continue;
+        if (String(blocked.section_id || "").trim() === sid) continue;
+        if (String(blocked.day || "").trim().toUpperCase() !== d) continue;
 
-      rowFlags.push({
-        type: "GE_BLOCKED_SLOT",
-        severity: "error",
-        message: `This CMPS0002 schedule uses a GE-reserved slot also used by ${owner.label}.`,
-      });
+        const blockedProgram = String(blocked.program || "").trim();
+        const blockedBatch = String(blocked.batch || "").trim();
+        if (rowProgram || rowBatch || blockedProgram || blockedBatch) {
+          if (rowProgram !== blockedProgram || rowBatch !== blockedBatch) continue;
+        }
+
+        const bst = toMinutes(blocked.begin);
+        const ben = toMinutes(blocked.end);
+        if (bst == null || ben == null || ben <= bst) continue;
+        if (en <= bst || st >= ben) continue;
+
+        const key = `${sid}|${blocked.section_id}|${d}|${blocked.begin}|${blocked.end}`;
+        if (checked.has(key)) continue;
+        checked.add(key);
+
+        const ownerLabel = `${blocked.course_code || blocked.course_id || "?"} ${blocked.section_code || ""}`.trim();
+        rowFlags.push({
+          type: "GE_BLOCKED_SLOT",
+          severity: "error",
+          message: `This Laguna schedule overlaps a blocked GE slot used by ${ownerLabel}.`,
+        });
+      }
     };
 
     checkSlot(row.day1, row.begin1, row.end1);
     checkSlot(row.day2, row.begin2, row.end2);
 
-    if (rowFlags.length > 0) {
-      result[sid] = (result[sid] || []).concat(rowFlags);
-    }
+    if (rowFlags.length > 0) result[sid] = rowFlags;
   }
 
   return result;
@@ -3741,27 +3741,42 @@ useEffect(() => {
       console.log("DEBUG from run:", debug);
       console.log("Preferred map:", prefMap);
 
-      // Preserve already-finalized rows: auto-assign should not "move" them or clear their RFC indicators
-      const existingFinalized = new Map<string, Row>(
-        rows.filter((rr) => !!rr.finalized).map((rr) => [rr.id, rr])
+      // Preserve rows that must never be altered/removed by auto-assign.
+      // This includes:
+      //  - finalized rows (approved/finalized schedule state), and
+      //  - Faculty Service display-only rows that merely share table space with load assignment.
+      const preservedRows = new Map<string, Row>(
+        rows
+          .filter(
+            (rr) =>
+              !!rr.finalized ||
+              !!(rr as any).faculty_service_display_only ||
+              !!(rr as any).synced_from_faculty_service
+          )
+          .map((rr) => [rr.id, rr])
       );
 
       let nextRows: Row[] = Array.isArray(res?.rows) ? (res.rows as Row[]) : [];
-      if (existingFinalized.size) {
+      if (preservedRows.size) {
         const seen = new Set<string>();
         nextRows = nextRows.map((nr) => {
           const id = String((nr as any)?.id || "");
-          const fr = existingFinalized.get(id);
-          if (fr) {
+          const preserved = preservedRows.get(id);
+          if (preserved) {
             seen.add(id);
-            // Prefer the existing finalized row to avoid overwriting faculty/times/status
-            return { ...(nr as any), ...(fr as any), finalized: true } as Row;
+            // Prefer the existing preserved row to avoid overwriting/removing
+            // finalized rows and Faculty Service display-only rows.
+            return {
+              ...(nr as any),
+              ...(preserved as any),
+              finalized: !!(preserved as any).finalized,
+            } as Row;
           }
           return nr;
         });
-        // If backend did not return a finalized row, keep it in the table
-        for (const [id, fr] of existingFinalized.entries()) {
-          if (!seen.has(id)) nextRows.unshift(fr);
+        // If backend did not return a preserved row, keep it in the table.
+        for (const [id, preserved] of preservedRows.entries()) {
+          if (!seen.has(id)) nextRows.unshift(preserved);
         }
       }
 
@@ -4260,6 +4275,9 @@ const inferOmCampusId = useCallback((): string => {
     sectionCourse: {},
     courseTypeOfCourse: {},
     campusNames: {},
+    sectionOwnerProgram: {},
+    sectionOwnerBatch: {},
+    blockedGeCmps2: [],
   });
 
   const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
@@ -4706,6 +4724,9 @@ const inferOmCampusId = useCallback((): string => {
 
   // Remove UI-only fields before persisting rows to the database.
   // (e.g., `selected` comes from checkbox selection and must never be stored.)
+  const isFacultyServiceDisplayOnlyRow = (r: Row | any): boolean =>
+    Boolean((r as any)?.faculty_service_display_only || (r as any)?.synced_from_faculty_service);
+
   const stripUiFieldsForPersist = (r: Row): Row => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { selected, is_new_line, __local_only, ...rest } = (r as any) || {};
@@ -4964,6 +4985,7 @@ const inferOmCampusId = useCallback((): string => {
           (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
         return fid ? ({ ...r, faculty_id: fid } as Row) : r;
       })
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
       .filter((r) => !!(r.faculty_id || "").trim())
       .map(stripUiFieldsForPersist);
 
@@ -4983,11 +5005,14 @@ const inferOmCampusId = useCallback((): string => {
     // IMPORTANT: normalize faculty_id for *all* rows before saving.
     // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
     // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
-    const normalizedAllRows: Row[] = rows.map((r) => {
-      const fid =
-        (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
-      return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-    }).map(stripUiFieldsForPersist);
+    const normalizedAllRows: Row[] = rows
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
+      .map((r) => {
+        const fid =
+          (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
+        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+      })
+      .map(stripUiFieldsForPersist);
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
@@ -5023,6 +5048,16 @@ const inferOmCampusId = useCallback((): string => {
     // drafts disappear from the grid.
     const localNewLineDrafts: Row[] = (rows || []).filter(
       (rr) => !!(rr as any)?.__local_only
+    );
+
+    // Preserve Faculty Service rows that are display-only inside the OM grid.
+    // These rows are sourced from Faculty Service and are intentionally not
+    // persisted by the load-assignment draft save. If the backend refresh only
+    // returns regular load rows, re-merge the existing Faculty Service rows so
+    // they remain visible in the grid and in the plantilla preview/export after
+    // Save Draft.
+    const facultyServiceDisplayRows: Row[] = (rows || []).filter((rr) =>
+      isFacultyServiceDisplayOnlyRow(rr)
     );
 
     // Preserve current remarks drafts for client-only rows.
@@ -5072,6 +5107,9 @@ const inferOmCampusId = useCallback((): string => {
       sectionCourse: (res as any)?.sectionCourse || {},
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
       campusNames: (res as any)?.campusNames || {},
+      sectionOwnerProgram: (res as any)?.sectionOwnerProgram || {},
+      sectionOwnerBatch: (res as any)?.sectionOwnerBatch || {},
+      blockedGeCmps2: Array.isArray((res as any)?.blockedGeCmps2) ? (res as any).blockedGeCmps2 : [],
     });
 
     setBlockedGeCmps2(
@@ -5111,11 +5149,46 @@ const inferOmCampusId = useCallback((): string => {
       begin2: normalizeServerTimeToHHMM(r?.begin2),
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
-    // Merge server rows with any client-only "Add new line" drafts that are still unsaved.
-    const serverIds = new Set(normalizedRows.map((x) => String((x as any)?.id)));
+
+    const preservedFacultyServiceById = new Map(
+      facultyServiceDisplayRows.map((rr) => [String((rr as any)?.id || ""), rr] as const)
+    );
+
+    const normalizedRowsWithFacultyService: Row[] = normalizedRows.map((r) => {
+      const id = String((r as any)?.id || "");
+      const preserved = preservedFacultyServiceById.get(id);
+      if (!preserved) return r;
+      return {
+        ...r,
+        ...preserved,
+        // Always reset transient checkbox state on refresh, even for preserved rows.
+        selected: false,
+        // Keep server-normalized times if the backend returned this same row.
+        begin1: normalizeServerTimeToHHMM((r as any)?.begin1 ?? (preserved as any)?.begin1),
+        end1: normalizeServerTimeToHHMM((r as any)?.end1 ?? (preserved as any)?.end1),
+        begin2: normalizeServerTimeToHHMM((r as any)?.begin2 ?? (preserved as any)?.begin2),
+        end2: normalizeServerTimeToHHMM((r as any)?.end2 ?? (preserved as any)?.end2),
+        faculty_service_display_only:
+          !!(r as any)?.faculty_service_display_only ||
+          !!(preserved as any)?.faculty_service_display_only,
+        synced_from_faculty_service:
+          !!(r as any)?.synced_from_faculty_service ||
+          !!(preserved as any)?.synced_from_faculty_service,
+      } as Row;
+    });
+
+    // Merge server rows with any client-only "Add new line" drafts that are still unsaved,
+    // then append preserved Faculty Service display rows that are not part of the server
+    // payload returned by the draft refresh.
+    const serverIds = new Set(
+      normalizedRowsWithFacultyService.map((x) => String((x as any)?.id))
+    );
     const mergedRows: Row[] = [
-      ...normalizedRows,
+      ...normalizedRowsWithFacultyService,
       ...localNewLineDrafts.filter((x) => !serverIds.has(String((x as any)?.id))),
+      ...facultyServiceDisplayRows.filter(
+        (x) => !serverIds.has(String((x as any)?.id))
+      ),
     ];
     setRows(mergedRows);
 
@@ -5338,7 +5411,7 @@ const handleApplyPendingDrafts = useCallback(
     try {
       const res = await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "approve"
       );
       await notifyChairLoadRecommendation(userId, {
@@ -5559,7 +5632,7 @@ if (!!(r as any).is_new_line) {
     try {
       await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "save"
       );
       await loadFromServer(); // pull fresh rows from DB
@@ -7589,7 +7662,8 @@ const courseCodeToInfo = useMemo(() => {
                           const fromFacultyService = !!(r as any)
                             .synced_from_faculty_service;
                           const isLockedByApoDeadline = isCampusDeadlinePassed(String((r as any)?.campus_id || ""));
-                          const isLocked = isArchiveView || fromFacultyService || isLockedByApoDeadline;
+                          const isFacultyServiceDisplayOnly = !!(r as any).faculty_service_display_only || fromFacultyService;
+                          const isLocked = isArchiveView || isFacultyServiceDisplayOnly || isLockedByApoDeadline;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
                           const hasDraft = Boolean((r as any).has_pending_override);
@@ -7611,8 +7685,8 @@ const courseCodeToInfo = useMemo(() => {
                               className={cls(
                                 "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
                                 isLocked
-                                  ? fromFacultyService
-                                    ? "bg-orange-50 hover:bg-orange-50"
+                                  ? isFacultyServiceDisplayOnly
+                                    ? "bg-yellow-50 hover:bg-yellow-50"
                                     : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                   : isPastDeadlineRow
                                   ? hasDraft
@@ -7989,7 +8063,7 @@ const courseCodeToInfo = useMemo(() => {
                                 {isRunning && (
                                   <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                     {/* New-line rows: show Save + Delete only until saved. */}
-                                    {!fromFacultyService && !!(r as any).is_new_line ? (
+                                    {!isFacultyServiceDisplayOnly && !!(r as any).is_new_line ? (
                                       <>
                                         <button
                                           type="button"
@@ -8014,7 +8088,8 @@ const courseCodeToInfo = useMemo(() => {
                                       </>
                                     ) : (
                                       <>
-                                        {!fromFacultyService && (
+
+                                        {!isFacultyServiceDisplayOnly && (
                                           <button
                                             className={cls(
                                               "relative hover:brightness-110",
@@ -8041,23 +8116,25 @@ const courseCodeToInfo = useMemo(() => {
                                           </button>
                                         )}
 
-                                        <button
-                                          className="relative hover:brightness-110"
-                                          title={
-                                            copiedRowId === r.id
-                                              ? "Copied!"
-                                              : "Copy"
-                                          }
-                                          onClick={() => handleCopyRow(r)}
-                                        >
-                                          {copiedRowId === r.id ? (
-                                            <span className="text-xs font-semibold text-emerald-700">
-                                              ✓
-                                            </span>
-                                          ) : (
-                                            <Copy className="h-4 w-4" />
-                                          )}
-                                        </button>
+                                        {!isFacultyServiceDisplayOnly && (
+                                          <button
+                                            className="relative hover:brightness-110"
+                                            title={
+                                              copiedRowId === r.id
+                                                ? "Copied!"
+                                                : "Copy"
+                                            }
+                                            onClick={() => handleCopyRow(r)}
+                                          >
+                                            {copiedRowId === r.id ? (
+                                              <span className="text-xs font-semibold text-emerald-700">
+                                                ✓
+                                              </span>
+                                            ) : (
+                                              <Copy className="h-4 w-4" />
+                                            )}
+                                          </button>
+                                        )}
                                       </>
                                     )}
                                   </div>
@@ -8286,7 +8363,7 @@ const courseCodeToInfo = useMemo(() => {
                             : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
-                        Units vs Preferences
+                        Units Summary
                       </button>
 
                       <button
@@ -8316,7 +8393,7 @@ const courseCodeToInfo = useMemo(() => {
                     </div>
                   </div>
 
-                  {/* Tab 1: Units vs Preferred Units */}
+                  {/* Tab 1: Units Summary */}
                   {summaryTab === "units" && (
                     <div className="border-t px-4 py-4 space-y-4 w-full">
                       <div className="py-1">
