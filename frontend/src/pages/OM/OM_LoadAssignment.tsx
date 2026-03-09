@@ -140,6 +140,21 @@ interface ValidationContext {
   sectionCourse?: Record<string, string>;
   courseTypeOfCourse?: Record<string, string>;
   campusNames?: Record<string, string>;
+  sectionOwnerProgram?: Record<string, string>;
+  sectionOwnerBatch?: Record<string, string>;
+  blockedGeCmps2?: Array<{
+    campus_id?: string;
+    campus_name?: string;
+    course_id?: string;
+    course_code?: string;
+    section_id?: string;
+    section_code?: string;
+    day?: string;
+    begin?: string;
+    end?: string;
+    program?: string;
+    batch?: string;
+  }>;
 }
 
 
@@ -1067,6 +1082,8 @@ type Row = {
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  owner_program_id?: string;
+  owner_batch_id?: string;
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
 
@@ -1707,84 +1724,67 @@ function checkGeBlockedSlots(
 ): RowFlagsById {
   const result: RowFlagsById = {};
 
+  const blockedSlots = Array.isArray(ctx.blockedGeCmps2) ? ctx.blockedGeCmps2 : [];
+  if (blockedSlots.length === 0) return result;
+
   const sectionCampus = ctx.sectionCampus || {};
-  const sectionCourse = ctx.sectionCourse || {};
-  const courseType = ctx.courseTypeOfCourse || {};
+  const sectionOwnerProgram = ctx.sectionOwnerProgram || {};
+  const sectionOwnerBatch = ctx.sectionOwnerBatch || {};
 
-  type BlockOwner = {
-    rowId: string;
-    label: string; // e.g., "CCPROG1 S11"
-  };
+  const toMinutes = (v?: string): number | null => _hhmmToMinutes(v);
 
-  // key = "DAY|BEGIN|END" => owner (GE @ CMPS0002 row)
-  const blocked: Record<string, BlockOwner> = {};
-
-  const makeKey = (
-    day?: string,
-    begin?: string,
-    end?: string
-  ): string | null => {
-    const d = (day || "").trim().toUpperCase();
-    const b = (begin || "").trim();
-    const e = (end || "").trim();
-    if (!d || !b || !e) return null;
-    return `${d}|${b}|${e}`;
-  };
-
-  // 1) First pass: record all GE @ CMPS0002 slots as "blocked"
   for (const row of rows) {
-    const sid = row.id;
+    const sid = String(row.id || "").trim();
     if (!sid) continue;
 
-    const campus = (sectionCampus[sid] || "").toUpperCase();
+    const campus = String(_rowCampusId(row, ctx) || sectionCampus[sid] || "").trim().toUpperCase();
     if (campus !== "CMPS0002") continue;
 
-    const cid = sectionCourse[sid];
-    const toc = (courseType[cid] || "").toUpperCase();
-    if (toc !== "GE") continue; // only GE courses create blocked slots
-
-    const label = `${row.course || "?"} ${row.section || ""}`.trim();
-
-    const k1 = makeKey(row.day1, row.begin1, row.end1);
-    if (k1) blocked[k1] = { rowId: sid, label };
-
-    const k2 = makeKey(row.day2, row.begin2, row.end2);
-    if (k2) blocked[k2] = { rowId: sid, label };
-  }
-
-  if (Object.keys(blocked).length === 0) return result;
-
-  // 2) Second pass: for ALL CMPS0002 rows, if they use a blocked slot from another section → flag
-  for (const row of rows) {
-    const sid = row.id;
-    if (!sid) continue;
-
-    const campus = (sectionCampus[sid] || "").toUpperCase();
-    if (campus !== "CMPS0002") continue; // only CMPS0002 rows are affected
+    const rowProgram = String(row.owner_program_id || sectionOwnerProgram[sid] || "").trim();
+    const rowBatch = String(row.owner_batch_id || sectionOwnerBatch[sid] || "").trim();
 
     const rowFlags: RowFlag[] = [];
+    const checked = new Set<string>();
 
     const checkSlot = (day?: string, begin?: string, end?: string) => {
-      const key = makeKey(day, begin, end);
-      if (!key) return;
+      const d = String(day || "").trim().toUpperCase();
+      const st = toMinutes(begin);
+      const en = toMinutes(end);
+      if (!d || st == null || en == null || en <= st) return;
 
-      const owner = blocked[key];
-      if (!owner) return;
-      if (owner.rowId === sid) return; // it's the same GE section, allowed
+      for (const blocked of blockedSlots) {
+        if (String(blocked.campus_id || "").trim().toUpperCase() !== "CMPS0002") continue;
+        if (String(blocked.section_id || "").trim() === sid) continue;
+        if (String(blocked.day || "").trim().toUpperCase() !== d) continue;
 
-      rowFlags.push({
-        type: "GE_BLOCKED_SLOT",
-        severity: "error",
-        message: `This CMPS0002 schedule uses a GE-reserved slot also used by ${owner.label}.`,
-      });
+        const blockedProgram = String(blocked.program || "").trim();
+        const blockedBatch = String(blocked.batch || "").trim();
+        if (rowProgram || rowBatch || blockedProgram || blockedBatch) {
+          if (rowProgram !== blockedProgram || rowBatch !== blockedBatch) continue;
+        }
+
+        const bst = toMinutes(blocked.begin);
+        const ben = toMinutes(blocked.end);
+        if (bst == null || ben == null || ben <= bst) continue;
+        if (en <= bst || st >= ben) continue;
+
+        const key = `${sid}|${blocked.section_id}|${d}|${blocked.begin}|${blocked.end}`;
+        if (checked.has(key)) continue;
+        checked.add(key);
+
+        const ownerLabel = `${blocked.course_code || blocked.course_id || "?"} ${blocked.section_code || ""}`.trim();
+        rowFlags.push({
+          type: "GE_BLOCKED_SLOT",
+          severity: "error",
+          message: `This Laguna schedule overlaps a blocked GE slot used by ${ownerLabel}.`,
+        });
+      }
     };
 
     checkSlot(row.day1, row.begin1, row.end1);
     checkSlot(row.day2, row.begin2, row.end2);
 
-    if (rowFlags.length > 0) {
-      result[sid] = (result[sid] || []).concat(rowFlags);
-    }
+    if (rowFlags.length > 0) result[sid] = rowFlags;
   }
 
   return result;
@@ -4260,6 +4260,9 @@ const inferOmCampusId = useCallback((): string => {
     sectionCourse: {},
     courseTypeOfCourse: {},
     campusNames: {},
+    sectionOwnerProgram: {},
+    sectionOwnerBatch: {},
+    blockedGeCmps2: [],
   });
 
   const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
@@ -5072,6 +5075,9 @@ const inferOmCampusId = useCallback((): string => {
       sectionCourse: (res as any)?.sectionCourse || {},
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
       campusNames: (res as any)?.campusNames || {},
+      sectionOwnerProgram: (res as any)?.sectionOwnerProgram || {},
+      sectionOwnerBatch: (res as any)?.sectionOwnerBatch || {},
+      blockedGeCmps2: Array.isArray((res as any)?.blockedGeCmps2) ? (res as any).blockedGeCmps2 : [],
     });
 
     setBlockedGeCmps2(
@@ -8286,7 +8292,7 @@ const courseCodeToInfo = useMemo(() => {
                             : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
-                        Units vs Preferences
+                        Units Summary
                       </button>
 
                       <button
@@ -8316,7 +8322,7 @@ const courseCodeToInfo = useMemo(() => {
                     </div>
                   </div>
 
-                  {/* Tab 1: Units vs Preferred Units */}
+                  {/* Tab 1: Units Summary */}
                   {summaryTab === "units" && (
                     <div className="border-t px-4 py-4 space-y-4 w-full">
                       <div className="py-1">

@@ -1678,9 +1678,12 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
             # Campus is needed for campus-specific APO deadlines (Manila vs Laguna).
             # Prefer explicit campus_id on the submitted snapshot; fall back to prefix inference.
             "campus_id": (str(d.get("campus_id") or "").strip() or _section_to_campus_id(d.get("section_code", ""))),
+            "owner_program_id": str(d.get("owner_program_id") or "").strip(),
+            "owner_batch_id": str(d.get("owner_batch_id") or "").strip(),
             # NEW: keep both faculty_id and display name so manual edits can persist correctly
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
+            "assignment_metadata": (d.get("asg") or {}).get("assignment_metadata") or None,
             **pair,
             "capacity": cap_value,
             "mode": mode_display,
@@ -3606,6 +3609,8 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "facultyHasPhd": faculty_has_phd,
         "sectionCampus": section_campus,
         "sectionCourse": section_course,
+        "sectionOwnerProgram": {str(r.get("id") or "").strip(): str(r.get("owner_program_id") or "").strip() for r in rows if str(r.get("id") or "").strip()},
+        "sectionOwnerBatch": {str(r.get("id") or "").strip(): str(r.get("owner_batch_id") or "").strip() for r in rows if str(r.get("id") or "").strip()},
         "courseTypeOfCourse": course_type_of_course,
         "blockedGeCmps2": blocked_ge_cmps2,
     }
@@ -5753,6 +5758,17 @@ async def run_auto_assignment(
                 "reason_label": md.get("reason_label") or "",
                 "reason_sentence": md.get("reason_sentence") or "",
             }
+        elif fid:
+            existing_md = r.get("assignment_metadata") if isinstance(r.get("assignment_metadata"), dict) else None
+            if existing_md:
+                r["assignment_metadata"] = {
+                    "assigned_faculty": str(existing_md.get("assigned_faculty") or fname or "").strip(),
+                    "assigned_faculty_id": str(existing_md.get("assigned_faculty_id") or fid or "").strip(),
+                    "reason_label": str(existing_md.get("reason_label") or "").strip(),
+                    "reason_sentence": str(existing_md.get("reason_sentence") or "").strip(),
+                }
+            else:
+                r.pop("assignment_metadata", None)
         else:
             r.pop("assignment_metadata", None)
 
@@ -8550,19 +8566,14 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
         """
-        Owner-scoped blocking:
-        A CMPS0002 GE blocked window only blocks sections that share the same
-        (owner_program_id, owner_batch_id).
+        Owner-scoped Laguna GE blocking:
+        GE sections in CMPS0002 reserve their timeslots for sections that share the same
+        (owner_program_id, owner_batch_id). Any overlapping CMPS0002 section in the same
+        owner scope should avoid those blocked windows.
         """
         sec = sections_by_id.get(sid, {})
         campus = (sec.get("campus_id") or "").strip().upper()
         if campus != "CMPS0002":
-            return False
-
-        cid = (sec.get("course_id") or "").strip()
-        c = (courses.get(cid) or {})
-        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
-        if ttype != "GE":
             return False
 
         owner_key = (
@@ -8577,8 +8588,14 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         blocked_arr = day_map.get(di, [])
 
         st, en = interval
-        for bst, ben, *_rest in blocked_arr:
-            if not (en <= bst or st >= ben):  # overlap
+        for item in blocked_arr:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            bst, ben = item[0], item[1]
+            blocked_sid = str(item[2] or "").strip() if len(item) >= 3 else ""
+            if blocked_sid and blocked_sid == sid:
+                continue
+            if not (en <= bst or st >= ben):
                 return True
         return False
 
@@ -9295,6 +9312,22 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
                 set_fields["assignment_id"] = existing["assignment_id"]
             if existing.get("load_id"):
                 set_fields["load_id"] = existing["load_id"]
+
+            incoming_assignment_metadata = r.get("assignment_metadata")
+            if isinstance(incoming_assignment_metadata, dict) and incoming_assignment_metadata:
+                set_fields["assignment_metadata"] = {
+                    "assigned_faculty": str(incoming_assignment_metadata.get("assigned_faculty") or "").strip(),
+                    "assigned_faculty_id": str(incoming_assignment_metadata.get("assigned_faculty_id") or "").strip(),
+                    "reason_label": str(incoming_assignment_metadata.get("reason_label") or "").strip(),
+                    "reason_sentence": str(incoming_assignment_metadata.get("reason_sentence") or "").strip(),
+                }
+                set_fields["auto_assigned"] = True
+            elif fid_raw:
+                set_fields["assignment_metadata"] = None
+                set_fields["auto_assigned"] = False
+            else:
+                set_fields["assignment_metadata"] = None
+                set_fields["auto_assigned"] = False
 
             await db[COL_ASSIGN].update_one(
                 {"section_id": sid},
