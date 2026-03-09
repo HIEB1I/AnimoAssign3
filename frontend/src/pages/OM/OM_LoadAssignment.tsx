@@ -3605,6 +3605,7 @@ useEffect(() => {
   const [preferredByFaculty, setPreferredByFaculty] = useState<
     Record<string, number>
   >({});
+  const [submittedPrefFacultyIds, setSubmittedPrefFacultyIds] = useState<string[]>([]);
 
   async function runAutoAssign() {
     if (!userId) return;
@@ -4946,6 +4947,11 @@ const inferOmCampusId = useCallback((): string => {
 
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
     setPreferredByFaculty(prefMap);
+    setSubmittedPrefFacultyIds(
+      Array.isArray((res as any)?.submitted_pref_faculty_ids)
+        ? (res as any).submitted_pref_faculty_ids
+        : []
+    );
 
     // hydrate validation context for row flags
     setValidationContext({
@@ -5661,6 +5667,7 @@ async function handleSaveNewLineRow(r: Row) {
     faculty_id: string;
     faculty_name_display: string;
     preferred_units?: number | null;
+    employment_type?: "FT" | "PT" | string;
   };
 
   const facultyOptions = useMemo(() => {
@@ -5941,83 +5948,33 @@ const openChairPlantillaPreview = useCallback(() => {
     };
   }, [planningTermId, termId]);
 
+  type FacultySummaryStatus = "overload" | "underload" | "match" | "on_leave" | "none";
+
   type FacultySummaryRow = {
     facultyId: string;
     facultyName: string;
-    assignedUnits: number;
-    preferredUnits: number | null;
-    diff: number | null;
+    employmentType: "FT" | "PT" | "";
+    isOnLeave: boolean;
+    deloadingUnits: number;
+    preferredTeachingUnits: number | null;
+    assignedTeachingUnits: number;
+    overallUnits: number;
+    status: FacultySummaryStatus;
   };
 
-  const facultySummary: FacultySummaryRow[] = useMemo(() => {
-    const acc: Record<string, FacultySummaryRow> = {};
-
-    for (const r of rows) {
-      if (!r.faculty && !r.faculty_id) continue;
-
-      const key = r.faculty_id || r.faculty || "";
-      if (!key) continue;
-
-      const numericUnits =
-        typeof r.units === "number"
-          ? r.units
-          : parseFloat(String(r.units || "0")) || 0;
-
-      if (!acc[key]) {
-        const meta = r.faculty_id ? facultyById[r.faculty_id] : undefined;
-        const facultyName =
-          r.faculty || meta?.faculty_name_display || r.faculty_id || "—";
-
-        // NEW: first try map from backend, then fallback to meta.preferred_units
-        const prefFromMap = r.faculty_id
-          ? preferredByFaculty[r.faculty_id]
-          : undefined;
-
-        const preferredUnits =
-          typeof prefFromMap === "number"
-            ? prefFromMap
-            : meta && typeof meta.preferred_units === "number"
-            ? meta.preferred_units
-            : null;
-
-        acc[key] = {
-          facultyId: r.faculty_id || "",
-          facultyName,
-          assignedUnits: 0,
-          preferredUnits,
-          diff: null,
-        };
-      }
-
-      acc[key].assignedUnits += numericUnits;
-    }
-
-    // compute diff after accumulating
-    // NOTE: diff is based on TOTAL units (Teaching + Deloading) vs Preferred,
-    // to match the "Load Status (vs Preferred)" column.
-    Object.values(acc).forEach((row) => {
-      if (row.preferredUnits != null) {
-        const deload = row.facultyId
-          ? Number(deloadUnitsByFacultyId[row.facultyId] || 0)
-          : 0;
-        row.diff = (row.assignedUnits + deload) - row.preferredUnits;
-      }
-    });
-
-    return Object.values(acc).sort((a, b) =>
-      a.facultyName.localeCompare(b.facultyName)
-    );
-  }, [rows, facultyById, preferredByFaculty, deloadUnitsByFacultyId]);
-
   type UnitsFilterMode = "all" | "issues" | "match";
-  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "deload" | "leave" | "gap";
-  // Filters are always visible in this view (no toggle)
+  type UnitsSortKey =
+    | "faculty"
+    | "deloading"
+    | "preferred"
+    | "assigned"
+    | "overall"
+    | "status";
+
   const [unitsFilterMode, setUnitsFilterMode] =
     useState<UnitsFilterMode>("all");
-  const [hideNoPrefs, setHideNoPrefs] = useState(false);
 
-  // default sort
-  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
+  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("faculty");
   const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc");
 
   const toggleUnitsSort = (key: UnitsSortKey) => {
@@ -6029,108 +5986,378 @@ const openChairPlantillaPreview = useCallback(() => {
     }
   };
 
+  const submittedPrefFacultySet = useMemo(
+    () => new Set(submittedPrefFacultyIds),
+    [submittedPrefFacultyIds]
+  );
+
+  const assignedUnitsByFacultyId = useMemo(() => {
+    const map: Record<string, number> = {};
+
+    for (const r of rows) {
+      const fid = String(r.faculty_id || "").trim();
+      if (!fid) continue;
+
+      const numericUnits =
+        typeof r.units === "number"
+          ? r.units
+          : parseFloat(String(r.units || "0")) || 0;
+
+      map[fid] = (map[fid] || 0) + numericUnits;
+    }
+
+    return map;
+  }, [rows]);
+
+  const facultySummaryAll: FacultySummaryRow[] = useMemo(() => {
+    const out: FacultySummaryRow[] = [];
+
+    for (const f of facultyList ?? []) {
+      const facultyId = String(f.faculty_id || "").trim();
+      if (!facultyId) continue;
+
+      const employmentTypeRaw = String(f.employment_type || "")
+        .trim()
+        .toUpperCase();
+      const employmentType: "FT" | "PT" | "" =
+        employmentTypeRaw === "FT"
+          ? "FT"
+          : employmentTypeRaw === "PT"
+          ? "PT"
+          : "";
+
+      if (!employmentType) continue;
+
+      const isOnLeave = onLeaveSet.has(facultyId);
+      const hasSubmittedPreference = submittedPrefFacultySet.has(facultyId);
+
+      if (employmentType === "PT" && (!hasSubmittedPreference || isOnLeave)) {
+        continue;
+      }
+
+      const preferredTeachingUnits =
+        hasSubmittedPreference &&
+        preferredByFaculty[facultyId] !== undefined &&
+        preferredByFaculty[facultyId] !== null &&
+        !Number.isNaN(Number(preferredByFaculty[facultyId]))
+          ? Number(preferredByFaculty[facultyId])
+          : null;
+
+      const assignedTeachingUnits = Number(assignedUnitsByFacultyId[facultyId] || 0);
+      const deloadingUnits = Number(deloadUnitsByFacultyId[facultyId] || 0);
+      const overallUnits = assignedTeachingUnits + deloadingUnits;
+
+      let status: FacultySummaryStatus = "none";
+      if (isOnLeave) {
+        status = "on_leave";
+      } else if (preferredTeachingUnits != null) {
+        if (Math.abs(overallUnits - preferredTeachingUnits) <= 1e-6) {
+          status = "match";
+        } else if (overallUnits > preferredTeachingUnits) {
+          status = "overload";
+        } else {
+          status = "underload";
+        }
+      }
+
+      out.push({
+        facultyId,
+        facultyName: f.faculty_name_display || facultyId,
+        employmentType,
+        isOnLeave,
+        deloadingUnits,
+        preferredTeachingUnits,
+        assignedTeachingUnits,
+        overallUnits,
+        status,
+      });
+    }
+
+    return out.sort((a, b) => a.facultyName.localeCompare(b.facultyName));
+  }, [
+    facultyList,
+    onLeaveSet,
+    submittedPrefFacultySet,
+    preferredByFaculty,
+    assignedUnitsByFacultyId,
+    deloadUnitsByFacultyId,
+  ]);
+
   const facultySummaryFiltered: FacultySummaryRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return facultySummary;
+    const rowsBase = !q
+      ? facultySummaryAll
+      : facultySummaryAll.filter((f) => {
+          const hay = [
+            f.facultyName,
+            f.facultyId,
+            f.employmentType,
+            String(f.deloadingUnits),
+            String(f.preferredTeachingUnits ?? ""),
+            String(f.assignedTeachingUnits),
+            String(f.overallUnits),
+            f.status,
+          ]
+            .join(" ")
+            .toLowerCase();
 
-    return facultySummary.filter((f) => {
-      const deloadUnits =
-        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
+          return hay.includes(q);
+        });
 
-      const hay = [
-        f.facultyName,
-        f.facultyId,
-        String(f.assignedUnits ?? ""),
-        String(f.preferredUnits ?? ""),
-        String(f.diff ?? ""),
-        String(deloadUnits ?? ""),
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return hay.includes(q);
+    return rowsBase.filter((f) => {
+      if (unitsFilterMode === "all") return true;
+      if (f.isOnLeave) return false;
+      if (f.preferredTeachingUnits == null) return false;
+      return unitsFilterMode === "match" ? f.status === "match" : f.status !== "match";
     });
-  }, [facultySummary, deloadUnitsByFacultyId, search]);
+  }, [facultySummaryAll, search, unitsFilterMode]);
 
   const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
-    const base = [...facultySummaryFiltered];
-
-    const filtered = base.filter((f) => {
-      const assigned = Number(f.assignedUnits ?? 0);
-      const deload = Number(
-        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
-      );
-      const totalUnits = assigned + deload;
-      const hasPref = f.preferredUnits != null;
-      if (hideNoPrefs && !hasPref) return false;
-
-      if (unitsFilterMode === "issues" || unitsFilterMode === "match") {
-        // Compare TOTAL units (Teaching + Deloading) against preferred.
-        // This must match the Load Status column (vs Preferred).
-        if (f.preferredUnits == null) return false;
-
-        const preferred = Number(f.preferredUnits);
-        const isMatch = Math.abs(totalUnits - preferred) <= 1e-6;
-
-        // "issues" = underloaded or overloaded vs preferred (i.e., not matching)
-        return unitsFilterMode === "match" ? isMatch : !isMatch;
-      }
-      return true;
-    });
-
+    const filtered = [...facultySummaryFiltered];
     const dir = unitsSortDir === "asc" ? 1 : -1;
 
+    const statusRank: Record<FacultySummaryStatus, number> = {
+      overload: 0,
+      underload: 1,
+      match: 2,
+      on_leave: 3,
+      none: 4,
+    };
+
     filtered.sort((a, b) => {
-      const aName = a.facultyName ?? "";
-      const bName = b.facultyName ?? "";
-
-      const aAssigned = Number(a.assignedUnits ?? 0);
-      const bAssigned = Number(b.assignedUnits ?? 0);
-
-      const aPref =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(a.preferredUnits);
-      const bPref =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(b.preferredUnits);
-
-      const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
-      const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
-
-      // Gap is based on TOTAL units vs preferred (same as Load Status).
-      const aGap =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : (aAssigned + aDeload) - Number(a.preferredUnits);
-      const bGap =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : (bAssigned + bDeload) - Number(b.preferredUnits);
-
-      const aLeave = a.facultyId && onLeaveSet.has(a.facultyId) ? 12 : 0;
-      const bLeave = b.facultyId && onLeaveSet.has(b.facultyId) ? 12 : 0;
-
-      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
-      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
-      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-      if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
-      if (unitsSortKey === "leave") return dir * (aLeave - bLeave);
-
-      if (aGap !== bGap) return dir * (aGap - bGap);
-      return aName.localeCompare(bName);
+      if (unitsSortKey === "faculty") {
+        return dir * a.facultyName.localeCompare(b.facultyName);
+      }
+      if (unitsSortKey === "deloading") {
+        return dir * (a.deloadingUnits - b.deloadingUnits);
+      }
+      if (unitsSortKey === "preferred") {
+        const av = a.preferredTeachingUnits == null ? Number.POSITIVE_INFINITY : a.preferredTeachingUnits;
+        const bv = b.preferredTeachingUnits == null ? Number.POSITIVE_INFINITY : b.preferredTeachingUnits;
+        return dir * (av - bv);
+      }
+      if (unitsSortKey === "assigned") {
+        return dir * (a.assignedTeachingUnits - b.assignedTeachingUnits);
+      }
+      if (unitsSortKey === "overall") {
+        return dir * (a.overallUnits - b.overallUnits);
+      }
+      if (unitsSortKey === "status") {
+        return dir * (statusRank[a.status] - statusRank[b.status]);
+      }
+      return a.facultyName.localeCompare(b.facultyName);
     });
 
     return filtered;
-  }, [
-    facultySummaryFiltered,
-    unitsFilterMode,
-    unitsSortKey,
-    unitsSortDir,
-    hideNoPrefs,
-    deloadUnitsByFacultyId,
-  ]);
+  }, [facultySummaryFiltered, unitsSortDir, unitsSortKey]);
+
+  const fullTimeSummaryRows = useMemo(
+    () => facultySummaryView.filter((f) => f.employmentType === "FT"),
+    [facultySummaryView]
+  );
+
+  const partTimeSummaryRows = useMemo(
+    () => facultySummaryView.filter((f) => f.employmentType === "PT"),
+    [facultySummaryView]
+  );
+
+  const fmtUnits = (n: number) => Number(n).toFixed(1).replace(/\.0$/, "");
+
+  const renderUnitsCell = (
+    kind: "assigned" | "deloading" | "overall",
+    row: FacultySummaryRow
+  ) => {
+    if (row.isOnLeave) {
+      return <span className="text-sm text-gray-500">None</span>;
+    }
+
+    const value =
+      kind === "assigned"
+        ? row.assignedTeachingUnits
+        : kind === "deloading"
+        ? row.deloadingUnits
+        : row.overallUnits;
+
+    const tone =
+      kind === "assigned"
+        ? classForTeaching(value)
+        : kind === "deloading"
+        ? classForAdmin(value)
+        : classForTotal(value);
+
+    return <span className={cls("inline-block min-w-[2.5rem] rounded px-2 py-0.5", tone)}>{fmtUnits(value)}</span>;
+  };
+
+  const statusText = (row: FacultySummaryRow) => {
+    if (row.isOnLeave) return "On leave";
+    if (row.status === "overload") return "Overload";
+    if (row.status === "underload") return "Underload";
+    if (row.status === "match") return "Match";
+    return "—";
+  };
+
+  const statusClass = (row: FacultySummaryRow) => {
+    if (row.isOnLeave) return "text-gray-500";
+    if (row.status === "overload") return "text-red-700";
+    if (row.status === "underload") return "text-amber-700";
+    if (row.status === "match") return "text-emerald-700";
+    return "text-gray-400";
+  };
+
+  const renderFacultySummaryTable = (
+    title: string,
+    rowsForTable: FacultySummaryRow[]
+  ) => (
+    <div className="rounded-xl border border-gray-300 bg-white overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm border-collapse">
+          <thead className="bg-white text-gray-900">
+            <tr className="text-[13px] font-semibold">
+              <th className="px-4 py-3 text-left border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("faculty")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Name
+                  {unitsSortKey === "faculty"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("deloading")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Deloading
+                  {unitsSortKey === "deloading"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("preferred")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Preferred Teaching Units
+                  {unitsSortKey === "preferred"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("assigned")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Assigned Teaching Units
+                  {unitsSortKey === "assigned"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("overall")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Overall Units
+                  {unitsSortKey === "overall"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("status")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Status
+                  {unitsSortKey === "status"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {rowsForTable.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-6 text-center text-sm text-gray-500 border border-gray-300"
+                >
+                  No faculty rows found.
+                </td>
+              </tr>
+            ) : (
+              rowsForTable.map((f) => (
+                <tr
+                  key={f.facultyId}
+                  className={cls(
+                    f.isOnLeave ? "bg-gray-100 text-gray-500" : "hover:bg-gray-50"
+                  )}
+                >
+                  <td className="px-4 py-3 border border-gray-300">
+                    <div className={cls("font-medium", f.isOnLeave ? "text-gray-500" : "text-gray-900")}>
+                      {f.facultyName}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {renderUnitsCell("deloading", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {f.isOnLeave ? (
+                      <span className="text-sm text-gray-500">None</span>
+                    ) : f.preferredTeachingUnits != null ? (
+                      fmtUnits(f.preferredTeachingUnits)
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {renderUnitsCell("assigned", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300 font-semibold">
+                    {renderUnitsCell("overall", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    <span className={cls("font-semibold", statusClass(f))}>
+                      {statusText(f)}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -7984,15 +8211,15 @@ const courseCodeToInfo = useMemo(() => {
 
                   {/* Tab 1: Units vs Preferred Units */}
                   {summaryTab === "units" && (
-                    <div className="border-t px-4 pb-4 w-full">
-                      <div className="py-3">
+                    <div className="border-t px-4 py-4 space-y-4 w-full">
+                      <div className="py-1">
                         <div className="flex items-center justify-between">
                           <div className="text-xs font-semibold text-gray-700">Filters</div>
 
                           <div className="text-xs text-gray-500">
-                            Showing{" "}
-                            <span className="font-semibold">{facultySummaryView.length}</span> of{" "}
-                            <span className="font-semibold">{facultySummaryFiltered.length}</span>
+                            Full time: <span className="font-semibold">{fullTimeSummaryRows.length}</span>
+                            {" • "}
+                            Part time: <span className="font-semibold">{partTimeSummaryRows.length}</span>
                           </div>
                         </div>
 
@@ -8027,292 +8254,12 @@ const courseCodeToInfo = useMemo(() => {
                               />
                               Matches preferred units
                             </label>
-
-                            <label className="inline-flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={hideNoPrefs}
-                                onChange={(e) => setHideNoPrefs(e.target.checked)}
-                              />
-                              Hide no preferences
-                            </label>
                           </div>
                         </div>
                       </div>
 
-
-{/* Scroll wrapper */}
-                      <div className="max-h-[360px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
-                        <table className="w-full text-sm table-fixed border-collapse">
-                          {/* Unequal widths: left half (Faculty/Status) wider, right half (numbers) narrower */}
-                          <colgroup>
-                            <col className="w-[40%]" /> {/* Faculty */}
-                            <col className="w-[18%]" /> {/* Status */}
-                            {/* <col className="w-[8%]" />  Leaves */}
-                            <col className="w-[10%]" /> {/* Teaching */}
-                            <col className="w-[10%]" /> {/* Preferred */}
-                            <col className="w-[10%]" /> {/* Deloading */}
-                            <col className="w-[12%]" /> {/* Total */}
-                          </colgroup>
-
-                          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
-                            <tr className="whitespace-nowrap text-[13px] font-semibold">
-                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("faculty")}
-                                  className="inline-flex items-center gap-1 hover:underline"
-                                >
-                                  Faculty{" "}
-                                  {unitsSortKey === "faculty"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
-                                <span className="whitespace-nowrap">
-                                  Load Status <span className="text-[11px] font-medium text-gray-500">(vs Preferred)</span>
-                                </span>
-                              </th>
-                              
-                              {/* <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("leave")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Leave units (credited or counted units from leaves)"
-                                >
-                                  Leaves{" "}
-                                  {unitsSortKey === "leave"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th> */}
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("assigned")} // keep existing key
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Teaching units from scheduled assignments (classes only)"
-                                >
-                                  Teaching Units{" "}
-                                  {unitsSortKey === "assigned"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("preferred")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Preferred/target units submitted by faculty"
-                                >
-                                  Preferred Units{" "}
-                                  {unitsSortKey === "preferred"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("deload")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Deloading units credited from faculty deloading rows"
-                                >
-                                  Deloading Units{" "}
-                                  {unitsSortKey === "deload"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <div className="leading-tight">
-                                  <div>Total Units</div>
-                                  <div className="text-[11px] font-medium text-gray-500">
-                                    (Teaching + Deloading)
-                                  </div>
-                                </div>
-                              </th>
-                            </tr>
-                          </thead>
-
-                          <tbody>
-                            {facultySummary.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={6}
-                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
-                                >
-                                  No faculty have assignments yet for this term.
-                                </td>
-                              </tr>
-                            ) : facultySummaryView.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={6}
-                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
-                                >
-                                  No matching faculty rows.
-                                </td>
-                              </tr>
-                            ) : null}
-
-                            {facultySummaryView.map((f) => {
-                              const hasPref = f.preferredUnits != null;
-
-                              // const isOnLeave = !!(f.facultyId && onLeaveSet.has(f.facultyId));
-                              // const leaveUnits = isOnLeave ? 12 : 0;
-
-                              const teachingUnits = Number(f.assignedUnits ?? 0);
-                              const deloadUnits = Number(
-                                (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
-                              );
-                              // const totalUnits = teachingUnits + deloadUnits + leaveUnits;
-                              const totalUnits = teachingUnits + deloadUnits
-                              
-                              const teachTone = classForTeaching(teachingUnits);
-                              const adminTone = classForAdmin(deloadUnits);
-                              const totalTone = classForTotal(totalUnits);
-
-                              const diff = hasPref ? totalUnits - Number(f.preferredUnits) : null;
-
-                              const fmt = (n: number) => Number(n).toFixed(1).replace(/\.0$/, "");
-
-                              return (
-                                <tr key={f.facultyId || f.facultyName} className="hover:bg-gray-50">
-                                  <td className="px-3 py-2 align-middle border border-gray-300">
-                                    <div className="font-medium text-gray-900">{f.facultyName}</div>
-                                  </td>
-
-                                  {/* old pill status */}
-                                  {/* <td className="px-3 py-2 align-middle border border-gray-300">
-                                  {hasPref && diff != null ? (
-                                    <span
-                                      className={cls(
-                                        "inline-flex items-stretch overflow-hidden rounded-md border text-[11px] font-semibold",
-                                        diff > 0
-                                          ? "border-red-200"
-                                          : diff < 0
-                                          ? "border-amber-200"
-                                          : "border-emerald-200"
-                                      )}
-                                    >
-                                      <span
-                                        className={cls(
-                                          "px-2 py-0.5",
-                                          diff > 0
-                                            ? "bg-red-50 text-red-700"
-                                            : diff < 0
-                                            ? "bg-amber-50 text-amber-700"
-                                            : "bg-emerald-50 text-emerald-700"
-                                        )}
-                                      >
-                                        {diff > 0 ? "OVER" : diff < 0 ? "UNDER" : "MATCH"}
-                                      </span>
-
-                                      <span className="px-2 py-0.5 bg-white text-gray-900 tabular-nums">
-                                        {diff === 0 ? "0" : Math.abs(diff)}
-                                      </span>
-
-                                      <span className="px-2 py-0.5 bg-white text-gray-500 font-medium">
-                                        units
-                                      </span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-xs text-gray-400">—</span>
-                                  )}
-                                </td> */}
-                                  
-                                  <td
-                                    className="px-3 py-2 text-left align-middle border border-gray-300 tabular-nums"
-                                    title={
-                                      hasPref && diff != null
-                                        ? diff === 0
-                                          ? "Match: Total equals Preferred"
-                                          : diff > 0
-                                          ? `Over: Total is ${diff} unit(s) above Preferred`
-                                          : `Under: Total is ${Math.abs(diff)} unit(s) below Preferred`
-                                        : ""
-                                    }
-                                  >
-                                    {hasPref && diff != null ? (
-                                      <span
-                                        className={cls(
-                                          "font-semibold",
-                                          diff === 0
-                                            ? "text-emerald-700"
-                                            : diff > 0
-                                            ? "text-red-700"
-                                            : "text-amber-700"
-                                        )}
-                                      >
-                                        {diff > 0 ? `+${diff}` : `${diff}`}
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs text-gray-400">—</span>
-                                    )}
-                                  </td>
-
-                                {/* <td className="px-3 py-2 text-center align-middle border border-gray-300 tabular-nums">
-                                  {leaveUnits > 0 ? fmt(leaveUnits) : "0"}
-                                </td> */}
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", teachTone)}>
-                                    {fmt(teachingUnits)}
-                                  </td>
-
-                                  <td className="px-3 py-2 text-center align-middle border border-gray-300">
-                                    {hasPref ? fmt(Number(f.preferredUnits)) : "—"}
-                                  </td>
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", adminTone)}>
-                                    {fmt(deloadUnits)}
-                                  </td>
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
-                                    {fmt(totalUnits)}
-                                  </td>
-
-                                  {/* <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
-                                  <span className="whitespace-nowrap">
-                                    {fmt(totalUnits)}
-                                    {(deloadUnits > 0 || teachingUnits > 0) && (
-                                      <span
-                                      className={cls(
-                                        "ml-2 font-medium",
-                                        totalUnits === 12 || totalUnits > 12 || totalUnits === 0
-                                          ? "text-white/90"
-                                          : "text-gray-600"
-                                      )}
-                                    >
-                                      ({fmt(teachingUnits)} + {fmt(deloadUnits)})
-                                    </span>
-                                    )}
-                                  </span>
-                                </td> */}
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                      {renderFacultySummaryTable("Full Time", fullTimeSummaryRows)}
+                      {renderFacultySummaryTable("Part Time", partTimeSummaryRows)}
                     </div>
                   )}
 
