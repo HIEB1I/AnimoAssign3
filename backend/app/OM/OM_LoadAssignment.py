@@ -2904,37 +2904,9 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            # Only include faculty under the required department.
             "$match": {
                 "is_archived": {"$ne": True},
                 "department_id": "DEPT0001",
-            }
-        },
-        # Exclude faculty who are currently on an approved leave.
-        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
-        {
-            "$lookup": {
-                "from": COL_LEAVES,
-                "let": {"fid": "$faculty_id"},
-                "pipeline": [
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$and": [
-                                    {"$eq": ["$faculty_id", "$$fid"]},
-                                    {"$eq": ["$approval_status", "APPROVED"]},
-                                ]
-                            }
-                        }
-                    },
-                    {"$project": {"_id": 0, "faculty_id": 1}},
-                ],
-                "as": "approved_leaves",
-            }
-        },
-        {
-            "$match": {
-                "approved_leaves.0": {"$exists": False}
             }
         },
         {
@@ -2949,12 +2921,12 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$unwind": "$user"
         },
         {
-            "$unset": "approved_leaves"
-        },
-        {
             "$set": {
                 "faculty_name_display": {
                     "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                },
+                "employment_type": {
+                    "$toUpper": {"$ifNull": ["$employment_type", ""]}
                 }
             }
         },
@@ -2962,7 +2934,8 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$project": {
                 "_id": 0,
                 "faculty_id": 1,
-                "faculty_name_display": 1
+                "faculty_name_display": 1,
+                "employment_type": 1,
             }
         },
         {
@@ -3369,15 +3342,19 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
             faculty_allowed_modes[fid] = [mode_str]
 
 
-    # Build preferred units map
+    # Build preferred units map for the summary using ONLY submitted preferences
+    # for the resolved planning/current term (do not use fallback old-term prefs here).
+    strict_submitted_prefs = getattr(ctx, "submitted_prefs_by_faculty", None) or {}
     preferred_units_by_faculty = {}
-    for fid, pref in fac_prefs.items():
+    for fid, pref in strict_submitted_prefs.items():
         val = pref.get("preferred_units") or pref.get("load_units")
         try:
-            if val:
+            if val is not None:
                 preferred_units_by_faculty[fid] = int(val)
         except:
             continue
+
+    submitted_pref_faculty_ids = sorted(list(strict_submitted_prefs.keys()))
 
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
@@ -3619,6 +3596,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "om_submit_deadline_passed": bool(om_submit_deadline_passed),
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
+        "submitted_pref_faculty_ids": submitted_pref_faculty_ids,
         "on_leave_faculty_ids": on_leave_faculty_ids,
         "courseToKacs": course_to_kacs_payload,
         "facultyToKacs": faculty_to_kacs,
@@ -6044,9 +6022,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "mode": 1,
         },
     ).to_list(None)
-    prefs_by_faculty = {
+    submitted_prefs_by_faculty = {
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
+    prefs_by_faculty = dict(submitted_prefs_by_faculty)
 
     # # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
     # print("DEBUG-PREF-SUMMARY: ============================")
@@ -6259,6 +6238,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
     ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
+    ctx.submitted_prefs_by_faculty = submitted_prefs_by_faculty  # type: ignore[attr-defined]
     ctx.campus_blocked = campus_blocked
     ctx.current_assigned_units = current_assigned_units
     print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
