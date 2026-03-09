@@ -3741,27 +3741,42 @@ useEffect(() => {
       console.log("DEBUG from run:", debug);
       console.log("Preferred map:", prefMap);
 
-      // Preserve already-finalized rows: auto-assign should not "move" them or clear their RFC indicators
-      const existingFinalized = new Map<string, Row>(
-        rows.filter((rr) => !!rr.finalized).map((rr) => [rr.id, rr])
+      // Preserve rows that must never be altered/removed by auto-assign.
+      // This includes:
+      //  - finalized rows (approved/finalized schedule state), and
+      //  - Faculty Service display-only rows that merely share table space with load assignment.
+      const preservedRows = new Map<string, Row>(
+        rows
+          .filter(
+            (rr) =>
+              !!rr.finalized ||
+              !!(rr as any).faculty_service_display_only ||
+              !!(rr as any).synced_from_faculty_service
+          )
+          .map((rr) => [rr.id, rr])
       );
 
       let nextRows: Row[] = Array.isArray(res?.rows) ? (res.rows as Row[]) : [];
-      if (existingFinalized.size) {
+      if (preservedRows.size) {
         const seen = new Set<string>();
         nextRows = nextRows.map((nr) => {
           const id = String((nr as any)?.id || "");
-          const fr = existingFinalized.get(id);
-          if (fr) {
+          const preserved = preservedRows.get(id);
+          if (preserved) {
             seen.add(id);
-            // Prefer the existing finalized row to avoid overwriting faculty/times/status
-            return { ...(nr as any), ...(fr as any), finalized: true } as Row;
+            // Prefer the existing preserved row to avoid overwriting/removing
+            // finalized rows and Faculty Service display-only rows.
+            return {
+              ...(nr as any),
+              ...(preserved as any),
+              finalized: !!(preserved as any).finalized,
+            } as Row;
           }
           return nr;
         });
-        // If backend did not return a finalized row, keep it in the table
-        for (const [id, fr] of existingFinalized.entries()) {
-          if (!seen.has(id)) nextRows.unshift(fr);
+        // If backend did not return a preserved row, keep it in the table.
+        for (const [id, preserved] of preservedRows.entries()) {
+          if (!seen.has(id)) nextRows.unshift(preserved);
         }
       }
 
@@ -4706,6 +4721,9 @@ const inferOmCampusId = useCallback((): string => {
 
   // Remove UI-only fields before persisting rows to the database.
   // (e.g., `selected` comes from checkbox selection and must never be stored.)
+  const isFacultyServiceDisplayOnlyRow = (r: Row | any): boolean =>
+    Boolean((r as any)?.faculty_service_display_only || (r as any)?.synced_from_faculty_service);
+
   const stripUiFieldsForPersist = (r: Row): Row => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { selected, is_new_line, __local_only, ...rest } = (r as any) || {};
@@ -4964,6 +4982,7 @@ const inferOmCampusId = useCallback((): string => {
           (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
         return fid ? ({ ...r, faculty_id: fid } as Row) : r;
       })
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
       .filter((r) => !!(r.faculty_id || "").trim())
       .map(stripUiFieldsForPersist);
 
@@ -4983,11 +5002,14 @@ const inferOmCampusId = useCallback((): string => {
     // IMPORTANT: normalize faculty_id for *all* rows before saving.
     // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
     // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
-    const normalizedAllRows: Row[] = rows.map((r) => {
-      const fid =
-        (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
-      return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-    }).map(stripUiFieldsForPersist);
+    const normalizedAllRows: Row[] = rows
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
+      .map((r) => {
+        const fid =
+          (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
+        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+      })
+      .map(stripUiFieldsForPersist);
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
@@ -5023,6 +5045,16 @@ const inferOmCampusId = useCallback((): string => {
     // drafts disappear from the grid.
     const localNewLineDrafts: Row[] = (rows || []).filter(
       (rr) => !!(rr as any)?.__local_only
+    );
+
+    // Preserve Faculty Service rows that are display-only inside the OM grid.
+    // These rows are sourced from Faculty Service and are intentionally not
+    // persisted by the load-assignment draft save. If the backend refresh only
+    // returns regular load rows, re-merge the existing Faculty Service rows so
+    // they remain visible in the grid and in the plantilla preview/export after
+    // Save Draft.
+    const facultyServiceDisplayRows: Row[] = (rows || []).filter((rr) =>
+      isFacultyServiceDisplayOnlyRow(rr)
     );
 
     // Preserve current remarks drafts for client-only rows.
@@ -5111,11 +5143,46 @@ const inferOmCampusId = useCallback((): string => {
       begin2: normalizeServerTimeToHHMM(r?.begin2),
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
-    // Merge server rows with any client-only "Add new line" drafts that are still unsaved.
-    const serverIds = new Set(normalizedRows.map((x) => String((x as any)?.id)));
+
+    const preservedFacultyServiceById = new Map(
+      facultyServiceDisplayRows.map((rr) => [String((rr as any)?.id || ""), rr] as const)
+    );
+
+    const normalizedRowsWithFacultyService: Row[] = normalizedRows.map((r) => {
+      const id = String((r as any)?.id || "");
+      const preserved = preservedFacultyServiceById.get(id);
+      if (!preserved) return r;
+      return {
+        ...r,
+        ...preserved,
+        // Always reset transient checkbox state on refresh, even for preserved rows.
+        selected: false,
+        // Keep server-normalized times if the backend returned this same row.
+        begin1: normalizeServerTimeToHHMM((r as any)?.begin1 ?? (preserved as any)?.begin1),
+        end1: normalizeServerTimeToHHMM((r as any)?.end1 ?? (preserved as any)?.end1),
+        begin2: normalizeServerTimeToHHMM((r as any)?.begin2 ?? (preserved as any)?.begin2),
+        end2: normalizeServerTimeToHHMM((r as any)?.end2 ?? (preserved as any)?.end2),
+        faculty_service_display_only:
+          !!(r as any)?.faculty_service_display_only ||
+          !!(preserved as any)?.faculty_service_display_only,
+        synced_from_faculty_service:
+          !!(r as any)?.synced_from_faculty_service ||
+          !!(preserved as any)?.synced_from_faculty_service,
+      } as Row;
+    });
+
+    // Merge server rows with any client-only "Add new line" drafts that are still unsaved,
+    // then append preserved Faculty Service display rows that are not part of the server
+    // payload returned by the draft refresh.
+    const serverIds = new Set(
+      normalizedRowsWithFacultyService.map((x) => String((x as any)?.id))
+    );
     const mergedRows: Row[] = [
-      ...normalizedRows,
+      ...normalizedRowsWithFacultyService,
       ...localNewLineDrafts.filter((x) => !serverIds.has(String((x as any)?.id))),
+      ...facultyServiceDisplayRows.filter(
+        (x) => !serverIds.has(String((x as any)?.id))
+      ),
     ];
     setRows(mergedRows);
 
@@ -5338,7 +5405,7 @@ const handleApplyPendingDrafts = useCallback(
     try {
       const res = await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "approve"
       );
       await notifyChairLoadRecommendation(userId, {
@@ -5559,7 +5626,7 @@ if (!!(r as any).is_new_line) {
     try {
       await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "save"
       );
       await loadFromServer(); // pull fresh rows from DB
@@ -7589,7 +7656,8 @@ const courseCodeToInfo = useMemo(() => {
                           const fromFacultyService = !!(r as any)
                             .synced_from_faculty_service;
                           const isLockedByApoDeadline = isCampusDeadlinePassed(String((r as any)?.campus_id || ""));
-                          const isLocked = isArchiveView || fromFacultyService || isLockedByApoDeadline;
+                          const isFacultyServiceDisplayOnly = !!(r as any).faculty_service_display_only || fromFacultyService;
+                          const isLocked = isArchiveView || isFacultyServiceDisplayOnly || isLockedByApoDeadline;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
                           const hasDraft = Boolean((r as any).has_pending_override);
@@ -7611,8 +7679,8 @@ const courseCodeToInfo = useMemo(() => {
                               className={cls(
                                 "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
                                 isLocked
-                                  ? fromFacultyService
-                                    ? "bg-orange-50 hover:bg-orange-50"
+                                  ? isFacultyServiceDisplayOnly
+                                    ? "bg-yellow-50 hover:bg-yellow-50"
                                     : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                   : isPastDeadlineRow
                                   ? hasDraft
@@ -7989,7 +8057,7 @@ const courseCodeToInfo = useMemo(() => {
                                 {isRunning && (
                                   <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                     {/* New-line rows: show Save + Delete only until saved. */}
-                                    {!fromFacultyService && !!(r as any).is_new_line ? (
+                                    {!isFacultyServiceDisplayOnly && !!(r as any).is_new_line ? (
                                       <>
                                         <button
                                           type="button"
@@ -8014,7 +8082,8 @@ const courseCodeToInfo = useMemo(() => {
                                       </>
                                     ) : (
                                       <>
-                                        {!fromFacultyService && (
+
+                                        {!isFacultyServiceDisplayOnly && (
                                           <button
                                             className={cls(
                                               "relative hover:brightness-110",
@@ -8041,23 +8110,25 @@ const courseCodeToInfo = useMemo(() => {
                                           </button>
                                         )}
 
-                                        <button
-                                          className="relative hover:brightness-110"
-                                          title={
-                                            copiedRowId === r.id
-                                              ? "Copied!"
-                                              : "Copy"
-                                          }
-                                          onClick={() => handleCopyRow(r)}
-                                        >
-                                          {copiedRowId === r.id ? (
-                                            <span className="text-xs font-semibold text-emerald-700">
-                                              ✓
-                                            </span>
-                                          ) : (
-                                            <Copy className="h-4 w-4" />
-                                          )}
-                                        </button>
+                                        {!isFacultyServiceDisplayOnly && (
+                                          <button
+                                            className="relative hover:brightness-110"
+                                            title={
+                                              copiedRowId === r.id
+                                                ? "Copied!"
+                                                : "Copy"
+                                            }
+                                            onClick={() => handleCopyRow(r)}
+                                          >
+                                            {copiedRowId === r.id ? (
+                                              <span className="text-xs font-semibold text-emerald-700">
+                                                ✓
+                                              </span>
+                                            ) : (
+                                              <Copy className="h-4 w-4" />
+                                            )}
+                                          </button>
+                                        )}
                                       </>
                                     )}
                                   </div>

@@ -446,12 +446,6 @@ useEffect(() => {
     setPrefLoading(false);
   };
 
-  const fmtDate = (iso?: string) => {
-    if (!iso) return "N/A";
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? "N/A" : d.toLocaleDateString();
-  };
-
   const headerLabel = activeTerm?.label || "—";
 
   const shownLabel =

@@ -1446,6 +1446,138 @@ async def _notify_apo_room_allocation_ready(
             email_from_user_id=om_user_id,
         )
 
+async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[Dict[str, Any]]:
+    """Build read-only OM rows from approved/responded Faculty Service requests.
+
+    Requirement:
+      - Approved CHAIR_FacultyService requests must appear in OM Load Assignment
+        as NEW display-only rows.
+      - They must auto-reflect later edits made on the CHAIR side.
+
+    We intentionally read directly from `faculty_service` instead of relying solely
+    on `faculty_assignments`/`section_schedules` mutations so the OM table always
+    reflects the latest accepted request payload.
+    """
+
+    dept_ids = await _loadassignment_department_ids(user_id, db)
+    if not dept_ids:
+        return []
+
+    dept_names: List[str] = []
+    for did in dept_ids:
+        try:
+            name = (await _dept_name_by_id(did, db) or '').strip()
+        except Exception:
+            name = ''
+        if name and name not in dept_names:
+            dept_names.append(name)
+
+    if not dept_names:
+        return []
+
+    # Active OM rows only; archived terms should not be polluted by live faculty-service rows.
+    term_id = str(term_id or '').strip()
+
+    q: Dict[str, Any] = {
+        'status': 'responded',
+        'from_department': {'$in': dept_names},
+    }
+    fs_docs = await db['faculty_service'].find(q, {'_id': 0}).sort([('updated_at', -1), ('created_at', -1)]).to_list(None)
+    if not fs_docs:
+        return []
+
+    # Keep only rows that still belong to the requested term when we can prove it.
+    section_ids = sorted({str(d.get('section_id') or '').strip() for d in fs_docs if str(d.get('section_id') or '').strip()})
+    valid_section_ids: set[str] = set()
+    section_code_by_id: Dict[str, str] = {}
+    checked_term_membership = False
+    if section_ids and term_id:
+        checked_term_membership = True
+        try:
+            sec_docs = await db[COL_SECTIONS_SUBMITTED].find(
+                {'term_id': term_id, 'section_id': {'$in': section_ids}},
+                {'_id': 0, 'section_id': 1, 'section_code': 1, 'enrollment_cap': 1, 'campus_id': 1},
+            ).to_list(None)
+            for s in sec_docs or []:
+                sid = str(s.get('section_id') or '').strip()
+                if sid:
+                    valid_section_ids.add(sid)
+                    section_code_by_id[sid] = str(s.get('section_code') or '').strip()
+        except Exception:
+            checked_term_membership = False
+            valid_section_ids = set()
+            section_code_by_id = {}
+
+    rows: List[Dict[str, Any]] = []
+    seen_fs_ids: set[str] = set()
+
+    for d in fs_docs:
+        fs_id = str(d.get('fs_id') or '').strip()
+        if not fs_id or fs_id in seen_fs_ids:
+            continue
+        seen_fs_ids.add(fs_id)
+
+        sid = str(d.get('section_id') or '').strip()
+        if checked_term_membership:
+            if not sid or sid not in valid_section_ids:
+                continue
+
+        faculty = (d.get('faculty') or {}) if isinstance(d.get('faculty'), dict) else {}
+        faculty_name = (
+            f"{str(faculty.get('last_name') or '').strip()}, {str(faculty.get('first_name') or '').strip()}"
+            .strip(', ')
+        )
+
+        units_val = d.get('units', '')
+        if units_val is None:
+            units_val = ''
+
+        sec_code = str(d.get('section') or '').strip() or section_code_by_id.get(sid, '')
+
+        # Best-effort campus resolution so deadline labels / other campus-aware UI stay stable.
+        campus_id = ''
+        if sid:
+            try:
+                ss = await db[COL_SECTIONS_SUBMITTED].find_one(
+                    {'term_id': term_id, 'section_id': sid},
+                    {'_id': 0, 'campus_id': 1},
+                ) or {}
+                campus_id = str(ss.get('campus_id') or '').strip()
+            except Exception:
+                campus_id = ''
+
+        rows.append({
+            'id': f'FSR::{fs_id}',
+            'section_id': sid,
+            'fs_id': fs_id,
+            'course_id': '',
+            'course': str(d.get('course_code') or '').strip(),
+            'title': str(d.get('course_title') or '').strip(),
+            'units': units_val,
+            'section': sec_code,
+            'faculty_id': str(faculty.get('faculty_id') or '').strip(),
+            'faculty': faculty_name,
+            'day1': str(d.get('day1') or '').strip(),
+            'begin1': _fmt_time(str(d.get('begin1') or '').strip()),
+            'end1': _fmt_time(str(d.get('end1') or '').strip()),
+            'room1': '',
+            'day2': str(d.get('day2') or '').strip(),
+            'begin2': _fmt_time(str(d.get('begin2') or '').strip()),
+            'end2': _fmt_time(str(d.get('end2') or '').strip()),
+            'room2': '',
+            'capacity': '',
+            'mode': '',
+            'remarks': str(d.get('remarks') or '').strip(),
+            'status': 'Approved',
+            'editable': False,
+            'campus_id': campus_id,
+            'synced_from_faculty_service': True,
+            'faculty_service_display_only': True,
+        })
+
+    return rows
+
+
 async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = False) -> Dict[str, Any]:
     dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
@@ -3146,6 +3278,14 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
 
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db, archived_view=is_archived_view)
     rows = base["rows"]
+
+    # Overlay approved Faculty Service requests as separate read-only rows.
+    # Active term only: archived views must stay historical and unchanged.
+    if not is_archived_view:
+        try:
+            rows = list(rows or []) + await _faculty_service_overlay_rows(user_id, active["term_id"], db)
+        except Exception:
+            rows = list(rows or [])
 
     # `selected` is a UI-only flag used by the OM table checkboxes.
     # It must NEVER be treated as persisted data (clean-restores can reintroduce
@@ -5003,6 +5143,14 @@ async def run_auto_assignment(
 
     base = await _fetch_rows(user_id, term_id=term_id, db=db)
     rows = [dict(r) for r in base["rows"]]
+
+    # Keep Faculty Service display-only rows in the auto-assign response.
+    # They are not part of the load-assignment algorithm and should continue
+    # to share the OM table strictly for display, even after auto-assign runs.
+    try:
+        rows.extend(await _faculty_service_overlay_rows(user_id, term_id, db))
+    except Exception:
+        pass
 
     rows_by_id: dict[str, dict] = {
         str(r.get("id")): r for r in rows if r.get("id")
@@ -10903,4 +11051,3 @@ async def compute_load_recommendations(
     )
 
 
-# ================== END NEW AUTO-ASSIGNMENT ENGINE ==================
