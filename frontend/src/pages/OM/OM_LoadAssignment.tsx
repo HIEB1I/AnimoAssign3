@@ -103,7 +103,8 @@ export type RowFlagType =
   | "DAY_MISMATCH"
   | "TIME_MISMATCH"
   | "GS_NO_PHD"
-  | "GE_BLOCKED_SLOT";
+  | "GE_BLOCKED_SLOT"
+  | "CROSS_CAMPUS_GAP";
 
 export interface RowFlag {
   type: RowFlagType;
@@ -1789,6 +1790,108 @@ function checkGeBlockedSlots(
   return result;
 }
 
+function _rowCampusId(row: Row, ctx: ValidationContext): string {
+  return (
+    String(row.campus_id || "").trim().toUpperCase() ||
+    String((ctx.sectionCampus || {})[row.id] || "").trim().toUpperCase()
+  );
+}
+
+function _rowCampusLabel(row: Row, ctx: ValidationContext): string {
+  const cid = _rowCampusId(row, ctx);
+  return String((ctx.campusNames || {})[cid] || cid || "Unknown campus");
+}
+
+function _hhmmToMinutes(value?: string): number | null {
+  const s = String(value || "").trim();
+  if (!/^\d{3,4}$/.test(s)) return null;
+  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
+  const mm = s.slice(-2);
+  const h = Number(hh);
+  const m = Number(mm);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function checkCrossCampusGaps(rows: Row[], ctx: ValidationContext): RowFlagsById {
+  const result: RowFlagsById = {};
+  const minGapMinutes = 180;
+
+  type Slot = {
+    row: Row;
+    day: string;
+    begin: number;
+    end: number;
+    campusId: string;
+    campusLabel: string;
+  };
+
+  const byFacultyDay: Record<string, Slot[]> = {};
+
+  for (const row of rows) {
+    const fid = String(row.faculty_id || "").trim();
+    if (!fid) continue;
+
+    const campusId = _rowCampusId(row, ctx);
+    if (!campusId) continue;
+    const campusLabel = _rowCampusLabel(row, ctx);
+
+    const slots = [
+      { day: row.day1, begin: row.begin1, end: row.end1 },
+      { day: row.day2, begin: row.begin2, end: row.end2 },
+    ];
+
+    for (const slot of slots) {
+      const day = String(slot.day || "").trim().toUpperCase();
+      const begin = _hhmmToMinutes(slot.begin);
+      const end = _hhmmToMinutes(slot.end);
+      if (!day || begin == null || end == null || end <= begin) continue;
+      const key = `${fid}|${day}`;
+      (byFacultyDay[key] ||= []).push({ row, day, begin, end, campusId, campusLabel });
+    }
+  }
+
+  for (const slots of Object.values(byFacultyDay)) {
+    slots.sort((a, b) => a.begin - b.begin);
+    for (let i = 0; i < slots.length; i += 1) {
+      for (let j = i + 1; j < slots.length; j += 1) {
+        const left = slots[i];
+        const right = slots[j];
+        if (left.campusId === right.campusId) continue;
+
+        let gapMinutes: number;
+        if (left.end <= right.begin) {
+          gapMinutes = right.begin - left.end;
+        } else if (right.end <= left.begin) {
+          gapMinutes = left.begin - right.end;
+        } else {
+          gapMinutes = -1;
+        }
+
+        if (gapMinutes >= minGapMinutes) continue;
+
+        const message =
+          gapMinutes < 0
+            ? `Cross-campus conflict: faculty has overlapping ${left.campusLabel} and ${right.campusLabel} classes on ${left.day}.`
+            : `Cross-campus conflict: faculty has ${left.campusLabel} and ${right.campusLabel} classes on ${left.day} with only ${gapMinutes} minutes between them. At least 180 minutes is required.`;
+
+        for (const rowId of [left.row.id, right.row.id]) {
+          if (!result[rowId]) result[rowId] = [];
+          if (!result[rowId].some((flag) => flag.type === "CROSS_CAMPUS_GAP" && flag.message === message)) {
+            result[rowId].push({
+              type: "CROSS_CAMPUS_GAP",
+              severity: "error",
+              message,
+            });
+          }
+        }
+      }
+    }
+  }
+
+  return result;
+}
+
 function checkDoubleBookings(rows: Row[]): RowFlagsById {
   const result: RowFlagsById = {};
 
@@ -1881,12 +1984,14 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
     flags[rowId].push(...conflictFlags);
   }
 
-  for (const [rowId, conflictFlags] of Object.entries(doubleBookedFlags)) {
+  // 4) cross-row: same faculty cross-campus gaps below 3 hours
+  const crossCampusFlags = checkCrossCampusGaps(rows, ctx);
+  for (const [rowId, conflictFlags] of Object.entries(crossCampusFlags)) {
     if (!flags[rowId]) flags[rowId] = [];
     flags[rowId].push(...conflictFlags);
   }
 
-  // 4) cross-row: GE @ CMPS0002 blocked slots
+  // 5) cross-row: GE @ CMPS0002 blocked slots
   const geFlags = checkGeBlockedSlots(rows, ctx);
   for (const [rowId, geRowFlags] of Object.entries(geFlags)) {
     if (!flags[rowId]) flags[rowId] = [];
@@ -4154,6 +4259,7 @@ const inferOmCampusId = useCallback((): string => {
     sectionCampus: {},
     sectionCourse: {},
     courseTypeOfCourse: {},
+    campusNames: {},
   });
 
   const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
@@ -4965,6 +5071,7 @@ const inferOmCampusId = useCallback((): string => {
       sectionCampus: (res as any)?.sectionCampus || {},
       sectionCourse: (res as any)?.sectionCourse || {},
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
+      campusNames: (res as any)?.campusNames || {},
     });
 
     setBlockedGeCmps2(
