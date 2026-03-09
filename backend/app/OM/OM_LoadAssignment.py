@@ -2904,37 +2904,9 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            # Only include faculty under the required department.
             "$match": {
                 "is_archived": {"$ne": True},
                 "department_id": "DEPT0001",
-            }
-        },
-        # Exclude faculty who are currently on an approved leave.
-        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
-        {
-            "$lookup": {
-                "from": COL_LEAVES,
-                "let": {"fid": "$faculty_id"},
-                "pipeline": [
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$and": [
-                                    {"$eq": ["$faculty_id", "$$fid"]},
-                                    {"$eq": ["$approval_status", "APPROVED"]},
-                                ]
-                            }
-                        }
-                    },
-                    {"$project": {"_id": 0, "faculty_id": 1}},
-                ],
-                "as": "approved_leaves",
-            }
-        },
-        {
-            "$match": {
-                "approved_leaves.0": {"$exists": False}
             }
         },
         {
@@ -2949,12 +2921,12 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$unwind": "$user"
         },
         {
-            "$unset": "approved_leaves"
-        },
-        {
             "$set": {
                 "faculty_name_display": {
                     "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                },
+                "employment_type": {
+                    "$toUpper": {"$ifNull": ["$employment_type", ""]}
                 }
             }
         },
@@ -2962,7 +2934,8 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$project": {
                 "_id": 0,
                 "faculty_id": 1,
-                "faculty_name_display": 1
+                "faculty_name_display": 1,
+                "employment_type": 1,
             }
         },
         {
@@ -3369,15 +3342,19 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
             faculty_allowed_modes[fid] = [mode_str]
 
 
-    # Build preferred units map
+    # Build preferred units map for the summary using ONLY submitted preferences
+    # for the resolved planning/current term (do not use fallback old-term prefs here).
+    strict_submitted_prefs = getattr(ctx, "submitted_prefs_by_faculty", None) or {}
     preferred_units_by_faculty = {}
-    for fid, pref in fac_prefs.items():
+    for fid, pref in strict_submitted_prefs.items():
         val = pref.get("preferred_units") or pref.get("load_units")
         try:
-            if val:
+            if val is not None:
                 preferred_units_by_faculty[fid] = int(val)
         except:
             continue
+
+    submitted_pref_faculty_ids = sorted(list(strict_submitted_prefs.keys()))
 
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
@@ -3619,6 +3596,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "om_submit_deadline_passed": bool(om_submit_deadline_passed),
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
+        "submitted_pref_faculty_ids": submitted_pref_faculty_ids,
         "on_leave_faculty_ids": on_leave_faculty_ids,
         "courseToKacs": course_to_kacs_payload,
         "facultyToKacs": faculty_to_kacs,
@@ -5279,7 +5257,7 @@ async def run_auto_assignment(
             # If Phase 7 explicitly failed to find a slot for this section,
             # clear faculty so UI shows it as unassigned, and mark a note.
             info = phase7_no_time.get(sid) or {}
-            if info.get("reason") == "no_free_slot_from_pool":
+            if info.get("reason") in {"no_free_slot_from_pool", "cross_campus_gap"}:
                 # we know there was a faculty_id in Phase 7 (info["faculty_id"])
                 r["faculty"] = ""
                 r["faculty_id"] = ""
@@ -5289,10 +5267,15 @@ async def run_auto_assignment(
 
                 # mark as unassigned but with a conflict note so it's traceable
                 r["status"] = "Unassigned"
-                r["conflictNote"] = (
-                    "Auto-assign removed previous faculty: no compatible " 
-                    "time slot found (preferences / 4.5h rule)."
-                )
+                if info.get("reason") == "cross_campus_gap":
+                    r["conflictNote"] = (
+                        "Auto-assign removed previous faculty: no compatible time slot found after enforcing the 3-hour cross-campus gap rule."
+                    )
+                else:
+                    r["conflictNote"] = (
+                        "Auto-assign removed previous faculty: no compatible " 
+                        "time slot found (preferences / 4.5h rule)."
+                    )
 
             # nothing else to overlay for this row
             continue
@@ -6044,9 +6027,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "mode": 1,
         },
     ).to_list(None)
-    prefs_by_faculty = {
+    submitted_prefs_by_faculty = {
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
+    prefs_by_faculty = dict(submitted_prefs_by_faculty)
 
     # # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
     # print("DEBUG-PREF-SUMMARY: ============================")
@@ -6259,6 +6243,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
     ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
+    ctx.submitted_prefs_by_faculty = submitted_prefs_by_faculty  # type: ignore[attr-defined]
     ctx.campus_blocked = campus_blocked
     ctx.current_assigned_units = current_assigned_units
     print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
@@ -9926,6 +9911,46 @@ def _aa_schedule_conflict(used_slots: dict[str, list[tuple[str, int, int, str]]]
     return False
 
 
+def _aa_cross_campus_gap_violation(
+    used_slots: dict[str, list[tuple[str, int, int, str]]],
+    faculty_id: str,
+    day: str,
+    start_min: int,
+    end_min: int,
+    new_section_id: str,
+    section_lookup: dict[str, dict],
+    *,
+    min_gap_min: int = 180,
+) -> bool:
+    new_section = section_lookup.get(str(new_section_id) or "") or {}
+    new_campus = str(new_section.get("campus_id") or "").strip().upper()
+    if not new_campus:
+        return False
+
+    for d, st, en, existing_section_id in used_slots.get(faculty_id, []):
+        if d != day:
+            continue
+        existing_section = section_lookup.get(str(existing_section_id) or "") or {}
+        existing_campus = str(existing_section.get("campus_id") or "").strip().upper()
+        if not existing_campus or existing_campus == new_campus:
+            continue
+
+        if max(st, start_min) < min(en, end_min):
+            return True
+
+        if end_min <= st:
+            gap = st - end_min
+        elif en <= start_min:
+            gap = start_min - en
+        else:
+            return True
+
+        if gap < min_gap_min:
+            return True
+
+    return False
+
+
 def _aa_respects_pref_window(pref: dict | None, day: str, start_min: int, end_min: int) -> bool:
     days = _aa_pref_days(pref)
     if days and day not in days:
@@ -10418,7 +10443,7 @@ def _aa_slot_candidates(section: dict, faculty_state: dict, ctx: ContextA, sched
     return candidates
 
 
-def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used_slots: dict[str, list[tuple[str, int, int, str]]], course_day_usage: dict[str, dict[str, int]]) -> int:
+def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used_slots: dict[str, list[tuple[str, int, int, str]]], course_day_usage: dict[str, dict[str, int]], section_lookup: dict[str, dict] | None = None) -> int:
     day1 = candidate["day1"]
     day2 = candidate.get("day2")
     begin = candidate["begin"]
@@ -10442,6 +10467,30 @@ def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used
     if day2:
         score -= 20 * course_day_usage.get(section["course_id"], {}).get(day2, 0)
     score -= 5 * len(used_slots.get(faculty_state["faculty_id"], []))
+
+    section_lookup = section_lookup or {}
+    new_campus = str((section or {}).get("campus_id") or "").strip().upper()
+    if new_campus:
+        for check_day in [day1, day2]:
+            if not check_day:
+                continue
+            for used_day, used_st, used_en, used_sid in used_slots.get(faculty_state["faculty_id"], []):
+                if used_day != check_day:
+                    continue
+                used_section = section_lookup.get(str(used_sid) or "") or {}
+                used_campus = str(used_section.get("campus_id") or "").strip().upper()
+                if not used_campus or used_campus == new_campus:
+                    continue
+                if en <= used_st:
+                    gap = used_st - en
+                elif used_en <= st:
+                    gap = st - used_en
+                else:
+                    gap = -1
+                if gap >= 180:
+                    score -= 25
+                else:
+                    score -= 200
     return score
 
 
@@ -10485,6 +10534,7 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
         fstate = faculty_state_by_id.get(fid) or {}
         chosen = None
         best_score = None
+        campus_gap_rejections = 0
         for cand in _aa_slot_candidates(sec, fstate, ctx, schedule_history):
             day1 = cand["day1"]
             day2 = cand.get("day2")
@@ -10496,6 +10546,12 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
                 continue
             if day2 and _aa_schedule_conflict(used_slots, fid, day2, st, en):
                 continue
+            if _aa_cross_campus_gap_violation(used_slots, fid, day1, st, en, item["section_id"], section_lookup, min_gap_min=180):
+                campus_gap_rejections += 1
+                continue
+            if day2 and _aa_cross_campus_gap_violation(used_slots, fid, day2, st, en, item["section_id"], section_lookup, min_gap_min=180):
+                campus_gap_rejections += 1
+                continue
             if not _aa_respects_pref_window(fstate.get("pref"), day1, st, en):
                 continue
             if day2 and not _aa_respects_pref_window(fstate.get("pref"), day2, st, en):
@@ -10504,15 +10560,17 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
                 continue
             if day2 and _streak_violation(used_slots, fid, day2, st, en):
                 continue
-            score = _aa_schedule_score(cand, fstate, sec, used_slots, course_day_usage)
+            score = _aa_schedule_score(cand, fstate, sec, used_slots, course_day_usage, section_lookup)
             if chosen is None or score > best_score:
                 chosen = cand
                 best_score = score
         if not chosen:
+            reason = "cross_campus_gap" if campus_gap_rejections else "no_free_slot_from_pool"
             no_time[item["section_id"]] = {
-                "reason": "no_free_slot_from_pool",
+                "reason": reason,
                 "faculty_id": fid,
                 "course_id": item.get("course_id"),
+                "min_gap_min": 180 if campus_gap_rejections else None,
             }
             continue
         day1 = chosen["day1"]
