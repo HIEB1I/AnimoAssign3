@@ -898,35 +898,80 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
-const getCampusColorForSection = (sec?: string): string | undefined => {
-  const s = String(sec || "").trim().toUpperCase();
-  if (!s) return undefined;
-  // Laguna sections start with XX or XC
-  if (s.startsWith("XX") || s.startsWith("XC")) return "#34D399";
-  // Manila sections start with S or G
-  if (s.startsWith("S") || s.startsWith("G")) return "#A7F3D0";
-  return undefined;
+const CAMPUS_COLORS = {
+  manila: "#444f24",
+  laguna: "#b6bbd9",
+  serviced: "#ad8820",
+} as const;
+
+const getScheduleVisual = (it: TLItemForCalendar): {
+  backgroundColor?: string;
+  textColor?: string;
+  borderClass: string;
+  hoverClass: string;
+} => {
+  if (it.is_special_class) {
+    return {
+      borderClass: "border-emerald-200",
+      hoverClass: "hover:bg-emerald-100",
+    };
+  }
+
+  if (it.is_serviced) {
+    return {
+      backgroundColor: CAMPUS_COLORS.serviced,
+      textColor: "#ffffff",
+      borderClass: "border-transparent",
+      hoverClass: "hover:brightness-[1.05]",
+    };
+  }
+
+  const s = String(it.sec || "").trim().toUpperCase();
+  if (s.startsWith("XX") || s.startsWith("XC")) {
+    return {
+      backgroundColor: CAMPUS_COLORS.laguna,
+      textColor: "#111827",
+      borderClass: "border-transparent",
+      hoverClass: "hover:brightness-[1.03]",
+    };
+  }
+
+  if (s.startsWith("S") || s.startsWith("G")) {
+    return {
+      backgroundColor: CAMPUS_COLORS.manila,
+      textColor: "#ffffff",
+      borderClass: "border-transparent",
+      hoverClass: "hover:brightness-[1.05]",
+    };
+  }
+
+  return {
+    borderClass: "border-emerald-200",
+    hoverClass: "hover:bg-emerald-50",
+  };
 };
 
 const ClassBlock = ({ onClick, it }: { onClick?: () => void; it: TLItemForCalendar }) => {
-  const isServiced = !!it.is_serviced;
-  const campusColor = !it.is_special_class && !isServiced ? getCampusColorForSection(it.sec) : undefined;
+  const visual = getScheduleVisual(it);
 
   return (
     <button
       onClick={it.is_special_class ? undefined : onClick}
       className={cls(
-        "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm",
+        "flex w-full flex-col items-center justify-center rounded-xl border shadow-sm transition",
         it.is_special_class
-          ? "border-emerald-200 bg-emerald-50 hover:bg-emerald-100"
-          : isServiced
-          ? "border-green-200 bg-green-50 hover:bg-green-100/60"
-          : campusColor
-          ? "border-neutral-200 text-black hover:brightness-[1.02]"
-          : "border-emerald-200 bg-emerald-50/90 hover:bg-emerald-50",
+          ? "bg-emerald-50"
+          : visual.backgroundColor
+          ? ""
+          : "bg-emerald-50/90",
+        visual.borderClass,
+        visual.hoverClass,
         it.is_special_class && "cursor-default"
       )}
-      style={campusColor ? { backgroundColor: campusColor } : undefined}
+      style={{
+        ...(visual.backgroundColor ? { backgroundColor: visual.backgroundColor } : {}),
+        ...(visual.textColor ? { color: visual.textColor } : {}),
+      }}
       title={`${it.code} • ${it.sec} | ${it.room} • ${it.mode}`}
     >
       <div className="text-[13px] font-extrabold tracking-wide">{it.code}</div>
@@ -1541,31 +1586,35 @@ const scheduleFinalLabel = (() => {
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
 	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
-	        <div className="relative mb-4 flex items-center justify-between">
-          <div>
+	        <div className="mb-4 flex flex-col gap-3 xl:grid xl:grid-cols-[minmax(220px,1fr)_auto_minmax(320px,1fr)] xl:items-start">
+          <div className="min-w-0">
             <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
             <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
           </div>
 
-	          {/* Legend (centered above the calendar/list controls) */}
-	          {view !== "Special" && (
-	            <div className="absolute left-1/2 hidden -translate-x-1/2 items-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm md:flex">
-	              <span className="inline-flex items-center gap-2">
-	                <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#A7F3D0" }} />
-	                <span>Manila</span>
-	              </span>
-	              <span className="inline-flex items-center gap-2">
-	                <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#34D399" }} />
-	                <span>Laguna</span>
-	              </span>
-	              <span className="inline-flex items-center gap-2">
-	                <span className="h-3 w-3 rounded-sm border border-green-200 bg-green-50" />
-	                <span>Serviced</span>
-	              </span>
-	            </div>
-	          )}
+          {/* Legend / spacer column */}
+          <div className="hidden xl:flex xl:justify-center xl:justify-self-center">
+            {view !== "Special" ? (
+              <div className="flex flex-wrap items-center justify-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm">
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
+                  <span>Manila</span>
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
+                  <span>Laguna</span>
+                </span>
+                <span className="inline-flex items-center gap-2">
+                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
+                  <span>Serviced</span>
+                </span>
+              </div>
+            ) : (
+              <div className="h-8" aria-hidden="true" />
+            )}
+          </div>
 
-          <div className="flex items-start gap-2 flex-wrap">
+          <div className="flex items-start gap-2 flex-wrap xl:flex-nowrap xl:justify-self-end xl:justify-end xl:ml-auto">
             <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
               {["Calendar", "List", "Special"].map((v) => (
                 <button
@@ -1656,59 +1705,60 @@ const scheduleFinalLabel = (() => {
 	                </label>
 	              </div>
 	            ) : (
-	              <button
-	                type="button"
-	                onClick={async () => {
-	                  try {
-	                    if (isSyncingSpecial) return;
-	                    setIsSyncingSpecial(true);
+	              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+	                <button
+	                  type="button"
+	                  onClick={async () => {
+	                    try {
+	                      if (isSyncingSpecial) return;
+	                      setIsSyncingSpecial(true);
 
-	                    const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-	                    const userId = raw.userId || raw.user_id || raw.id || "";
-	                    const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+	                      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+	                      const userId = raw.userId || raw.user_id || raw.id || "";
+	                      const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                    const resp: any = await acceptFacultyLoadAssignment(
-                      userId,
-                      ({
-                        ...(termId ? { term_id: termId } : {}),
-                        send_to_gcal: true,
-                        sync_special_only: true,
-                        overwrite_gcal: true,
-                      } as any)
-                    );
+	                      const resp: any = await acceptFacultyLoadAssignment(
+                        userId,
+                        ({
+                          ...(termId ? { term_id: termId } : {}),
+                          send_to_gcal: true,
+                          sync_special_only: true,
+                          overwrite_gcal: true,
+                        } as any)
+                      );
 
-	                    if (resp?.calendar_ok === false) {
-	                      onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
-	                    } else {
-	                      onToast?.(
-	                        "success",
-	                        resp?.calendar_events_created
-	                          ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
-	                          : "No special classes to sync.",
-	                        "Synced"
-	                      );
+	                      if (resp?.calendar_ok === false) {
+	                        onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
+	                      } else {
+	                        onToast?.(
+	                          "success",
+	                          resp?.calendar_events_created
+	                            ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
+	                            : "No special classes to sync.",
+	                          "Synced"
+	                        );
+	                      }
+	                    } catch (e: any) {
+	                      const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
+	                      onToast?.("error", msg, "Action failed");
+	                      console.error(e);
+	                    } finally {
+	                      setIsSyncingSpecial(false);
 	                    }
-	                  } catch (e: any) {
-	                    const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
-	                    onToast?.("error", msg, "Action failed");
-	                    console.error(e);
-	                  } finally {
-	                    setIsSyncingSpecial(false);
-	                  }
-	                }}
-	                disabled={isSyncingSpecial}
-	                className={cls(
-	                  // Match height of Calendar/List/Special Class controls
-	                  "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm",
-	                  "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                  isSyncingSpecial
-	                    ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-	                    : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-	                )}
-	                title="Sync Special Classes to Google Calendar"
-	              >
-	                {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
-	              </button>
+	                  }}
+	                  disabled={isSyncingSpecial}
+	                  className={cls(
+	                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
+	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+	                    isSyncingSpecial
+	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
+	                  )}
+	                  title="Sync Special Classes to Google Calendar"
+	                >
+	                  {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
+	                </button>
+	              </div>
 	            )}
         </div>
         </div>
@@ -1773,24 +1823,24 @@ const scheduleFinalLabel = (() => {
 
 	      {/* Legend (mobile): centered above the calendar/list table */}
 	      {view !== "Special" && (
-	        <div className="mb-3 flex justify-center md:hidden">
-	          <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
-	            <span className="font-semibold text-neutral-800">Legend:</span>
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#A7F3D0" }} />
-	              <span>Manila</span>
-	            </span>
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: "#34D399" }} />
-	              <span>Laguna</span>
-	            </span>
-	            <span className="inline-flex items-center gap-2">
-	              <span className="h-3 w-3 rounded-sm border border-green-200 bg-green-50" />
-	              <span>Serviced</span>
-	            </span>
-	          </div>
-	        </div>
-	      )}
+        <div className="mb-3 flex justify-center xl:hidden">
+          <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
+            <span className="font-semibold text-neutral-800">Legend:</span>
+            <span className="inline-flex items-center gap-2">
+              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
+              <span>Manila</span>
+            </span>
+            <span className="inline-flex items-center gap-2">
+              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
+              <span>Laguna</span>
+            </span>
+            <span className="inline-flex items-center gap-2">
+              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
+              <span>Serviced</span>
+            </span>
+          </div>
+        </div>
+      )}
 
       {/*
         IMPORTANT:
@@ -2331,7 +2381,7 @@ const scheduleFinalLabel = (() => {
       {/* Edit Special Class Schedule modal */}
       {specialEdit && (
         <div className="fixed inset-0 z-[110] grid place-items-center bg-black/40 p-4">
-          <div className="w-full max-w-6xl rounded-2xl bg-white shadow-2xl overflow-hidden">
+          <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl overflow-hidden">
             <div className="flex items-start justify-between gap-4 border-b border-neutral-200 p-5">
               <div className="min-w-0">
                 <h2 className="text-lg font-semibold text-emerald-800">Edit Special Class Schedule</h2>
@@ -2367,7 +2417,7 @@ const scheduleFinalLabel = (() => {
                 return (
                   <>
                     <div className="rounded-xl border border-neutral-200 bg-neutral-50 p-4">
-                      <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
                         <div className="flex items-center justify-between gap-3 rounded-lg border border-neutral-200 bg-white px-3 py-2">
                           <div className="text-sm font-semibold text-neutral-800">Meeting 1</div>
                           <div className="text-xs text-neutral-600">Original: {orig1}</div>
@@ -2381,16 +2431,16 @@ const scheduleFinalLabel = (() => {
 
                     <div className="mt-4 rounded-xl border border-neutral-200 bg-white">
                       <div className="border-b border-neutral-200 bg-gray-50 px-4 py-3">
-                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
 
-                            <div className="mt-1 grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
+                            <div className="mt-1 hidden xl:grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
                               <div>Day 1</div>
                               <div>Begin 1</div>
                               <div>End 1</div>
                               <div>Room 1</div>
                             </div>
 
-                            <div className="mt-1 grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
+                            <div className="mt-1 hidden xl:grid grid-cols-4 text-center text-[12px] font-semibold text-emerald-800">
                               <div>Day 2</div>
                               <div>Begin 2</div>
                               <div>End 2</div>
@@ -2400,8 +2450,8 @@ const scheduleFinalLabel = (() => {
                         </div>
                       </div>
 
-                      <div className="grid grid-cols-1 gap-3 px-4 py-4 sm:grid-cols-2">
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                      <div className="grid grid-cols-1 gap-3 px-4 py-4 xl:grid-cols-2">
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
                         {/* Day 1 */}
                         <SpecialDropdown
                           value={specialEditDraft.day1}
@@ -2455,7 +2505,7 @@ const scheduleFinalLabel = (() => {
 
                         </div>
 
-                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-4">
+                        <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
 
                         {/* Day 2 (auto-filled but editable) */}
                         <SpecialDropdown

@@ -1,14 +1,11 @@
-/* ------------- OM_FacultyManagement.tsx ------------- */
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import {
   Search as SearchIcon,
-  Calendar,
   BookOpen,
-  MoreVertical,
-  X as XIcon,
+  GraduationCap,
+  PanelRightClose,
 } from "lucide-react";
 
 import {
@@ -20,7 +17,6 @@ import {
   type FMOptions,
 } from "../../api";
 
-/* ---------- Schedule + Teaching History table helpers (Reports & Analytics style) ---------- */
 type ScheduleRow = {
   course_code: string;
   course_title: string;
@@ -46,62 +42,195 @@ type HistRow = {
   day2?: string;
   begin2?: string;
   end2?: string;
-  term?: string; // "Term 1" | "Term 2" | "Term 3"
+  term?: string;
 };
+
+type OMScheduleResponse = {
+  ok?: boolean;
+  term_id?: string | null;
+  active_term_id?: string | null;
+  term?: {
+    acad_year_start?: number | null;
+    term_number?: number | null;
+  } | null;
+  terms?: Array<{
+    term_id?: string | null;
+    acad_year_start?: number | null;
+    term_number?: number | null;
+    is_active?: boolean;
+  }>;
+  term_index?: number;
+  teaching_load?: ScheduleRow[];
+};
+
+type OMHistoryResponse = {
+  ok?: boolean;
+  acad_year_start?: number | null;
+  academicYears?: number[];
+  terms?: Record<string, HistRow[]>;
+  teaching_history?: HistRow[];
+};
+
+function summarizeCertifications(certs: unknown): { display: string; full: string; count: number } {
+  const arr = Array.isArray(certs)
+    ? certs
+        .filter(Boolean)
+        .map((c) => String(c).trim())
+        .filter(Boolean)
+    : [];
+
+  const full = arr.length ? arr.join(", ") : "—";
+  if (arr.length === 0) return { display: "—", full: "—", count: 0 };
+  if (arr.length <= 2) return { display: full, full, count: arr.length };
+  return { display: `${arr.slice(0, 2).join(", ")} +${arr.length - 2}`, full, count: arr.length };
+}
+
+function formatHireDateDisplay(raw: unknown): string {
+  if (raw === null || raw === undefined) return "—";
+  const s = String(raw).trim();
+  if (!s) return "—";
+
+  const m = /^\d{4}-\d{2}-\d{2}/.exec(s);
+  let dt: Date | null = null;
+  if (m) {
+    const [y, mo, d] = m[0].split("-").map((n) => Number(n));
+    if (Number.isFinite(y) && Number.isFinite(mo) && Number.isFinite(d)) {
+      dt = new Date(y, mo - 1, d);
+    }
+  } else {
+    const parsed = Date.parse(s);
+    if (!Number.isNaN(parsed)) dt = new Date(parsed);
+  }
+
+  if (!dt || Number.isNaN(dt.getTime())) return s;
+
+  return new Intl.DateTimeFormat("en-US", {
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(dt);
+}
 
 function groupHistoryByTerm(rows: HistRow[]) {
   const groups: Record<string, HistRow[]> = { "Term 1": [], "Term 2": [], "Term 3": [] };
   rows.forEach((r) => {
-    const t = (r.term as string) || "Term 1";
+    const t = r.term || "Term 1";
     if (!groups[t]) groups[t] = [];
     groups[t].push(r);
   });
   return groups;
 }
 
+function normalizeHistoryRows(data: OMHistoryResponse | null): HistRow[] {
+  if (Array.isArray(data?.teaching_history)) {
+    return data.teaching_history as HistRow[];
+  }
+
+  const terms = data?.terms;
+  if (!terms || typeof terms !== "object") return [];
+
+  const out: HistRow[] = [];
+  Object.entries(terms as Record<string, HistRow[]>).forEach(([term, rows]) => {
+    if (!Array.isArray(rows)) return;
+    rows.forEach((row) => {
+      out.push({ ...row, term });
+    });
+  });
+  return out;
+}
+
+function getFacultyDisplayName(
+  row: Partial<FacultyRow> & { first_name?: string; last_name?: string; display_name?: string }
+): string {
+  const displayName = String(row.display_name || "").trim();
+  if (displayName) return displayName;
+
+  const firstName = String(row.first_name || "").trim();
+  const lastName = String(row.last_name || "").trim();
+  if (lastName && firstName) return `${lastName}, ${firstName}`;
+  if (lastName) return lastName;
+  if (firstName) return firstName;
+  return String(row.name || "").trim() || "—";
+}
+
+function getFacultyViewerName(row: Partial<FacultyRow> & { first_name?: string; last_name?: string }): string {
+  const firstName = String(row.first_name || "").trim();
+  const lastName = String(row.last_name || "").trim();
+  if (firstName && lastName) return `${firstName} ${lastName}`;
+  if (firstName) return firstName;
+  if (lastName) return lastName;
+  return String(row.name || "").trim() || "—";
+}
+
+function compactDayLines(row: { day1?: string; day2?: string }): string[] {
+  return [row.day1, row.day2].map((value) => String(value || "").trim()).filter(Boolean);
+}
+
+function compactTimeLines(row: { begin1?: string; end1?: string; begin2?: string; end2?: string }): string[] {
+  return [
+    [row.begin1, row.end1],
+    [row.begin2, row.end2],
+  ]
+    .map(([begin, end]) => {
+      const start = String(begin || "").trim();
+      const finish = String(end || "").trim();
+      if (!start && !finish) return "";
+      if (start && finish) return `${start}–${finish}`;
+      return start || finish;
+    })
+    .filter(Boolean);
+}
+
+function renderCompactStack(lines: string[], align: "left" | "center" = "center") {
+  if (lines.length === 0) {
+    return <span className="text-gray-400">—</span>;
+  }
+
+  return (
+    <div className={cls("space-y-1", align === "center" ? "text-center" : "text-left")}>
+      {lines.map((line, idx) => (
+        <div key={`${line}-${idx}`} className="whitespace-nowrap leading-5 text-gray-700">
+          {line}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function renderScheduleTable(rows: ScheduleRow[]) {
   return (
-    <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
-      <div className="overflow-x-auto rounded-xl">
-          <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-900">
+    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead className="border-b bg-gray-50 text-gray-900">
             <tr>
-              <th className="text-left px-4 py-2">Course Code &amp; Title</th>
-              <th className="text-left px-4 py-2">Section</th>
-              <th className="text-left px-4 py-2">Mode</th>
-              <th className="text-center px-4 py-2">Units</th>
-              <th className="text-left px-4 py-2">Day 1</th>
-              <th className="text-left px-4 py-2">Begin 1</th>
-              <th className="text-left px-4 py-2">End 1</th>
-              <th className="text-left px-4 py-2">Day 2</th>
-              <th className="text-left px-4 py-2">Begin 2</th>
-              <th className="text-left px-4 py-2">End 2</th>
+              <th className="px-4 py-2 text-left">Course Code &amp; Title</th>
+              <th className="px-3 py-2 text-center">Section</th>
+              <th className="px-3 py-2 text-center">Mode</th>
+              <th className="px-3 py-2 text-center">Units</th>
+              <th className="px-3 py-2 text-center">Day</th>
+              <th className="px-3 py-2 text-center">Time</th>
             </tr>
           </thead>
-
           <tbody className="divide-y">
-            {(rows || []).length === 0 ? (
+            {rows.length === 0 ? (
               <tr>
-                <td colSpan={10} className="px-4 py-6 text-center text-gray-500">
+                <td colSpan={6} className="px-4 py-6 text-center text-gray-500">
                   No records
                 </td>
               </tr>
             ) : (
-              (rows || []).map((r, idx) => (
-                <tr key={idx} className="hover:bg-gray-50">
+              rows.map((r, idx) => (
+                <tr key={`${r.course_code}-${r.section}-${idx}`} className="hover:bg-gray-50 align-top">
                   <td className="px-4 py-3 text-left font-semibold text-emerald-700">
                     {r.course_code || "—"}
-                    <div className="text-xs text-gray-500">{r.course_title || "—"}</div>
+                    <div className="text-xs font-normal text-gray-500">{r.course_title || "—"}</div>
                   </td>
-                  <td className="px-4 py-3 text-left">{r.section || "—"}</td>
-                  <td className="px-4 py-3 text-left">{r.mode || "—"}</td>
-                  <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
-                  <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
-                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
-                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
-                  <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
-                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
-                  <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                  <td className="px-3 py-3 text-center">{r.section || "—"}</td>
+                  <td className="px-3 py-3 text-center">{r.mode || "—"}</td>
+                  <td className="px-3 py-3 text-center">{r.units ?? "—"}</td>
+                  <td className="px-3 py-3 text-center">{renderCompactStack(compactDayLines(r))}</td>
+                  <td className="px-3 py-3 text-center">{renderCompactStack(compactTimeLines(r))}</td>
                 </tr>
               ))
             )}
@@ -112,54 +241,50 @@ function renderScheduleTable(rows: ScheduleRow[]) {
   );
 }
 
-function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
-  const groups = groupHistoryByTerm(flatRows);
-
+function renderTeachingHistoryByTerm(rows: HistRow[]) {
+  const groups = groupHistoryByTerm(rows);
   return (
-    <div className="space-y-10">
-      {(["Term 1", "Term 2", "Term 3"] as const).map((t) => (
-        <div key={t} className="space-y-3">
-          <div className="text-sm font-semibold text-emerald-700">{t}</div>
-
-          <div className="border border-gray-200 bg-gray-50 shadow-sm overflow-visible rounded-xl">
-            <div className="overflow-x-auto rounded-xl">
-              <table className="w-full text-sm">
-                <thead className="bg-gray-50 border-b text-gray-700">
+    <div className="space-y-8">
+      {(["Term 1", "Term 2", "Term 3"] as const).map((term) => (
+        <div key={term} className="space-y-3">
+          <div className="text-sm font-semibold text-emerald-700">{term}</div>
+          <div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
+            <div className="overflow-x-auto">
+              <table className="w-full table-fixed text-sm">
+                <colgroup>
+                  <col className="w-[46%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[10%]" />
+                  <col className="w-[14%]" />
+                  <col className="w-[16%]" />
+                </colgroup>
+                <thead className="border-b bg-gray-50 text-gray-900">
                   <tr>
-                    <th className="text-left px-4 py-2">Course Code &amp; Title</th>
-                    <th className="text-left px-4 py-2">Section</th>
-                    <th className="text-center px-4 py-2">Units</th>
-                    <th className="text-left px-4 py-2">Day 1</th>
-                    <th className="text-left px-4 py-2">Begin 1</th>
-                    <th className="text-left px-4 py-2">End 1</th>
-                    <th className="text-left px-4 py-2">Day 2</th>
-                    <th className="text-left px-4 py-2">Begin 2</th>
-                    <th className="text-left px-4 py-2">End 2</th>
+                    <th className="px-4 py-2 text-left">Course Code &amp; Title</th>
+                    <th className="px-3 py-2 text-center">Section</th>
+                    <th className="px-3 py-2 text-center">Units</th>
+                    <th className="px-3 py-2 text-center">Day</th>
+                    <th className="px-3 py-2 text-center">Time</th>
                   </tr>
                 </thead>
-
                 <tbody className="divide-y">
-                  {(groups[t] ?? []).length === 0 ? (
+                  {(groups[term] || []).length === 0 ? (
                     <tr>
-                      <td colSpan={9} className="px-4 py-6 text-center text-gray-500">
+                      <td colSpan={5} className="px-4 py-6 text-center text-gray-500">
                         No records
                       </td>
                     </tr>
                   ) : (
-                    (groups[t] ?? []).map((r, idx) => (
-                      <tr key={`${t}-${idx}`} className="hover:bg-gray-50">
+                    (groups[term] || []).map((r, idx) => (
+                      <tr key={`${term}-${r.code}-${r.section}-${idx}`} className="hover:bg-gray-50 align-top">
                         <td className="px-4 py-3 text-left font-semibold text-emerald-700">
                           {r.code || "—"}
-                          <div className="text-xs text-gray-500">{r.title || "—"}</div>
+                          <div className="text-xs font-normal text-gray-500">{r.title || "—"}</div>
                         </td>
-                        <td className="px-4 py-3 text-left">{r.section || "—"}</td>
-                        <td className="px-4 py-3 text-center">{r.units ?? "—"}</td>
-                        <td className="px-4 py-3 text-left">{r.day1 || "—"}</td>
-                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin1 || "—"}</td>
-                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end1 || "—"}</td>
-                        <td className="px-4 py-3 text-left">{r.day2 || "—"}</td>
-                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.begin2 || "—"}</td>
-                        <td className="px-4 py-3 text-left whitespace-nowrap">{r.end2 || "—"}</td>
+                        <td className="px-3 py-3 text-center">{r.section || "—"}</td>
+                        <td className="px-3 py-3 text-center">{r.units ?? "—"}</td>
+                        <td className="px-3 py-3 text-center">{renderCompactStack(compactDayLines(r))}</td>
+                        <td className="px-3 py-3 text-center">{renderCompactStack(compactTimeLines(r))}</td>
                       </tr>
                     ))
                   )}
@@ -173,102 +298,44 @@ function renderTeachingHistoryByTerm(flatRows: HistRow[]) {
   );
 }
 
-function summarizeCertifications(certs: any): { display: string; full: string } {
-  const arr = Array.isArray(certs)
-    ? certs
-        .filter(Boolean)
-        .map((c) => String(c).trim())
-        .filter(Boolean)
-    : [];
+const ViewerPlaceholder = ({ children }: { children: ReactNode }) => (
+  <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-5 py-10 text-center">{children}</div>
+);
 
-  const full = arr.length ? arr.join(", ") : "—";
-
-  // Keep the list compact in-table (full list is still available via tooltip).
-  // Examples:
-  // - ["AWS", "Cisco"] -> "AWS, Cisco"
-  // - ["AWS", "Cisco", "TESDA", "..." ] -> "AWS, Cisco +2"
-  if (arr.length === 0) return { display: "—", full: "—" };
-  if (arr.length <= 2) return { display: full, full };
-
-  return { display: `${arr.slice(0, 2).join(", ")} +${arr.length - 2}`, full };
-}
-
-/**
- * Display hire dates as: "January 1, 2008".
- *
- * Backend typically returns YYYY-MM-DD; we parse the date portion and format
- * in a timezone-safe way (avoids UTC shifting).
- */
-function formatHireDateDisplay(raw: any): string {
-  if (raw === null || raw === undefined) return "—";
-  const s = String(raw).trim();
-  if (!s) return "—";
-
-  const m = /^\d{4}-\d{2}-\d{2}/.exec(s);
-  let dt: Date | null = null;
-  if (m) {
-    const [y, mo, d] = m[0].split("-").map((n) => Number(n));
-    if (Number.isFinite(y) && Number.isFinite(mo) && Number.isFinite(d)) {
-      dt = new Date(y, mo - 1, d);
-    }
-  } else {
-    const t = Date.parse(s);
-    if (!Number.isNaN(t)) dt = new Date(t);
-  }
-
-  if (!dt || Number.isNaN(dt.getTime())) return s;
-
-  return new Intl.DateTimeFormat("en-US", {
-    month: "long",
-    day: "numeric",
-    year: "numeric",
-  }).format(dt);
-}
-
-/* ---------------- Page ---------------- */
 export default function OM_FacultyManagement() {
-  type ModalType = null | "schedule" | "history";
-
-  // filters
   const [department, setDepartment] = useState("All Departments");
   const [facultyType, setFacultyType] = useState("All Type");
   const [statusFilter, setStatusFilter] = useState("All Status");
 
-  // live search
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
 
-  // options
   const [deptOptions, setDeptOptions] = useState<string[]>(["All Departments"]);
   const [typeOptions, setTypeOptions] = useState<string[]>(["All Type"]);
   const statusOptions = useMemo(() => ["All Status", "Active", "On Leave"], []);
-  const [historyYears, setHistoryYears] = useState<number[]>([]);
+
+  const [academicYears, setAcademicYears] = useState<number[]>([]);
+  const [panelAcademicYears, setPanelAcademicYears] = useState<number[]>([]);
   const [termLabel, setTermLabel] = useState("");
 
-  // rows
   const [rows, setRows] = useState<FacultyRow[]>([]);
   const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState<string>("");
+  const [err, setErr] = useState("");
 
-  // baseline total count for “Showing X of Y” (Y = total faculty in directory)
-  const [baselineTotalFaculty, setBaselineTotalFaculty] = useState<number>(0);
-
-  // modals
-  const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [selected, setSelected] = useState<FacultyRow | null>(null);
-
-  // row actions dropdown
-  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
-  const [openMenuRow, setOpenMenuRow] = useState<FacultyRow | null>(null);
-  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
-  const openMenuRef = useRef<HTMLDivElement | null>(null);
-
-  const [modalError, setModalError] = useState<string>("");
-  const [schedule, setSchedule] = useState<any>(null);
-  const [history, setHistory] = useState<{ teaching_history: HistRow[] } | null>(null);
   const [historyYearIndex, setHistoryYearIndex] = useState(0);
 
-  // Load dropdown options + term label
+  const [panelScheduleRows, setPanelScheduleRows] = useState<ScheduleRow[]>([]);
+  const [panelHistoryRows, setPanelHistoryRows] = useState<HistRow[]>([]);
+  const [panelHistoryBootstrapped, setPanelHistoryBootstrapped] = useState(false);
+  const [panelScheduleLoading, setPanelScheduleLoading] = useState(false);
+  const [panelHistoryLoading, setPanelHistoryLoading] = useState(false);
+  const [panelScheduleError, setPanelScheduleError] = useState("");
+  const [panelHistoryError, setPanelHistoryError] = useState("");
+  const [panelScheduleTermTitle, setPanelScheduleTermTitle] = useState("");
+
+  const searchRef = useRef<HTMLInputElement | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -281,587 +348,610 @@ export default function OM_FacultyManagement() {
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+
+        const years = Array.isArray((opt as FMOptions & { academicYears?: number[] }).academicYears)
+          ? ((opt as FMOptions & { academicYears?: number[] }).academicYears as number[])
+          : [];
+        setAcademicYears(years);
+        setPanelAcademicYears(years);
+        setHistoryYearIndex(0);
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
   }, []);
 
-  // Debounce search input
-  const searchRef = useRef<HTMLInputElement | null>(null);
   useEffect(() => {
-    const t = setTimeout(() => setSearch(searchInput.trim()), 300);
-    return () => clearTimeout(t);
+    const t = window.setTimeout(() => setSearch(searchInput.trim()), 300);
+    return () => window.clearTimeout(t);
   }, [searchInput]);
 
-  // Ensure we always know the total faculty count in the directory (for "X of Y")
-  useEffect(() => {
-    if (baselineTotalFaculty > 0) return;
-    (async () => {
-      try {
-        const { ok, rows: allRows } = await listFaculty({
-          department: "All Departments",
-          facultyType: "All Type",
-          search: "",
-        });
-        if (ok) setBaselineTotalFaculty((allRows || []).length);
-      } catch {
-        // ignore baseline fetch errors (page still works)
-      }
-    })();
-  }, [baselineTotalFaculty]);
-
-  // Close actions dropdown on outside click / ESC
-  useEffect(() => {
-    if (!openMenuId) return;
-
-    const onDown = (e: MouseEvent) => {
-      const target = e.target as Node;
-      if (openMenuRef.current && !openMenuRef.current.contains(target)) {
-        setOpenMenuId(null);
-      }
-    };
-
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpenMenuId(null);
-    };
-
-    const onScrollOrResize = () => {
-      // Close to avoid stale positioning when the viewport changes.
-      setOpenMenuId(null);
-    };
-
-    window.addEventListener("mousedown", onDown);
-    window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", onScrollOrResize, true);
-    window.addEventListener("resize", onScrollOrResize);
-    return () => {
-      window.removeEventListener("mousedown", onDown);
-      window.removeEventListener("keydown", onKey);
-      window.removeEventListener("scroll", onScrollOrResize, true);
-      window.removeEventListener("resize", onScrollOrResize);
-    };
-  }, [openMenuId]);
-
-  // Reset row/position whenever menu closes.
-  useEffect(() => {
-    if (openMenuId) return;
-    setOpenMenuRow(null);
-    setMenuPos(null);
-  }, [openMenuId]);
-
-  const openActionsMenu = (row: FacultyRow, btn: HTMLButtonElement) => {
-    const id = row.faculty_id;
-    setOpenMenuId((cur) => (cur === id ? null : id));
-
-    // Compute fixed-position anchor (portal avoids clipping inside overflow containers).
-    const rect = btn.getBoundingClientRect();
-    const menuWidth = 224; // tailwind w-56
-    const gap = 8;
-    const top = rect.bottom + gap;
-    const left = Math.max(gap, Math.min(window.innerWidth - menuWidth - gap, rect.right - menuWidth));
-    setMenuPos({ top, left });
-    setOpenMenuRow(row);
-  };
-
-  // Fetch rows (status filter is client-side)
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         setErr("");
 
-        const { ok, rows: fetchedRows } = await listFaculty({ department, facultyType, search });
-        if (!ok) throw new Error("Failed to load faculty list");
+        const response = await listFaculty({ department, facultyType, search });
+        if (!response?.ok) throw new Error("Failed to load faculty list");
 
-        const filtered = (fetchedRows || []).filter((r) => {
+        const fetchedRows = (response.rows || []).filter((row) => {
           if (!statusFilter || statusFilter === "All Status") return true;
-          return String(r.status || "").trim().toLowerCase() === statusFilter.toLowerCase();
+          return String(row.status || "").trim().toLowerCase() === statusFilter.toLowerCase();
         });
 
-        setRows(filtered);
-
-        if (
-          baselineTotalFaculty === 0 &&
-          department === "All Departments" &&
-          facultyType === "All Type" &&
-          !search
-        ) {
-          setBaselineTotalFaculty((fetchedRows || []).length);
-        }
+        setRows(fetchedRows);
+        setSelected((current) => {
+          if (!current) return current;
+          const matched = fetchedRows.find((row) => row.faculty_id === current.faculty_id);
+          return matched || null;
+        });
       } catch (e: any) {
         setRows([]);
+        setSelected(null);
         setErr(e?.response?.data?.detail || e?.message || "Failed to load faculty list.");
       } finally {
         setLoading(false);
       }
     })();
-  }, [department, facultyType, statusFilter, search, baselineTotalFaculty]);
-
-  const openModal = (type: Exclude<ModalType, null>, item: FacultyRow) => {
-    setSelected(item);
-    setModalError("");
-    if (type === "history") {
-      setHistoryYears([]);
-      setHistoryYearIndex(0);
-      setHistory(null);
-    }
-    setActiveModal(type);
-  };
-
-  const closeModal = () => {
-    setActiveModal(null);
-    setModalError("");
-    setSelected(null);
-    setSchedule(null);
-    setHistory(null);
-    setHistoryYears([]);
-    setHistoryYearIndex(0);
-    setOpenMenuId(null);
-  };
-
-  // Load modal content
-  useEffect(() => {
-    (async () => {
-      if (!activeModal || !selected) return;
-      try {
-        // In seeded/legacy data, `faculty_assignments.faculty_id` may store either
-        // faculty_profiles.faculty_id OR users.user_id. The list API returns
-        // `user_id` (when resolvable), so prefer it for schedule/history queries.
-        const facKey = (selected as any)?.user_id || selected.faculty_id;
-
-        if (activeModal === "schedule") {
-          const data = await getFacultySchedule(facKey);
-          setSchedule(data);
-        } else if (activeModal === "history") {
-          if (!historyYears.length) {
-            const data = await getFacultyHistory(facKey);
-            const yrs = Array.isArray(data?.academicYears) ? data.academicYears : [];
-            setHistoryYears(yrs);
-
-            const ayStart = typeof data?.acad_year_start === "number" ? data.acad_year_start : yrs[0];
-            const idx = ayStart != null && yrs.length ? Math.max(0, yrs.indexOf(ayStart)) : 0;
-            setHistoryYearIndex(idx);
-
-            setHistory({ teaching_history: data?.teaching_history || [] });
-          } else {
-            const ay = historyYears[historyYearIndex];
-            const data = await getFacultyHistory(facKey, ay);
-            setHistory({ teaching_history: data?.teaching_history || [] });
-          }
-        }
-      } catch (e: any) {
-        const msg =
-          e?.message ||
-          (activeModal === "schedule" ? "Failed to load schedule." : "Failed to load teaching history.");
-        setModalError(String(msg));
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeModal, selected, historyYearIndex, historyYears]);
+  }, [department, facultyType, statusFilter, search]);
 
   const historyYearLabel = useMemo(() => {
-    const ay = historyYears[historyYearIndex];
+    const ay = panelAcademicYears[historyYearIndex];
     return ay ? `AY ${ay}–${ay + 1}` : "—";
-  }, [historyYearIndex, historyYears]);
+  }, [panelAcademicYears, historyYearIndex]);
 
-  const scheduleMeta = useMemo(() => {
-    const terms = Array.isArray(schedule?.terms) ? schedule.terms : [];
-    const idxFromServer = typeof schedule?.term_index === "number" ? schedule.term_index : -1;
-    const idxFromList = terms.findIndex((t: any) => String(t?.term_id ?? "") === String(schedule?.term_id ?? ""));
-    const termIndex = idxFromServer >= 0 ? idxFromServer : Math.max(0, idxFromList);
-
-    const term = (schedule?.term as any) || terms[termIndex] || null;
-    const ay = term?.acad_year_start;
-    const tn = term?.term_number;
-
-    const centerTitle =
-      typeof ay === "number"
-        ? `AY ${ay}–${ay + 1} · Term ${tn ?? "—"}`
-        : tn != null
-          ? `Term ${tn}`
-          : schedule?.term_id
-            ? `Term ${schedule.term_id}`
-            : "Term";
-
-    const isActive =
-      schedule?.active_term_id != null && String(schedule.active_term_id) === String(schedule?.term_id);
-
-    return { centerTitle, isActive, termIndex, terms };
-  }, [schedule]);
-
-  const grouped = useMemo(() => {
-    const by: Record<string, FacultyRow[]> = {};
-    for (const r of rows) {
-      const key = (r.department || "Uncategorized").trim() || "Uncategorized";
-      (by[key] ||= []).push(r);
+  const selectedSummary = useMemo(() => {
+    if (!selected) {
+      return {
+        certifications: { display: "—", full: "—", count: 0 },
+        hireDate: "—",
+        teachingYears: "—",
+        teachingUnits: "—",
+      };
     }
 
-    const entries = Object.entries(by).sort(([a], [b]) => a.localeCompare(b));
-    if (department && department !== "All Departments") {
-      return [[department, rows]] as Array<[string, FacultyRow[]]>;
+    return {
+      certifications: summarizeCertifications((selected as any).certifications),
+      hireDate: formatHireDateDisplay((selected as any).hire_date),
+      teachingYears:
+        (selected as any).teaching_years !== null &&
+        (selected as any).teaching_years !== undefined &&
+        (selected as any).teaching_years !== ""
+          ? String((selected as any).teaching_years)
+          : "—",
+      teachingUnits:
+        selected.teaching_units !== null &&
+        selected.teaching_units !== undefined &&
+        String(selected.teaching_units).trim() !== ""
+          ? String(selected.teaching_units)
+          : "—",
+    };
+  }, [selected]);
+
+  const groupedFacultyRows = useMemo(() => {
+    const normalizeDepartment = (value: unknown) => {
+      const label = String(value || "").trim();
+      return label || "Unassigned Department";
+    };
+
+    const getLastNameKey = (row: FacultyRow) => {
+      const explicitLastName = String((row as FacultyRow & { last_name?: string }).last_name || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (explicitLastName) return explicitLastName.toLowerCase();
+
+      const displayName = String((row as FacultyRow & { display_name?: string }).display_name || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (displayName.includes(",")) {
+        return displayName.split(",")[0].trim().toLowerCase();
+      }
+
+      const fullName = String(row.name || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (!fullName) return "";
+      const parts = fullName.split(" ");
+      return (parts[parts.length - 1] || "").toLowerCase();
+    };
+
+    const sorted = [...rows].sort((a, b) => {
+      const deptCompare = normalizeDepartment(a.department).localeCompare(normalizeDepartment(b.department), undefined, {
+        sensitivity: "base",
+      });
+      if (deptCompare !== 0) return deptCompare;
+
+      const lastNameCompare = getLastNameKey(a).localeCompare(getLastNameKey(b), undefined, {
+        sensitivity: "base",
+      });
+      if (lastNameCompare !== 0) return lastNameCompare;
+
+      return String(getFacultyDisplayName(a as FacultyRow & { first_name?: string; last_name?: string; display_name?: string }) || "").localeCompare(
+        String(getFacultyDisplayName(b as FacultyRow & { first_name?: string; last_name?: string; display_name?: string }) || ""),
+        undefined,
+        { sensitivity: "base" }
+      );
+    });
+
+    const total = sorted.length;
+    const groups: Array<{ department: string; rows: FacultyRow[]; total: number }> = [];
+    for (const row of sorted) {
+      const departmentLabel = normalizeDepartment(row.department);
+      const lastGroup = groups[groups.length - 1];
+      if (!lastGroup || lastGroup.department !== departmentLabel) {
+        groups.push({ department: departmentLabel, rows: [row], total });
+      } else {
+        lastGroup.rows.push(row);
+      }
     }
-    return entries;
-  }, [rows, department]);
+    return groups;
+  }, [rows]);
+
+  useEffect(() => {
+    if (!selected) {
+      setPanelScheduleRows([]);
+      setPanelHistoryRows([]);
+      setPanelScheduleError("");
+      setPanelHistoryError("");
+      setPanelScheduleLoading(false);
+      setPanelHistoryLoading(false);
+      setPanelScheduleTermTitle("");
+      setPanelAcademicYears(academicYears);
+      setPanelHistoryBootstrapped(false);
+      setHistoryYearIndex(0);
+      return;
+    }
+
+    let cancelled = false;
+    setPanelHistoryBootstrapped(false);
+
+    (async () => {
+      try {
+        setPanelScheduleLoading(true);
+        setPanelScheduleError("");
+        const data = (await getFacultySchedule((selected as any).user_id || selected.faculty_id)) as OMScheduleResponse;
+        if (cancelled) return;
+
+        const ay = data?.term?.acad_year_start;
+        const tn = data?.term?.term_number;
+        setPanelScheduleTermTitle(ay != null ? `AY ${ay}-${ay + 1} · Term ${tn ?? "—"}` : termLabel || "Current Term");
+        setPanelScheduleRows(Array.isArray(data?.teaching_load) ? data.teaching_load : []);
+      } catch (e: any) {
+        if (cancelled) return;
+        setPanelScheduleRows([]);
+        setPanelScheduleError(e?.response?.data?.detail || e?.message || "Failed to load schedule.");
+      } finally {
+        if (!cancelled) setPanelScheduleLoading(false);
+      }
+    })();
+
+    (async () => {
+      try {
+        setPanelHistoryLoading(true);
+        setPanelHistoryError("");
+        const data = (await getFacultyHistory((selected as any).user_id || selected.faculty_id)) as OMHistoryResponse;
+        if (cancelled) return;
+
+        const years = Array.isArray(data?.academicYears) && data.academicYears.length > 0 ? data.academicYears : academicYears;
+        setPanelAcademicYears(years);
+
+        const serverAy = typeof data?.acad_year_start === "number" ? data.acad_year_start : null;
+        const resolvedIndex = serverAy != null ? years.indexOf(serverAy) : 0;
+        const nextIndex = resolvedIndex >= 0 ? resolvedIndex : 0;
+        setHistoryYearIndex(nextIndex);
+        setPanelHistoryRows(normalizeHistoryRows(data));
+        setPanelHistoryBootstrapped(true);
+      } catch (e: any) {
+        if (cancelled) return;
+        setPanelAcademicYears(academicYears);
+        setPanelHistoryRows([]);
+        setPanelHistoryBootstrapped(true);
+        setPanelHistoryError(e?.response?.data?.detail || e?.message || "Failed to load teaching history.");
+      } finally {
+        if (!cancelled) setPanelHistoryLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, academicYears, termLabel]);
+
+  useEffect(() => {
+    if (!selected || !panelHistoryBootstrapped) return;
+    if (panelAcademicYears.length === 0) {
+      setPanelHistoryRows([]);
+      return;
+    }
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        setPanelHistoryLoading(true);
+        setPanelHistoryError("");
+        const ay = panelAcademicYears[historyYearIndex];
+        const data = (await getFacultyHistory((selected as any).user_id || selected.faculty_id, ay)) as OMHistoryResponse;
+        if (cancelled) return;
+        setPanelHistoryRows(normalizeHistoryRows(data));
+      } catch (e: any) {
+        if (cancelled) return;
+        setPanelHistoryRows([]);
+        setPanelHistoryError(e?.response?.data?.detail || e?.message || "Failed to load teaching history.");
+      } finally {
+        if (!cancelled) setPanelHistoryLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [selected, historyYearIndex, panelAcademicYears, panelHistoryBootstrapped]);
 
   return (
-    <main className="w-full px-8 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Faculty Directory</h1>
-        <p className="text-sm text-gray-600">Manage faculty list and their schedules for {termLabel || ""}</p>
-      </header>
-
-      {err && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>
-      )}
-
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-        <div className="relative flex-1 min-w-[260px]">
-          <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
-          <input
-            ref={searchRef}
-            value={searchInput}
-            onChange={(e) => setSearchInput(e.target.value)}
-            placeholder="Search by name or email…"
-            className="w-full rounded-lg border border-gray-300 px-9 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-          />
-          {searchInput && (
-            <button
-              type="button"
-              onClick={() => {
-                setSearchInput("");
-                setSearch("");
-                requestAnimationFrame(() => searchRef.current?.focus());
-              }}
-              className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
-              aria-label="Clear search"
-            >
-              ×
-            </button>
-          )}
-        </div>
-
-        <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
-        <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
-        <SelectBox value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
-      </div>
-
-      <section className="space-y-6">
-        {loading ? (
-          <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
-            <table className="w-full table-fixed text-sm">
-              <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
-                    Loading…
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+    <div className="min-h-screen w-full bg-gray-50 text-slate-900">
+      <main className="w-full px-6 py-6">
+        <header className="mb-4 flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-2xl font-bold">Faculty Directory</h1>
+            <p className="text-sm text-gray-600">
+              Manage faculty profiles, schedules, and teaching history for {termLabel || "the active term"}.
+            </p>
           </div>
-        ) : rows.length === 0 ? (
-          <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
-            <table className="w-full table-fixed text-sm">
-              <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                  <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                  <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                  <th className="w-[14.2857%] text-center px-2 py-2">Actions</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={7}>
-                    No results
-                  </td>
-                </tr>
-              </tbody>
-            </table>
+        </header>
+
+        {err && (
+          <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+            {err}
           </div>
-        ) : (
-          grouped.map(([dept, items]) => (
-            <div key={dept} className="space-y-2">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <h2 className="text-base font-semibold text-gray-800">{dept}</h2>
-                  <span className="text-xs text-gray-500">{`Showing ${items.length} of ${baselineTotalFaculty || items.length}`}</span>
-                </div>
-              </div>
+        )}
 
-              <div className="border border-gray-200 bg-white shadow-sm overflow-visible rounded-xl">
-                <div className="overflow-x-auto rounded-xl">
-                  <table className="w-full table-fixed text-sm">
-                    <thead className="bg-gray-50 border-b text-gray-900">
-                      <tr>
-                        <th className="w-[14.2857%] text-left px-4 py-2">Faculty</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Faculty Type</th>
-                        <th className="w-[14.2857%] text-left px-4 py-2">Certifications</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Hire Date</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Teaching Years</th>
-                        <th className="w-[14.2857%] text-center px-4 py-2">Status</th>
-                        <th className="w-[14.2857%] text-center px-2 py-2"> </th>
-                      </tr>
-                    </thead>
-
-                    <tbody className="divide-y">
-                      {items.map((r) => {
-                        const s = String(r.status || "").toLowerCase();
-                        const chip =
-                          s.includes("active")
-                            ? "bg-emerald-100 text-emerald-700"
-                            : s.includes("leave") || s.includes("inactive")
-                              ? "bg-amber-100 text-amber-700"
-                              : "bg-gray-100 text-gray-700";
-
-                        const cert = summarizeCertifications(r.certifications);
-
-                        const hireDate = formatHireDateDisplay((r as any)?.hire_date);
-
-                        return (
-                          <tr key={r.faculty_id} className="hover:bg-gray-50">
-                            <td className="px-4 py-3 text-emerald-700 font-semibold">
-                              {r.name || "—"}
-                              <div className="text-xs text-gray-500">{r.email || "—"}</div>
-                            </td>
-
-                            <td className="px-4 py-3 text-center">{r.faculty_type || "—"}</td>
-
-                            <td className="px-4 py-3">
-                              <div
-                                className="block w-full max-w-full overflow-hidden text-ellipsis whitespace-nowrap text-gray-900"
-                                title={cert.full}
-                              >
-                                {cert.display}
-                              </div>
-                            </td>
-
-                            <td className="px-4 py-3 text-center whitespace-nowrap">{hireDate}</td>
-
-                            <td className="px-4 py-3 text-center">{(r.teaching_years ?? "—") as any}</td>
-
-                            <td className="px-4 py-3 text-center">
-                              <span className={cls("inline-block rounded-full px-3 py-1 text-xs font-semibold", chip)}>
-                                {r.status || "—"}
-                              </span>
-                            </td>
-
-                            <td className="px-2 py-3 text-center">
-                              <div
-                                className="relative flex items-center justify-center"
-                              >
-                                <button
-                                  type="button"
-                                  onClick={(e) => openActionsMenu(r, e.currentTarget)}
-                                  className={cls(
-                                    // No extra "white box" around the 3-dots. Keep it clean and table-native.
-                                    "inline-flex h-9 w-9 items-center justify-center rounded-full text-gray-700 hover:bg-gray-100",
-                                    openMenuId === r.faculty_id ? "bg-gray-100" : ""
-                                  )}
-                                  aria-haspopup="menu"
-                                  aria-expanded={openMenuId === r.faculty_id}
-                                  aria-label="Actions"
-                                  title="Actions"
-                                >
-                                  <MoreVertical className="h-4 w-4" />
-                                </button>
-                              </div>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
+        <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
+          <div className="flex items-start gap-3">
+            <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+              <GraduationCap className="h-5 w-5" />
+            </div>
+            <div>
+              <div className="font-semibold">Faculty Management</div>
+              <div className="text-xs text-slate-600">
+                Select any faculty member to review profile details on the right, with schedule and teaching history displayed directly in the viewer.
               </div>
             </div>
-          ))
-        )}
-      </section>
+          </div>
+        </div>
 
-      {/* Actions dropdown menu (portal: always on top, not clipped by overflow containers) */}
-      {openMenuId && openMenuRow && menuPos
-        ? createPortal(
-            <div
-              ref={openMenuRef}
-              role="menu"
-              style={{ position: "fixed", top: menuPos.top, left: menuPos.left }}
-              className="z-[5000] w-56 overflow-hidden rounded-xl border border-gray-200 bg-white shadow-lg"
-            >
+        <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="relative min-w-[260px] flex-1">
+            <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
+            <input
+              ref={searchRef}
+              value={searchInput}
+              onChange={(e) => setSearchInput(e.target.value)}
+              placeholder="Search by name or email…"
+              className="w-full rounded-lg border border-gray-300 px-9 py-2 pr-8 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+            />
+            {searchInput && (
               <button
                 type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
                 onClick={() => {
-                  setOpenMenuId(null);
-                  openModal("schedule", openMenuRow);
+                  setSearchInput("");
+                  setSearch("");
+                  window.requestAnimationFrame(() => searchRef.current?.focus());
                 }}
+                className="absolute right-2 top-1/2 -translate-y-1/2 text-neutral-400 hover:text-neutral-600"
+                aria-label="Clear search"
               >
-                <Calendar className="h-4 w-4 text-gray-500" />
-                <span>Schedule</span>
+                ×
               </button>
+            )}
+          </div>
 
-              <button
-                type="button"
-                role="menuitem"
-                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
-                onClick={() => {
-                  setOpenMenuId(null);
-                  openModal("history", openMenuRow);
-                }}
-              >
-                <BookOpen className="h-4 w-4 text-gray-500" />
-                <span>Teaching History</span>
-              </button>
-            </div>,
-            document.body
-          )
-        : null}
+          <SelectBox value={department} onChange={setDepartment} options={deptOptions} />
+          <SelectBox value={statusFilter} onChange={setStatusFilter} options={statusOptions} />
+          <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
+        </div>
 
-      {/* -------- Schedule / History Modals -------- */}
-      {activeModal && selected && (
-        <div className="fixed inset-0 z-[2000] grid place-items-center bg-black/40 p-4">
-          <div className="relative w-full max-w-screen-xl rounded-2xl bg-white shadow-2xl overflow-y-auto max-h-[90vh]">
-            {/* Top-right close (X) */}
-            <button
-              type="button"
-              onClick={closeModal}
-              aria-label="Close"
-              className="absolute right-4 top-4 inline-flex h-9 w-9 items-center justify-center rounded-full border border-gray-200 bg-white text-gray-600 shadow-sm hover:bg-gray-50 hover:text-gray-800"
-            >
-              <XIcon className="h-5 w-5" />
-            </button>
+        <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-[minmax(260px,0.88fr)_minmax(0,1.62fr)]">
+          <div className="min-w-0 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm md:max-h-[calc(100vh-3rem)]">
+            <div className="border-b bg-gray-50 px-4 py-3">
+              <div className="text-sm font-semibold text-gray-900">Faculty List</div>
+              <div className="text-xs text-gray-500">
+                {loading ? "Loading faculty records…" : `${rows.length} faculty record${rows.length === 1 ? "" : "s"} shown`}
+              </div>
+            </div>
 
-            <div className="p-6 pt-10">
-              {!!modalError && (
-                <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-                  {modalError}
-                </div>
-              )}
+            <div className="overflow-auto md:max-h-[calc(100vh-8rem)]">
+              <table className="w-full table-fixed text-sm">
+                <colgroup>
+                  <col className="w-[68%]" />
+                  <col className="w-[32%]" />
+                </colgroup>
+                <thead className="border-b bg-gray-50 text-gray-900">
+                  <tr>
+                    <th className="px-4 py-3 text-left">Faculty</th>
+                    <th className="px-3 py-3 text-center">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y">
+                  {loading ? (
+                    <tr>
+                      <td colSpan={2} className="px-4 py-6 text-center text-gray-500">
+                        Loading…
+                      </td>
+                    </tr>
+                  ) : groupedFacultyRows.length === 0 ? (
+                    <tr>
+                      <td colSpan={2} className="px-4 py-6 text-center text-gray-500">
+                        No results
+                      </td>
+                    </tr>
+                  ) : (
+                    groupedFacultyRows.map((group) => (
+                      <Fragment key={group.department}>
+                        <tr className="bg-slate-100/90">
+                          <td colSpan={2} className="px-4 py-3 text-left align-middle">
+                            <div className="text-sm font-semibold text-slate-900">{group.department}</div>
+                            <div className="text-xs text-slate-500">Showing {group.rows.length} of {group.total}</div>
+                          </td>
+                        </tr>
+                        {group.rows.map((row) => {
+                          const isActive = selected?.faculty_id === row.faculty_id;
+                          const statusLabel = row.status || "—";
+                          const normalizedStatus = String(statusLabel).trim().toLowerCase();
+                          const isAvailable = normalizedStatus === "active";
 
-              {activeModal === "schedule" && (
-                <>
-                  <div className="text-center mb-4">
-                    <h2 className="text-lg font-semibold text-emerald-700">Faculty Schedule</h2>
-                    <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
+                          return (
+                            <tr
+                              key={row.faculty_id}
+                              onClick={() => setSelected(row)}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" || e.key === " ") {
+                                  e.preventDefault();
+                                  setSelected(row);
+                                }
+                              }}
+                              tabIndex={0}
+                              role="button"
+                              aria-label={`View ${getFacultyViewerName(row as FacultyRow & { first_name?: string; last_name?: string }) || "faculty"} details`}
+                              className={cls(
+                                "cursor-pointer transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-emerald-500/30",
+                                isActive && "bg-emerald-50/70"
+                              )}
+                            >
+                              <td className="px-4 py-4 font-semibold text-emerald-700">
+                                <div
+                                  className="truncate"
+                                  title={getFacultyDisplayName(
+                                    row as FacultyRow & { first_name?: string; last_name?: string; display_name?: string }
+                                  )}
+                                >
+                                  {getFacultyDisplayName(
+                                    row as FacultyRow & { first_name?: string; last_name?: string; display_name?: string }
+                                  )}
+                                </div>
+                                <div className="truncate text-xs font-normal text-gray-500" title={row.email || "—"}>
+                                  {row.email || "—"}
+                                </div>
+                              </td>
+                              <td className="px-3 py-4 text-center">
+                                <span
+                                  className={cls(
+                                    "inline-flex max-w-full items-center justify-center rounded-full px-2.5 py-1 text-xs font-semibold ring-1",
+                                    isAvailable
+                                      ? "bg-emerald-100 text-emerald-800 ring-emerald-200"
+                                      : "bg-amber-100 text-amber-800 ring-amber-200"
+                                  )}
+                                  title={statusLabel}
+                                >
+                                  <span className="truncate">{statusLabel}</span>
+                                </span>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </Fragment>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <aside className="min-w-0 md:sticky md:top-6 md:self-start">
+            <div className="flex max-h-[calc(100vh-3rem)] min-h-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+              <div className="border-b bg-gradient-to-r from-slate-900 via-emerald-900 to-emerald-700 px-5 py-5 text-white">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div className="text-xs font-semibold uppercase tracking-[0.2em] text-white/70">Faculty Viewer</div>
+                    <h2 className="mt-1 text-lg font-semibold">
+                      {selected
+                        ? getFacultyViewerName(selected as FacultyRow & { first_name?: string; last_name?: string })
+                        : "Select a faculty member"}
+                    </h2>
+                    <p className="mt-1 text-sm text-white/85">
+                      {selected?.email || "Choose any faculty from the list to inspect profile details and manage records here."}
+                    </p>
                   </div>
+                  {selected && (
+                    <button
+                      type="button"
+                      onClick={() => setSelected(null)}
+                      className="rounded-xl border border-white/15 bg-white/10 p-2 text-white/90 transition hover:bg-white/20"
+                      aria-label="Close faculty viewer"
+                      title="Close faculty viewer"
+                    >
+                      <PanelRightClose className="h-5 w-5" />
+                    </button>
+                  )}
+                </div>
 
-                  {/* Term header (Chair-style) */}
-                  {!!schedule && (
-                    <div className="mb-4">
-                      {/* Only show ONE schedule (latest term). No prev/next buttons per UI feedback. */}
-                      <div className="flex justify-center">
-                        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-1.5">
-                          <span className="text-sm font-semibold text-emerald-900">{scheduleMeta.centerTitle}</span>
-                          {scheduleMeta.isActive && (
-                            <span className="rounded-full bg-emerald-600 px-2 py-0.5 text-[11px] font-semibold text-white">
-                              Active
+                {selected && (
+                  <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                    <div className="rounded-xl bg-white/10 px-3 py-2">
+                      <div className="text-[11px] uppercase tracking-wide text-white/70">Department</div>
+                      <div className="mt-1 text-sm font-medium text-white">{selected.department || "—"}</div>
+                    </div>
+                    <div className="rounded-xl bg-white/10 px-3 py-2">
+                      <div className="text-[11px] uppercase tracking-wide text-white/70">Faculty Type</div>
+                      <div className="mt-1 text-sm font-medium text-white">{selected.faculty_type || "—"}</div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50 p-5">
+                {!selected && (
+                  <ViewerPlaceholder>
+                    <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-emerald-700">
+                      <GraduationCap className="h-6 w-6" />
+                    </div>
+                    <h3 className="mt-4 text-base font-semibold text-gray-900">No faculty selected yet</h3>
+                    <p className="mt-2 text-sm text-gray-600">
+                      Click any faculty row to preview profile details, then use the viewer on the right.
+                    </p>
+                  </ViewerPlaceholder>
+                )}
+
+                {selected && (
+                  <div className="grid grid-cols-1 gap-4">
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <GraduationCap className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">Faculty Teaching Overview</h3>
+                      </div>
+
+                      <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-3">
+                        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-gray-600">Teaching Units</div>
+                          <div className="mt-2 text-sm font-semibold text-gray-900">{selectedSummary.teachingUnits}</div>
+                        </div>
+                        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-gray-600">Hire Date</div>
+                          <div className="mt-2 text-sm font-semibold text-gray-900">{selectedSummary.hireDate}</div>
+                        </div>
+                        <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                          <div className="text-xs font-medium uppercase tracking-wide text-gray-600">Teaching Years</div>
+                          <div className="mt-2 text-sm font-semibold text-gray-900">{selectedSummary.teachingYears}</div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                      <div className="flex items-center gap-2 text-gray-900">
+                        <BookOpen className="h-4 w-4 text-emerald-700" />
+                        <h3 className="font-semibold">Certifications</h3>
+                      </div>
+
+                      {selectedSummary.certifications.count > 0 ? (
+                        <div className="mt-3 space-y-2">
+                          <div className="text-sm text-gray-700" title={selectedSummary.certifications.full}>
+                            {selectedSummary.certifications.full}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                          No certifications recorded for this faculty member yet.
+                        </div>
+                      )}
+
+                      <div className="mt-6 border-t border-gray-200 pt-6">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-900">Schedule</h4>
+                            <div className="mt-1 text-xs text-gray-500">Current teaching load displayed directly in the panel.</div>
+                          </div>
+                          {panelScheduleTermTitle && (
+                            <div className="rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-900">
+                              {panelScheduleTermTitle}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="mt-4">
+                          {panelScheduleError ? (
+                            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                              {panelScheduleError}
+                            </div>
+                          ) : panelScheduleLoading ? (
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                              Loading schedule…
+                            </div>
+                          ) : panelScheduleRows.length === 0 ? (
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                              No schedule records found.
+                            </div>
+                          ) : (
+                            renderScheduleTable(panelScheduleRows)
+                          )}
+                        </div>
+                      </div>
+
+                      <div className="mt-6 border-t border-gray-200 pt-6">
+                        <div className="flex items-center justify-between gap-3">
+                          <div>
+                            <h4 className="text-sm font-semibold text-gray-900">Teaching History</h4>
+                            <div className="mt-1 text-xs text-gray-500">Previous terms shown here without extra actions.</div>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setHistoryYearIndex((value) => Math.min(value + 1, panelAcademicYears.length - 1))}
+                              disabled={historyYearIndex >= panelAcademicYears.length - 1}
+                              className={cls(
+                                "rounded-lg border px-3 py-1.5 text-xs font-medium shadow-sm",
+                                historyYearIndex >= panelAcademicYears.length - 1
+                                  ? "cursor-not-allowed bg-gray-100 text-gray-400"
+                                  : "bg-white text-gray-700 hover:bg-gray-50"
+                              )}
+                            >
+                              ← Previous
+                            </button>
+                            <span className="min-w-[92px] text-center text-sm font-semibold text-gray-800">
+                              {historyYearLabel}
                             </span>
+                            <button
+                              type="button"
+                              onClick={() => setHistoryYearIndex((value) => Math.max(value - 1, 0))}
+                              disabled={historyYearIndex <= 0}
+                              className={cls(
+                                "rounded-lg border px-3 py-1.5 text-xs font-medium shadow-sm",
+                                historyYearIndex <= 0
+                                  ? "cursor-not-allowed bg-gray-100 text-gray-400"
+                                  : "bg-white text-gray-700 hover:bg-gray-50"
+                              )}
+                            >
+                              Next →
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="mt-4">
+                          {panelHistoryError ? (
+                            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                              {panelHistoryError}
+                            </div>
+                          ) : panelHistoryLoading ? (
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                              Loading teaching history…
+                            </div>
+                          ) : panelHistoryRows.length === 0 ? (
+                            <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-600">
+                              No teaching history found.
+                            </div>
+                          ) : (
+                            renderTeachingHistoryByTerm(panelHistoryRows)
                           )}
                         </div>
                       </div>
                     </div>
-                  )}
-
-                  {!schedule ? (
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">
-                      Loading schedule…
-                    </div>
-                  ) : (schedule?.teaching_load || []).length === 0 ? (
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                      No schedule records found.
-                    </div>
-                  ) : (
-                    renderScheduleTable(schedule?.teaching_load || [])
-                  )}
-                </>
-              )}
-
-              {activeModal === "history" && (
-                <>
-                  <div className="text-center mb-4">
-                    <h2 className="text-lg font-semibold text-emerald-700">Teaching History</h2>
-                    <p className="text-sm text-neutral-500">{selected?.name ?? ""}</p>
                   </div>
-
-                  {/* AY header (Chair-style) */}
-                  <div className="mb-4">
-                    <div className="grid grid-cols-3 items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setHistoryYearIndex((i) => Math.min(i + 1, historyYears.length - 1))}
-                        disabled={historyYearIndex >= historyYears.length - 1}
-                        className={cls(
-                          "justify-self-start inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium shadow-sm",
-                          historyYearIndex >= historyYears.length - 1
-                            ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                            : "bg-white hover:bg-gray-50 text-gray-700"
-                        )}
-                      >
-                        <span>←</span>
-                        <span>Previous AY</span>
-                      </button>
-
-                      <div className="justify-self-center text-center">
-                        <div className="inline-flex items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-4 py-1.5">
-                          <span className="text-sm font-semibold text-emerald-900">{historyYearLabel}</span>
-                        </div>
-                        {historyYears.length > 0 && (
-                          <div className="mt-1 text-xs text-gray-500">
-                            {historyYearIndex + 1} of {historyYears.length}
-                          </div>
-                        )}
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => setHistoryYearIndex((i) => Math.max(i - 1, 0))}
-                        disabled={historyYearIndex <= 0}
-                        className={cls(
-                          "justify-self-end inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-sm font-medium shadow-sm",
-                          historyYearIndex <= 0
-                            ? "bg-gray-100 text-gray-400 cursor-not-allowed"
-                            : "bg-white hover:bg-gray-50 text-gray-700"
-                        )}
-                      >
-                        <span>Next AY</span>
-                        <span>→</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {!history ? (
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-2 text-sm text-neutral-600">
-                      Loading history…
-                    </div>
-                  ) : (history?.teaching_history || []).length === 0 ? (
-                    <div className="rounded-lg border border-neutral-200 bg-neutral-50 px-3 py-3 text-sm text-neutral-600">
-                      No teaching history found.
-                    </div>
-                  ) : (
-                    renderTeachingHistoryByTerm(history?.teaching_history || [])
-                  )}
-                </>
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          </aside>
         </div>
-      )}
-    </main>
+      </main>
+    </div>
   );
 }

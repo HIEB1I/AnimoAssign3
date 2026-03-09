@@ -103,7 +103,8 @@ export type RowFlagType =
   | "DAY_MISMATCH"
   | "TIME_MISMATCH"
   | "GS_NO_PHD"
-  | "GE_BLOCKED_SLOT";
+  | "GE_BLOCKED_SLOT"
+  | "CROSS_CAMPUS_GAP";
 
 export interface RowFlag {
   type: RowFlagType;
@@ -139,6 +140,21 @@ interface ValidationContext {
   sectionCourse?: Record<string, string>;
   courseTypeOfCourse?: Record<string, string>;
   campusNames?: Record<string, string>;
+  sectionOwnerProgram?: Record<string, string>;
+  sectionOwnerBatch?: Record<string, string>;
+  blockedGeCmps2?: Array<{
+    campus_id?: string;
+    campus_name?: string;
+    course_id?: string;
+    course_code?: string;
+    section_id?: string;
+    section_code?: string;
+    day?: string;
+    begin?: string;
+    end?: string;
+    program?: string;
+    batch?: string;
+  }>;
 }
 
 
@@ -1066,6 +1082,8 @@ type Row = {
   conflictNote?: string;
   editable?: boolean;
   campus_id?: string;
+  owner_program_id?: string;
+  owner_batch_id?: string;
   /** When OM has already finalized this course for the faculty */
   finalized?: boolean;
 
@@ -1706,83 +1724,168 @@ function checkGeBlockedSlots(
 ): RowFlagsById {
   const result: RowFlagsById = {};
 
+  const blockedSlots = Array.isArray(ctx.blockedGeCmps2) ? ctx.blockedGeCmps2 : [];
+  if (blockedSlots.length === 0) return result;
+
   const sectionCampus = ctx.sectionCampus || {};
-  const sectionCourse = ctx.sectionCourse || {};
-  const courseType = ctx.courseTypeOfCourse || {};
+  const sectionOwnerProgram = ctx.sectionOwnerProgram || {};
+  const sectionOwnerBatch = ctx.sectionOwnerBatch || {};
 
-  type BlockOwner = {
-    rowId: string;
-    label: string; // e.g., "CCPROG1 S11"
-  };
+  const toMinutes = (v?: string): number | null => _hhmmToMinutes(v);
 
-  // key = "DAY|BEGIN|END" => owner (GE @ CMPS0002 row)
-  const blocked: Record<string, BlockOwner> = {};
-
-  const makeKey = (
-    day?: string,
-    begin?: string,
-    end?: string
-  ): string | null => {
-    const d = (day || "").trim().toUpperCase();
-    const b = (begin || "").trim();
-    const e = (end || "").trim();
-    if (!d || !b || !e) return null;
-    return `${d}|${b}|${e}`;
-  };
-
-  // 1) First pass: record all GE @ CMPS0002 slots as "blocked"
   for (const row of rows) {
-    const sid = row.id;
+    const sid = String(row.id || "").trim();
     if (!sid) continue;
 
-    const campus = (sectionCampus[sid] || "").toUpperCase();
+    const campus = String(_rowCampusId(row, ctx) || sectionCampus[sid] || "").trim().toUpperCase();
     if (campus !== "CMPS0002") continue;
 
-    const cid = sectionCourse[sid];
-    const toc = (courseType[cid] || "").toUpperCase();
-    if (toc !== "GE") continue; // only GE courses create blocked slots
-
-    const label = `${row.course || "?"} ${row.section || ""}`.trim();
-
-    const k1 = makeKey(row.day1, row.begin1, row.end1);
-    if (k1) blocked[k1] = { rowId: sid, label };
-
-    const k2 = makeKey(row.day2, row.begin2, row.end2);
-    if (k2) blocked[k2] = { rowId: sid, label };
-  }
-
-  if (Object.keys(blocked).length === 0) return result;
-
-  // 2) Second pass: for ALL CMPS0002 rows, if they use a blocked slot from another section → flag
-  for (const row of rows) {
-    const sid = row.id;
-    if (!sid) continue;
-
-    const campus = (sectionCampus[sid] || "").toUpperCase();
-    if (campus !== "CMPS0002") continue; // only CMPS0002 rows are affected
+    const rowProgram = String(row.owner_program_id || sectionOwnerProgram[sid] || "").trim();
+    const rowBatch = String(row.owner_batch_id || sectionOwnerBatch[sid] || "").trim();
 
     const rowFlags: RowFlag[] = [];
+    const checked = new Set<string>();
 
     const checkSlot = (day?: string, begin?: string, end?: string) => {
-      const key = makeKey(day, begin, end);
-      if (!key) return;
+      const d = String(day || "").trim().toUpperCase();
+      const st = toMinutes(begin);
+      const en = toMinutes(end);
+      if (!d || st == null || en == null || en <= st) return;
 
-      const owner = blocked[key];
-      if (!owner) return;
-      if (owner.rowId === sid) return; // it's the same GE section, allowed
+      for (const blocked of blockedSlots) {
+        if (String(blocked.campus_id || "").trim().toUpperCase() !== "CMPS0002") continue;
+        if (String(blocked.section_id || "").trim() === sid) continue;
+        if (String(blocked.day || "").trim().toUpperCase() !== d) continue;
 
-      rowFlags.push({
-        type: "GE_BLOCKED_SLOT",
-        severity: "error",
-        message: `This CMPS0002 schedule uses a GE-reserved slot also used by ${owner.label}.`,
-      });
+        const blockedProgram = String(blocked.program || "").trim();
+        const blockedBatch = String(blocked.batch || "").trim();
+        if (rowProgram || rowBatch || blockedProgram || blockedBatch) {
+          if (rowProgram !== blockedProgram || rowBatch !== blockedBatch) continue;
+        }
+
+        const bst = toMinutes(blocked.begin);
+        const ben = toMinutes(blocked.end);
+        if (bst == null || ben == null || ben <= bst) continue;
+        if (en <= bst || st >= ben) continue;
+
+        const key = `${sid}|${blocked.section_id}|${d}|${blocked.begin}|${blocked.end}`;
+        if (checked.has(key)) continue;
+        checked.add(key);
+
+        const ownerLabel = `${blocked.course_code || blocked.course_id || "?"} ${blocked.section_code || ""}`.trim();
+        rowFlags.push({
+          type: "GE_BLOCKED_SLOT",
+          severity: "error",
+          message: `This Laguna schedule overlaps a blocked GE slot used by ${ownerLabel}.`,
+        });
+      }
     };
 
     checkSlot(row.day1, row.begin1, row.end1);
     checkSlot(row.day2, row.begin2, row.end2);
 
-    if (rowFlags.length > 0) {
-      result[sid] = (result[sid] || []).concat(rowFlags);
+    if (rowFlags.length > 0) result[sid] = rowFlags;
+  }
+
+  return result;
+}
+
+function _rowCampusId(row: Row, ctx: ValidationContext): string {
+  return (
+    String(row.campus_id || "").trim().toUpperCase() ||
+    String((ctx.sectionCampus || {})[row.id] || "").trim().toUpperCase()
+  );
+}
+
+function _rowCampusLabel(row: Row, ctx: ValidationContext): string {
+  const cid = _rowCampusId(row, ctx);
+  return String((ctx.campusNames || {})[cid] || cid || "Unknown campus");
+}
+
+function _hhmmToMinutes(value?: string): number | null {
+  const s = String(value || "").trim();
+  if (!/^\d{3,4}$/.test(s)) return null;
+  const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
+  const mm = s.slice(-2);
+  const h = Number(hh);
+  const m = Number(mm);
+  if (Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function checkCrossCampusGaps(rows: Row[], ctx: ValidationContext): RowFlagsById {
+  const result: RowFlagsById = {};
+  const minGapMinutes = 180;
+
+  type Slot = {
+    row: Row;
+    day: string;
+    begin: number;
+    end: number;
+    campusId: string;
+    campusLabel: string;
+  };
+
+  const byFacultyDay: Record<string, Slot[]> = {};
+
+  for (const row of rows) {
+    const fid = String(row.faculty_id || "").trim();
+    if (!fid) continue;
+
+    const campusId = _rowCampusId(row, ctx);
+    if (!campusId) continue;
+    const campusLabel = _rowCampusLabel(row, ctx);
+
+    const slots = [
+      { day: row.day1, begin: row.begin1, end: row.end1 },
+      { day: row.day2, begin: row.begin2, end: row.end2 },
+    ];
+
+    for (const slot of slots) {
+      const day = String(slot.day || "").trim().toUpperCase();
+      const begin = _hhmmToMinutes(slot.begin);
+      const end = _hhmmToMinutes(slot.end);
+      if (!day || begin == null || end == null || end <= begin) continue;
+      const key = `${fid}|${day}`;
+      (byFacultyDay[key] ||= []).push({ row, day, begin, end, campusId, campusLabel });
+    }
+  }
+
+  for (const slots of Object.values(byFacultyDay)) {
+    slots.sort((a, b) => a.begin - b.begin);
+    for (let i = 0; i < slots.length; i += 1) {
+      for (let j = i + 1; j < slots.length; j += 1) {
+        const left = slots[i];
+        const right = slots[j];
+        if (left.campusId === right.campusId) continue;
+
+        let gapMinutes: number;
+        if (left.end <= right.begin) {
+          gapMinutes = right.begin - left.end;
+        } else if (right.end <= left.begin) {
+          gapMinutes = left.begin - right.end;
+        } else {
+          gapMinutes = -1;
+        }
+
+        if (gapMinutes >= minGapMinutes) continue;
+
+        const message =
+          gapMinutes < 0
+            ? `Cross-campus conflict: faculty has overlapping ${left.campusLabel} and ${right.campusLabel} classes on ${left.day}.`
+            : `Cross-campus conflict: faculty has ${left.campusLabel} and ${right.campusLabel} classes on ${left.day} with only ${gapMinutes} minutes between them. At least 180 minutes is required.`;
+
+        for (const rowId of [left.row.id, right.row.id]) {
+          if (!result[rowId]) result[rowId] = [];
+          if (!result[rowId].some((flag) => flag.type === "CROSS_CAMPUS_GAP" && flag.message === message)) {
+            result[rowId].push({
+              type: "CROSS_CAMPUS_GAP",
+              severity: "error",
+              message,
+            });
+          }
+        }
+      }
     }
   }
 
@@ -1881,12 +1984,14 @@ function validateAllRows(rows: Row[], ctx: ValidationContext): RowFlagsById {
     flags[rowId].push(...conflictFlags);
   }
 
-  for (const [rowId, conflictFlags] of Object.entries(doubleBookedFlags)) {
+  // 4) cross-row: same faculty cross-campus gaps below 3 hours
+  const crossCampusFlags = checkCrossCampusGaps(rows, ctx);
+  for (const [rowId, conflictFlags] of Object.entries(crossCampusFlags)) {
     if (!flags[rowId]) flags[rowId] = [];
     flags[rowId].push(...conflictFlags);
   }
 
-  // 4) cross-row: GE @ CMPS0002 blocked slots
+  // 5) cross-row: GE @ CMPS0002 blocked slots
   const geFlags = checkGeBlockedSlots(rows, ctx);
   for (const [rowId, geRowFlags] of Object.entries(geFlags)) {
     if (!flags[rowId]) flags[rowId] = [];
@@ -3139,14 +3244,6 @@ const chairPlantillaFilename =
   (chairPlantillaHeader?.plantilla_file && String(chairPlantillaHeader.plantilla_file).replace(/\.pdf$/i, ".xls")) ||
   "Faculty_Plantilla.xls";
 
-const openChairPlantillaPreview = useCallback(() => {
-  if (!userId) {
-    alert("Missing user session.");
-    return;
-  }
-  setChairPlantillaOpen(true);
-}, [userId]);
-
 const closeChairPlantillaPreview = useCallback(() => {
   if (chairPlantillaLoading) return;
   setChairPlantillaOpen(false);
@@ -3184,6 +3281,7 @@ function closeConfirm(ok: boolean) {
 // Fetch plantilla data when modal opens (copied from CHAIR_Plantilla; no dependency on that page).
 useEffect(() => {
   if (!chairPlantillaOpen) return;
+  if (chairExportExcel) return;
 
   (async () => {
     try {
@@ -3211,7 +3309,7 @@ useEffect(() => {
       setChairPlantillaLoading(false);
     }
   })();
-}, [chairPlantillaOpen, userId]);
+}, [chairPlantillaOpen, chairExportExcel, userId]);
 
 const chairHandleExportExcel = useCallback(() => {
   if (!chairPlantillaFilteredRows || chairPlantillaFilteredRows.length === 0) {
@@ -3612,6 +3710,7 @@ useEffect(() => {
   const [preferredByFaculty, setPreferredByFaculty] = useState<
     Record<string, number>
   >({});
+  const [submittedPrefFacultyIds, setSubmittedPrefFacultyIds] = useState<string[]>([]);
 
   async function runAutoAssign() {
     if (!userId) return;
@@ -3642,27 +3741,42 @@ useEffect(() => {
       console.log("DEBUG from run:", debug);
       console.log("Preferred map:", prefMap);
 
-      // Preserve already-finalized rows: auto-assign should not "move" them or clear their RFC indicators
-      const existingFinalized = new Map<string, Row>(
-        rows.filter((rr) => !!rr.finalized).map((rr) => [rr.id, rr])
+      // Preserve rows that must never be altered/removed by auto-assign.
+      // This includes:
+      //  - finalized rows (approved/finalized schedule state), and
+      //  - Faculty Service display-only rows that merely share table space with load assignment.
+      const preservedRows = new Map<string, Row>(
+        rows
+          .filter(
+            (rr) =>
+              !!rr.finalized ||
+              !!(rr as any).faculty_service_display_only ||
+              !!(rr as any).synced_from_faculty_service
+          )
+          .map((rr) => [rr.id, rr])
       );
 
       let nextRows: Row[] = Array.isArray(res?.rows) ? (res.rows as Row[]) : [];
-      if (existingFinalized.size) {
+      if (preservedRows.size) {
         const seen = new Set<string>();
         nextRows = nextRows.map((nr) => {
           const id = String((nr as any)?.id || "");
-          const fr = existingFinalized.get(id);
-          if (fr) {
+          const preserved = preservedRows.get(id);
+          if (preserved) {
             seen.add(id);
-            // Prefer the existing finalized row to avoid overwriting faculty/times/status
-            return { ...(nr as any), ...(fr as any), finalized: true } as Row;
+            // Prefer the existing preserved row to avoid overwriting/removing
+            // finalized rows and Faculty Service display-only rows.
+            return {
+              ...(nr as any),
+              ...(preserved as any),
+              finalized: !!(preserved as any).finalized,
+            } as Row;
           }
           return nr;
         });
-        // If backend did not return a finalized row, keep it in the table
-        for (const [id, fr] of existingFinalized.entries()) {
-          if (!seen.has(id)) nextRows.unshift(fr);
+        // If backend did not return a preserved row, keep it in the table.
+        for (const [id, preserved] of preservedRows.entries()) {
+          if (!seen.has(id)) nextRows.unshift(preserved);
         }
       }
 
@@ -4160,6 +4274,10 @@ const inferOmCampusId = useCallback((): string => {
     sectionCampus: {},
     sectionCourse: {},
     courseTypeOfCourse: {},
+    campusNames: {},
+    sectionOwnerProgram: {},
+    sectionOwnerBatch: {},
+    blockedGeCmps2: [],
   });
 
   const [rowFlags, setRowFlags] = useState<RowFlagsById>({});
@@ -4606,6 +4724,9 @@ const inferOmCampusId = useCallback((): string => {
 
   // Remove UI-only fields before persisting rows to the database.
   // (e.g., `selected` comes from checkbox selection and must never be stored.)
+  const isFacultyServiceDisplayOnlyRow = (r: Row | any): boolean =>
+    Boolean((r as any)?.faculty_service_display_only || (r as any)?.synced_from_faculty_service);
+
   const stripUiFieldsForPersist = (r: Row): Row => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const { selected, is_new_line, __local_only, ...rest } = (r as any) || {};
@@ -4864,6 +4985,7 @@ const inferOmCampusId = useCallback((): string => {
           (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
         return fid ? ({ ...r, faculty_id: fid } as Row) : r;
       })
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
       .filter((r) => !!(r.faculty_id || "").trim())
       .map(stripUiFieldsForPersist);
 
@@ -4883,11 +5005,14 @@ const inferOmCampusId = useCallback((): string => {
     // IMPORTANT: normalize faculty_id for *all* rows before saving.
     // The backend groups/updates rows by faculty_id; if OM selected a faculty by name only,
     // saving without faculty_id can cause fields (including Mode) to be treated as blank on reload.
-    const normalizedAllRows: Row[] = rows.map((r) => {
-      const fid =
-        (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
-      return fid ? ({ ...r, faculty_id: fid } as Row) : r;
-    }).map(stripUiFieldsForPersist);
+    const normalizedAllRows: Row[] = rows
+      .filter((r) => !isFacultyServiceDisplayOnlyRow(r))
+      .map((r) => {
+        const fid =
+          (r.faculty_id || "").trim() || facultyNameToId[r.faculty] || "";
+        return fid ? ({ ...r, faculty_id: fid } as Row) : r;
+      })
+      .map(stripUiFieldsForPersist);
     await submitOmLoadAssignment(userId, { rows: normalizedAllRows }, "save");
 
     // 3️⃣ Reset UI + reload from DB
@@ -4925,6 +5050,16 @@ const inferOmCampusId = useCallback((): string => {
       (rr) => !!(rr as any)?.__local_only
     );
 
+    // Preserve Faculty Service rows that are display-only inside the OM grid.
+    // These rows are sourced from Faculty Service and are intentionally not
+    // persisted by the load-assignment draft save. If the backend refresh only
+    // returns regular load rows, re-merge the existing Faculty Service rows so
+    // they remain visible in the grid and in the plantilla preview/export after
+    // Save Draft.
+    const facultyServiceDisplayRows: Row[] = (rows || []).filter((rr) =>
+      isFacultyServiceDisplayOnlyRow(rr)
+    );
+
     // Preserve current remarks drafts for client-only rows.
     const remarksDraftSnapshot = { ...(remarksDraftBySection || {}) } as Record<
       string,
@@ -4953,6 +5088,11 @@ const inferOmCampusId = useCallback((): string => {
 
     const prefMap = (res as any)?.preferred_units_by_faculty || {};
     setPreferredByFaculty(prefMap);
+    setSubmittedPrefFacultyIds(
+      Array.isArray((res as any)?.submitted_pref_faculty_ids)
+        ? (res as any).submitted_pref_faculty_ids
+        : []
+    );
 
     // hydrate validation context for row flags
     setValidationContext({
@@ -4966,6 +5106,10 @@ const inferOmCampusId = useCallback((): string => {
       sectionCampus: (res as any)?.sectionCampus || {},
       sectionCourse: (res as any)?.sectionCourse || {},
       courseTypeOfCourse: (res as any)?.courseTypeOfCourse || {},
+      campusNames: (res as any)?.campusNames || {},
+      sectionOwnerProgram: (res as any)?.sectionOwnerProgram || {},
+      sectionOwnerBatch: (res as any)?.sectionOwnerBatch || {},
+      blockedGeCmps2: Array.isArray((res as any)?.blockedGeCmps2) ? (res as any).blockedGeCmps2 : [],
     });
 
     setBlockedGeCmps2(
@@ -5005,11 +5149,46 @@ const inferOmCampusId = useCallback((): string => {
       begin2: normalizeServerTimeToHHMM(r?.begin2),
       end2: normalizeServerTimeToHHMM(r?.end2),
     }));
-    // Merge server rows with any client-only "Add new line" drafts that are still unsaved.
-    const serverIds = new Set(normalizedRows.map((x) => String((x as any)?.id)));
+
+    const preservedFacultyServiceById = new Map(
+      facultyServiceDisplayRows.map((rr) => [String((rr as any)?.id || ""), rr] as const)
+    );
+
+    const normalizedRowsWithFacultyService: Row[] = normalizedRows.map((r) => {
+      const id = String((r as any)?.id || "");
+      const preserved = preservedFacultyServiceById.get(id);
+      if (!preserved) return r;
+      return {
+        ...r,
+        ...preserved,
+        // Always reset transient checkbox state on refresh, even for preserved rows.
+        selected: false,
+        // Keep server-normalized times if the backend returned this same row.
+        begin1: normalizeServerTimeToHHMM((r as any)?.begin1 ?? (preserved as any)?.begin1),
+        end1: normalizeServerTimeToHHMM((r as any)?.end1 ?? (preserved as any)?.end1),
+        begin2: normalizeServerTimeToHHMM((r as any)?.begin2 ?? (preserved as any)?.begin2),
+        end2: normalizeServerTimeToHHMM((r as any)?.end2 ?? (preserved as any)?.end2),
+        faculty_service_display_only:
+          !!(r as any)?.faculty_service_display_only ||
+          !!(preserved as any)?.faculty_service_display_only,
+        synced_from_faculty_service:
+          !!(r as any)?.synced_from_faculty_service ||
+          !!(preserved as any)?.synced_from_faculty_service,
+      } as Row;
+    });
+
+    // Merge server rows with any client-only "Add new line" drafts that are still unsaved,
+    // then append preserved Faculty Service display rows that are not part of the server
+    // payload returned by the draft refresh.
+    const serverIds = new Set(
+      normalizedRowsWithFacultyService.map((x) => String((x as any)?.id))
+    );
     const mergedRows: Row[] = [
-      ...normalizedRows,
+      ...normalizedRowsWithFacultyService,
       ...localNewLineDrafts.filter((x) => !serverIds.has(String((x as any)?.id))),
+      ...facultyServiceDisplayRows.filter(
+        (x) => !serverIds.has(String((x as any)?.id))
+      ),
     ];
     setRows(mergedRows);
 
@@ -5232,7 +5411,7 @@ const handleApplyPendingDrafts = useCallback(
     try {
       const res = await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "approve"
       );
       await notifyChairLoadRecommendation(userId, {
@@ -5453,7 +5632,7 @@ if (!!(r as any).is_new_line) {
     try {
       await submitOmLoadAssignment(
         userId,
-        { rows: rows.map(stripUiFieldsForPersist) },
+        { rows: rows.filter((r) => !isFacultyServiceDisplayOnlyRow(r)).map(stripUiFieldsForPersist) },
         "save"
       );
       await loadFromServer(); // pull fresh rows from DB
@@ -5668,6 +5847,7 @@ async function handleSaveNewLineRow(r: Row) {
     faculty_id: string;
     faculty_name_display: string;
     preferred_units?: number | null;
+    employment_type?: "FT" | "PT" | string;
   };
 
   const facultyOptions = useMemo(() => {
@@ -5696,6 +5876,142 @@ async function handleSaveNewLineRow(r: Row) {
     });
     return map;
   }, [facultyList]);
+
+const chairRecommendationPlantillaRows = useMemo<ChairPlantillaRow[]>(() => {
+  const displayFacultyName = (r: Row) => {
+    const fid = String(r.faculty_id || "").trim();
+    const mapped = fid ? String(facultyById[fid]?.faculty_name_display || "").trim() : "";
+    const raw = String(r.faculty || "").trim();
+    return mapped || raw;
+  };
+
+  const toDayLabel = (raw: string) => {
+    const val = String(raw || "").trim().toUpperCase();
+    const map: Record<string, string> = {
+      M: "M",
+      T: "T",
+      W: "W",
+      H: "H",
+      TH: "H",
+      F: "F",
+      S: "S",
+      SU: "Su",
+      SUN: "Su",
+      SAT: "S",
+    };
+    return map[val] || val;
+  };
+
+  const formatTimeRange = (begin: string, end: string) => {
+    const b = String(begin || "").trim();
+    const e = String(end || "").trim();
+    if (!b && !e) return "";
+    if (!b) return e;
+    if (!e) return b;
+    return `${b}-${e}`;
+  };
+
+  const toNumberOrNull = (value: unknown): number | null => {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const assigned = (rows || []).filter((r) => {
+    const facultyName = displayFacultyName(r).trim();
+    const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
+    if (!facultyName) return false;
+    if (/^(tba|unassigned|-|—)$/i.test(facultyName)) return false;
+    if (/^SPECIAL\s*CLASS$/i.test(remarks)) return false;
+    return isRowAssigned(r);
+  });
+
+  const sorted = [...assigned].sort((a, b) => {
+    const facultyCmp = displayFacultyName(a).localeCompare(displayFacultyName(b));
+    if (facultyCmp !== 0) return facultyCmp;
+    const courseCmp = String(a.course || "").localeCompare(String(b.course || ""));
+    if (courseCmp !== 0) return courseCmp;
+    return String(a.section || "").localeCompare(String(b.section || ""));
+  });
+
+  return sorted.map((r) => {
+    const facultyName = displayFacultyName(r);
+    const fid = String(r.faculty_id || "").trim();
+    const courseId = String(r.course_id || validationContext.sectionCourse?.[r.id] || "").trim();
+    const courseType = String(validationContext.courseTypeOfCourse?.[courseId] || "").trim();
+    const units = toNumberOrNull(r.units);
+    const level = getRowProgramLevel(r);
+    const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
+    const days = [toDayLabel(r.day1), toDayLabel(r.day2)].filter(Boolean).join("/");
+    const times = [formatTimeRange(r.begin1, r.end1), formatTimeRange(r.begin2, r.end2)].filter(Boolean).join("/");
+    const rooms = [String(r.room1 || "").trim(), String(r.room2 || "").trim()].filter(Boolean).join("/");
+    const onLeave = fid && onLeaveSet.has(fid) ? "Yes" : "No";
+
+    return {
+      rank: "",
+      faculty_name: facultyName,
+      course_code: String(r.course || "").trim(),
+      section_code: String(r.section || "").trim(),
+      day_text: days,
+      time_text: times,
+      room_text: rooms,
+      student_count: toNumberOrNull(r.capacity),
+      lec_hours: units,
+      lab_hours: null,
+      student_units: units,
+      on_leave: onLeave,
+      course_type: courseType,
+      nature_teaching: units,
+      nature_admin: 0,
+      nature_research: 0,
+      nature_faculty_units: units,
+      premium_grad: level === "GS" ? units : null,
+      premium_4th_prep: null,
+      premium_overload: null,
+      remarks,
+      source: "LOAD_RECOMMENDATION",
+      source_id: String(r.id || "").trim() || null,
+    };
+  });
+}, [
+  rows,
+  facultyById,
+  validationContext.sectionCourse,
+  validationContext.courseTypeOfCourse,
+  remarksDraftBySection,
+  remarksSavedBySection,
+  onLeaveSet,
+  getRowProgramLevel,
+  isRowAssigned,
+]);
+
+const openChairPlantillaPreview = useCallback(() => {
+  if (!userId) {
+    alert("Missing user session.");
+    return;
+  }
+
+  if (chairExportExcel) {
+    const deptLabel = String(
+      (session as any)?.dept_name ||
+        (session as any)?.dept_label ||
+        (session as any)?.deptName ||
+        (session as any)?.department?.dept_name ||
+        ""
+    ).trim();
+
+    setChairPlantillaHeader({
+      ok: true,
+      term_label: term || undefined,
+      dept_label: deptLabel || undefined,
+      plantilla_file: "Faculty_Load_Recommendation.xls",
+    });
+    setChairPlantillaRows(chairRecommendationPlantillaRows);
+    setChairPlantillaLoading(false);
+  }
+
+  setChairPlantillaOpen(true);
+}, [userId, chairExportExcel, session, term, chairRecommendationPlantillaRows]);
+
 
   const hasAnyErrors = useMemo(
     () =>
@@ -5812,83 +6128,33 @@ async function handleSaveNewLineRow(r: Row) {
     };
   }, [planningTermId, termId]);
 
+  type FacultySummaryStatus = "overload" | "underload" | "match" | "on_leave" | "none";
+
   type FacultySummaryRow = {
     facultyId: string;
     facultyName: string;
-    assignedUnits: number;
-    preferredUnits: number | null;
-    diff: number | null;
+    employmentType: "FT" | "PT" | "";
+    isOnLeave: boolean;
+    deloadingUnits: number;
+    preferredTeachingUnits: number | null;
+    assignedTeachingUnits: number;
+    overallUnits: number;
+    status: FacultySummaryStatus;
   };
 
-  const facultySummary: FacultySummaryRow[] = useMemo(() => {
-    const acc: Record<string, FacultySummaryRow> = {};
-
-    for (const r of rows) {
-      if (!r.faculty && !r.faculty_id) continue;
-
-      const key = r.faculty_id || r.faculty || "";
-      if (!key) continue;
-
-      const numericUnits =
-        typeof r.units === "number"
-          ? r.units
-          : parseFloat(String(r.units || "0")) || 0;
-
-      if (!acc[key]) {
-        const meta = r.faculty_id ? facultyById[r.faculty_id] : undefined;
-        const facultyName =
-          r.faculty || meta?.faculty_name_display || r.faculty_id || "—";
-
-        // NEW: first try map from backend, then fallback to meta.preferred_units
-        const prefFromMap = r.faculty_id
-          ? preferredByFaculty[r.faculty_id]
-          : undefined;
-
-        const preferredUnits =
-          typeof prefFromMap === "number"
-            ? prefFromMap
-            : meta && typeof meta.preferred_units === "number"
-            ? meta.preferred_units
-            : null;
-
-        acc[key] = {
-          facultyId: r.faculty_id || "",
-          facultyName,
-          assignedUnits: 0,
-          preferredUnits,
-          diff: null,
-        };
-      }
-
-      acc[key].assignedUnits += numericUnits;
-    }
-
-    // compute diff after accumulating
-    // NOTE: diff is based on TOTAL units (Teaching + Deloading) vs Preferred,
-    // to match the "Load Status (vs Preferred)" column.
-    Object.values(acc).forEach((row) => {
-      if (row.preferredUnits != null) {
-        const deload = row.facultyId
-          ? Number(deloadUnitsByFacultyId[row.facultyId] || 0)
-          : 0;
-        row.diff = (row.assignedUnits + deload) - row.preferredUnits;
-      }
-    });
-
-    return Object.values(acc).sort((a, b) =>
-      a.facultyName.localeCompare(b.facultyName)
-    );
-  }, [rows, facultyById, preferredByFaculty, deloadUnitsByFacultyId]);
-
   type UnitsFilterMode = "all" | "issues" | "match";
-  type UnitsSortKey = "faculty" | "assigned" | "preferred" | "deload" | "leave" | "gap";
-  // Filters are always visible in this view (no toggle)
+  type UnitsSortKey =
+    | "faculty"
+    | "deloading"
+    | "preferred"
+    | "assigned"
+    | "overall"
+    | "status";
+
   const [unitsFilterMode, setUnitsFilterMode] =
     useState<UnitsFilterMode>("all");
-  const [hideNoPrefs, setHideNoPrefs] = useState(false);
 
-  // default sort
-  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("gap");
+  const [unitsSortKey, setUnitsSortKey] = useState<UnitsSortKey>("faculty");
   const [unitsSortDir, setUnitsSortDir] = useState<"asc" | "desc">("asc");
 
   const toggleUnitsSort = (key: UnitsSortKey) => {
@@ -5900,108 +6166,378 @@ async function handleSaveNewLineRow(r: Row) {
     }
   };
 
+  const submittedPrefFacultySet = useMemo(
+    () => new Set(submittedPrefFacultyIds),
+    [submittedPrefFacultyIds]
+  );
+
+  const assignedUnitsByFacultyId = useMemo(() => {
+    const map: Record<string, number> = {};
+
+    for (const r of rows) {
+      const fid = String(r.faculty_id || "").trim();
+      if (!fid) continue;
+
+      const numericUnits =
+        typeof r.units === "number"
+          ? r.units
+          : parseFloat(String(r.units || "0")) || 0;
+
+      map[fid] = (map[fid] || 0) + numericUnits;
+    }
+
+    return map;
+  }, [rows]);
+
+  const facultySummaryAll: FacultySummaryRow[] = useMemo(() => {
+    const out: FacultySummaryRow[] = [];
+
+    for (const f of facultyList ?? []) {
+      const facultyId = String(f.faculty_id || "").trim();
+      if (!facultyId) continue;
+
+      const employmentTypeRaw = String(f.employment_type || "")
+        .trim()
+        .toUpperCase();
+      const employmentType: "FT" | "PT" | "" =
+        employmentTypeRaw === "FT"
+          ? "FT"
+          : employmentTypeRaw === "PT"
+          ? "PT"
+          : "";
+
+      if (!employmentType) continue;
+
+      const isOnLeave = onLeaveSet.has(facultyId);
+      const hasSubmittedPreference = submittedPrefFacultySet.has(facultyId);
+
+      if (employmentType === "PT" && (!hasSubmittedPreference || isOnLeave)) {
+        continue;
+      }
+
+      const preferredTeachingUnits =
+        hasSubmittedPreference &&
+        preferredByFaculty[facultyId] !== undefined &&
+        preferredByFaculty[facultyId] !== null &&
+        !Number.isNaN(Number(preferredByFaculty[facultyId]))
+          ? Number(preferredByFaculty[facultyId])
+          : null;
+
+      const assignedTeachingUnits = Number(assignedUnitsByFacultyId[facultyId] || 0);
+      const deloadingUnits = Number(deloadUnitsByFacultyId[facultyId] || 0);
+      const overallUnits = assignedTeachingUnits + deloadingUnits;
+
+      let status: FacultySummaryStatus = "none";
+      if (isOnLeave) {
+        status = "on_leave";
+      } else if (preferredTeachingUnits != null) {
+        if (Math.abs(overallUnits - preferredTeachingUnits) <= 1e-6) {
+          status = "match";
+        } else if (overallUnits > preferredTeachingUnits) {
+          status = "overload";
+        } else {
+          status = "underload";
+        }
+      }
+
+      out.push({
+        facultyId,
+        facultyName: f.faculty_name_display || facultyId,
+        employmentType,
+        isOnLeave,
+        deloadingUnits,
+        preferredTeachingUnits,
+        assignedTeachingUnits,
+        overallUnits,
+        status,
+      });
+    }
+
+    return out.sort((a, b) => a.facultyName.localeCompare(b.facultyName));
+  }, [
+    facultyList,
+    onLeaveSet,
+    submittedPrefFacultySet,
+    preferredByFaculty,
+    assignedUnitsByFacultyId,
+    deloadUnitsByFacultyId,
+  ]);
+
   const facultySummaryFiltered: FacultySummaryRow[] = useMemo(() => {
     const q = search.trim().toLowerCase();
-    if (!q) return facultySummary;
+    const rowsBase = !q
+      ? facultySummaryAll
+      : facultySummaryAll.filter((f) => {
+          const hay = [
+            f.facultyName,
+            f.facultyId,
+            f.employmentType,
+            String(f.deloadingUnits),
+            String(f.preferredTeachingUnits ?? ""),
+            String(f.assignedTeachingUnits),
+            String(f.overallUnits),
+            f.status,
+          ]
+            .join(" ")
+            .toLowerCase();
 
-    return facultySummary.filter((f) => {
-      const deloadUnits =
-        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0;
+          return hay.includes(q);
+        });
 
-      const hay = [
-        f.facultyName,
-        f.facultyId,
-        String(f.assignedUnits ?? ""),
-        String(f.preferredUnits ?? ""),
-        String(f.diff ?? ""),
-        String(deloadUnits ?? ""),
-      ]
-        .join(" ")
-        .toLowerCase();
-
-      return hay.includes(q);
+    return rowsBase.filter((f) => {
+      if (unitsFilterMode === "all") return true;
+      if (f.isOnLeave) return false;
+      if (f.preferredTeachingUnits == null) return false;
+      return unitsFilterMode === "match" ? f.status === "match" : f.status !== "match";
     });
-  }, [facultySummary, deloadUnitsByFacultyId, search]);
+  }, [facultySummaryAll, search, unitsFilterMode]);
 
   const facultySummaryView: FacultySummaryRow[] = useMemo(() => {
-    const base = [...facultySummaryFiltered];
-
-    const filtered = base.filter((f) => {
-      const assigned = Number(f.assignedUnits ?? 0);
-      const deload = Number(
-        (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
-      );
-      const totalUnits = assigned + deload;
-      const hasPref = f.preferredUnits != null;
-      if (hideNoPrefs && !hasPref) return false;
-
-      if (unitsFilterMode === "issues" || unitsFilterMode === "match") {
-        // Compare TOTAL units (Teaching + Deloading) against preferred.
-        // This must match the Load Status column (vs Preferred).
-        if (f.preferredUnits == null) return false;
-
-        const preferred = Number(f.preferredUnits);
-        const isMatch = Math.abs(totalUnits - preferred) <= 1e-6;
-
-        // "issues" = underloaded or overloaded vs preferred (i.e., not matching)
-        return unitsFilterMode === "match" ? isMatch : !isMatch;
-      }
-      return true;
-    });
-
+    const filtered = [...facultySummaryFiltered];
     const dir = unitsSortDir === "asc" ? 1 : -1;
 
+    const statusRank: Record<FacultySummaryStatus, number> = {
+      overload: 0,
+      underload: 1,
+      match: 2,
+      on_leave: 3,
+      none: 4,
+    };
+
     filtered.sort((a, b) => {
-      const aName = a.facultyName ?? "";
-      const bName = b.facultyName ?? "";
-
-      const aAssigned = Number(a.assignedUnits ?? 0);
-      const bAssigned = Number(b.assignedUnits ?? 0);
-
-      const aPref =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(a.preferredUnits);
-      const bPref =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : Number(b.preferredUnits);
-
-      const aDeload = (a.facultyId && deloadUnitsByFacultyId[a.facultyId]) || 0;
-      const bDeload = (b.facultyId && deloadUnitsByFacultyId[b.facultyId]) || 0;
-
-      // Gap is based on TOTAL units vs preferred (same as Load Status).
-      const aGap =
-        a.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : (aAssigned + aDeload) - Number(a.preferredUnits);
-      const bGap =
-        b.preferredUnits == null
-          ? Number.POSITIVE_INFINITY
-          : (bAssigned + bDeload) - Number(b.preferredUnits);
-
-      const aLeave = a.facultyId && onLeaveSet.has(a.facultyId) ? 12 : 0;
-      const bLeave = b.facultyId && onLeaveSet.has(b.facultyId) ? 12 : 0;
-
-      if (unitsSortKey === "faculty") return dir * aName.localeCompare(bName);
-      if (unitsSortKey === "assigned") return dir * (aAssigned - bAssigned);
-      if (unitsSortKey === "preferred") return dir * (aPref - bPref);
-      if (unitsSortKey === "deload") return dir * (aDeload - bDeload);
-      if (unitsSortKey === "leave") return dir * (aLeave - bLeave);
-
-      if (aGap !== bGap) return dir * (aGap - bGap);
-      return aName.localeCompare(bName);
+      if (unitsSortKey === "faculty") {
+        return dir * a.facultyName.localeCompare(b.facultyName);
+      }
+      if (unitsSortKey === "deloading") {
+        return dir * (a.deloadingUnits - b.deloadingUnits);
+      }
+      if (unitsSortKey === "preferred") {
+        const av = a.preferredTeachingUnits == null ? Number.POSITIVE_INFINITY : a.preferredTeachingUnits;
+        const bv = b.preferredTeachingUnits == null ? Number.POSITIVE_INFINITY : b.preferredTeachingUnits;
+        return dir * (av - bv);
+      }
+      if (unitsSortKey === "assigned") {
+        return dir * (a.assignedTeachingUnits - b.assignedTeachingUnits);
+      }
+      if (unitsSortKey === "overall") {
+        return dir * (a.overallUnits - b.overallUnits);
+      }
+      if (unitsSortKey === "status") {
+        return dir * (statusRank[a.status] - statusRank[b.status]);
+      }
+      return a.facultyName.localeCompare(b.facultyName);
     });
 
     return filtered;
-  }, [
-    facultySummaryFiltered,
-    unitsFilterMode,
-    unitsSortKey,
-    unitsSortDir,
-    hideNoPrefs,
-    deloadUnitsByFacultyId,
-  ]);
+  }, [facultySummaryFiltered, unitsSortDir, unitsSortKey]);
+
+  const fullTimeSummaryRows = useMemo(
+    () => facultySummaryView.filter((f) => f.employmentType === "FT"),
+    [facultySummaryView]
+  );
+
+  const partTimeSummaryRows = useMemo(
+    () => facultySummaryView.filter((f) => f.employmentType === "PT"),
+    [facultySummaryView]
+  );
+
+  const fmtUnits = (n: number) => Number(n).toFixed(1).replace(/\.0$/, "");
+
+  const renderUnitsCell = (
+    kind: "assigned" | "deloading" | "overall",
+    row: FacultySummaryRow
+  ) => {
+    if (row.isOnLeave) {
+      return <span className="text-sm text-gray-500">None</span>;
+    }
+
+    const value =
+      kind === "assigned"
+        ? row.assignedTeachingUnits
+        : kind === "deloading"
+        ? row.deloadingUnits
+        : row.overallUnits;
+
+    const tone =
+      kind === "assigned"
+        ? classForTeaching(value)
+        : kind === "deloading"
+        ? classForAdmin(value)
+        : classForTotal(value);
+
+    return <span className={cls("inline-block min-w-[2.5rem] rounded px-2 py-0.5", tone)}>{fmtUnits(value)}</span>;
+  };
+
+  const statusText = (row: FacultySummaryRow) => {
+    if (row.isOnLeave) return "On leave";
+    if (row.status === "overload") return "Overload";
+    if (row.status === "underload") return "Underload";
+    if (row.status === "match") return "Match";
+    return "—";
+  };
+
+  const statusClass = (row: FacultySummaryRow) => {
+    if (row.isOnLeave) return "text-gray-500";
+    if (row.status === "overload") return "text-red-700";
+    if (row.status === "underload") return "text-amber-700";
+    if (row.status === "match") return "text-emerald-700";
+    return "text-gray-400";
+  };
+
+  const renderFacultySummaryTable = (
+    title: string,
+    rowsForTable: FacultySummaryRow[]
+  ) => (
+    <div className="rounded-xl border border-gray-300 bg-white overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-300 bg-gray-50">
+        <h3 className="text-sm font-semibold text-gray-900">{title}</h3>
+      </div>
+
+      <div className="overflow-x-auto">
+        <table className="min-w-full text-sm border-collapse">
+          <thead className="bg-white text-gray-900">
+            <tr className="text-[13px] font-semibold">
+              <th className="px-4 py-3 text-left border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("faculty")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Name
+                  {unitsSortKey === "faculty"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("deloading")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Deloading
+                  {unitsSortKey === "deloading"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("preferred")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Preferred Teaching Units
+                  {unitsSortKey === "preferred"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("assigned")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Assigned Teaching Units
+                  {unitsSortKey === "assigned"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("overall")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Overall Units
+                  {unitsSortKey === "overall"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+              <th className="px-4 py-3 text-center border border-gray-300">
+                <button
+                  type="button"
+                  onClick={() => toggleUnitsSort("status")}
+                  className="inline-flex items-center gap-1 hover:underline"
+                >
+                  Status
+                  {unitsSortKey === "status"
+                    ? unitsSortDir === "asc"
+                      ? " ▲"
+                      : " ▼"
+                    : ""}
+                </button>
+              </th>
+            </tr>
+          </thead>
+
+          <tbody>
+            {rowsForTable.length === 0 ? (
+              <tr>
+                <td
+                  colSpan={6}
+                  className="px-4 py-6 text-center text-sm text-gray-500 border border-gray-300"
+                >
+                  No faculty rows found.
+                </td>
+              </tr>
+            ) : (
+              rowsForTable.map((f) => (
+                <tr
+                  key={f.facultyId}
+                  className={cls(
+                    f.isOnLeave ? "bg-gray-100 text-gray-500" : "hover:bg-gray-50"
+                  )}
+                >
+                  <td className="px-4 py-3 border border-gray-300">
+                    <div className={cls("font-medium", f.isOnLeave ? "text-gray-500" : "text-gray-900")}>
+                      {f.facultyName}
+                    </div>
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {renderUnitsCell("deloading", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {f.isOnLeave ? (
+                      <span className="text-sm text-gray-500">None</span>
+                    ) : f.preferredTeachingUnits != null ? (
+                      fmtUnits(f.preferredTeachingUnits)
+                    ) : (
+                      "—"
+                    )}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    {renderUnitsCell("assigned", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300 font-semibold">
+                    {renderUnitsCell("overall", f)}
+                  </td>
+                  <td className="px-4 py-3 text-center border border-gray-300">
+                    <span className={cls("font-semibold", statusClass(f))}>
+                      {statusText(f)}
+                    </span>
+                  </td>
+                </tr>
+              ))
+            )}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
 
   // ---- Rule alerts for Tab 2 (violations / warnings) ----
   type RuleAlert = {
@@ -7126,7 +7662,8 @@ const courseCodeToInfo = useMemo(() => {
                           const fromFacultyService = !!(r as any)
                             .synced_from_faculty_service;
                           const isLockedByApoDeadline = isCampusDeadlinePassed(String((r as any)?.campus_id || ""));
-                          const isLocked = isArchiveView || fromFacultyService || isLockedByApoDeadline;
+                          const isFacultyServiceDisplayOnly = !!(r as any).faculty_service_display_only || fromFacultyService;
+                          const isLocked = isArchiveView || isFacultyServiceDisplayOnly || isLockedByApoDeadline;
                           const isForwardedToFaculty = !!r.forwarded_to_faculty;
                           const isPastDeadlineRow = Boolean((r as any).is_past_deadline);
                           const hasDraft = Boolean((r as any).has_pending_override);
@@ -7148,8 +7685,8 @@ const courseCodeToInfo = useMemo(() => {
                               className={cls(
                                 "whitespace-nowrap [&>td]:border [&>td]:border-gray-200",
                                 isLocked
-                                  ? fromFacultyService
-                                    ? "bg-orange-50 hover:bg-orange-50"
+                                  ? isFacultyServiceDisplayOnly
+                                    ? "bg-yellow-50 hover:bg-yellow-50"
                                     : "bg-gray-100 text-gray-500 hover:bg-gray-100"
                                   : isPastDeadlineRow
                                   ? hasDraft
@@ -7526,7 +8063,7 @@ const courseCodeToInfo = useMemo(() => {
                                 {isRunning && (
                                   <div className="relative flex items-center justify-center gap-3 text-emerald-700">
                                     {/* New-line rows: show Save + Delete only until saved. */}
-                                    {!fromFacultyService && !!(r as any).is_new_line ? (
+                                    {!isFacultyServiceDisplayOnly && !!(r as any).is_new_line ? (
                                       <>
                                         <button
                                           type="button"
@@ -7551,7 +8088,8 @@ const courseCodeToInfo = useMemo(() => {
                                       </>
                                     ) : (
                                       <>
-                                        {!fromFacultyService && (
+
+                                        {!isFacultyServiceDisplayOnly && (
                                           <button
                                             className={cls(
                                               "relative hover:brightness-110",
@@ -7578,23 +8116,25 @@ const courseCodeToInfo = useMemo(() => {
                                           </button>
                                         )}
 
-                                        <button
-                                          className="relative hover:brightness-110"
-                                          title={
-                                            copiedRowId === r.id
-                                              ? "Copied!"
-                                              : "Copy"
-                                          }
-                                          onClick={() => handleCopyRow(r)}
-                                        >
-                                          {copiedRowId === r.id ? (
-                                            <span className="text-xs font-semibold text-emerald-700">
-                                              ✓
-                                            </span>
-                                          ) : (
-                                            <Copy className="h-4 w-4" />
-                                          )}
-                                        </button>
+                                        {!isFacultyServiceDisplayOnly && (
+                                          <button
+                                            className="relative hover:brightness-110"
+                                            title={
+                                              copiedRowId === r.id
+                                                ? "Copied!"
+                                                : "Copy"
+                                            }
+                                            onClick={() => handleCopyRow(r)}
+                                          >
+                                            {copiedRowId === r.id ? (
+                                              <span className="text-xs font-semibold text-emerald-700">
+                                                ✓
+                                              </span>
+                                            ) : (
+                                              <Copy className="h-4 w-4" />
+                                            )}
+                                          </button>
+                                        )}
                                       </>
                                     )}
                                   </div>
@@ -7823,7 +8363,7 @@ const courseCodeToInfo = useMemo(() => {
                             : "bg-white text-gray-700 border-gray-300"
                         )}
                       >
-                        Units vs Preferences
+                        Units Summary
                       </button>
 
                       <button
@@ -7853,17 +8393,17 @@ const courseCodeToInfo = useMemo(() => {
                     </div>
                   </div>
 
-                  {/* Tab 1: Units vs Preferred Units */}
+                  {/* Tab 1: Units Summary */}
                   {summaryTab === "units" && (
-                    <div className="border-t px-4 pb-4 w-full">
-                      <div className="py-3">
+                    <div className="border-t px-4 py-4 space-y-4 w-full">
+                      <div className="py-1">
                         <div className="flex items-center justify-between">
                           <div className="text-xs font-semibold text-gray-700">Filters</div>
 
                           <div className="text-xs text-gray-500">
-                            Showing{" "}
-                            <span className="font-semibold">{facultySummaryView.length}</span> of{" "}
-                            <span className="font-semibold">{facultySummaryFiltered.length}</span>
+                            Full time: <span className="font-semibold">{fullTimeSummaryRows.length}</span>
+                            {" • "}
+                            Part time: <span className="font-semibold">{partTimeSummaryRows.length}</span>
                           </div>
                         </div>
 
@@ -7898,292 +8438,12 @@ const courseCodeToInfo = useMemo(() => {
                               />
                               Matches preferred units
                             </label>
-
-                            <label className="inline-flex items-center gap-2">
-                              <input
-                                type="checkbox"
-                                checked={hideNoPrefs}
-                                onChange={(e) => setHideNoPrefs(e.target.checked)}
-                              />
-                              Hide no preferences
-                            </label>
                           </div>
                         </div>
                       </div>
 
-
-{/* Scroll wrapper */}
-                      <div className="max-h-[360px] overflow-x-auto overflow-y-auto rounded-xl border border-gray-300 bg-white">
-                        <table className="w-full text-sm table-fixed border-collapse">
-                          {/* Unequal widths: left half (Faculty/Status) wider, right half (numbers) narrower */}
-                          <colgroup>
-                            <col className="w-[40%]" /> {/* Faculty */}
-                            <col className="w-[18%]" /> {/* Status */}
-                            {/* <col className="w-[8%]" />  Leaves */}
-                            <col className="w-[10%]" /> {/* Teaching */}
-                            <col className="w-[10%]" /> {/* Preferred */}
-                            <col className="w-[10%]" /> {/* Deloading */}
-                            <col className="w-[12%]" /> {/* Total */}
-                          </colgroup>
-
-                          <thead className="bg-gray-50 text-gray-900 sticky top-0 z-10">
-                            <tr className="whitespace-nowrap text-[13px] font-semibold">
-                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("faculty")}
-                                  className="inline-flex items-center gap-1 hover:underline"
-                                >
-                                  Faculty{" "}
-                                  {unitsSortKey === "faculty"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-left font-semibold border border-gray-300">
-                                <span className="whitespace-nowrap">
-                                  Load Status <span className="text-[11px] font-medium text-gray-500">(vs Preferred)</span>
-                                </span>
-                              </th>
-                              
-                              {/* <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("leave")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Leave units (credited or counted units from leaves)"
-                                >
-                                  Leaves{" "}
-                                  {unitsSortKey === "leave"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th> */}
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("assigned")} // keep existing key
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Teaching units from scheduled assignments (classes only)"
-                                >
-                                  Teaching Units{" "}
-                                  {unitsSortKey === "assigned"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("preferred")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Preferred/target units submitted by faculty"
-                                >
-                                  Preferred Units{" "}
-                                  {unitsSortKey === "preferred"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <button
-                                  type="button"
-                                  onClick={() => toggleUnitsSort("deload")}
-                                  className="inline-flex items-center justify-center gap-1 hover:underline"
-                                  title="Deloading units credited from faculty deloading rows"
-                                >
-                                  Deloading Units{" "}
-                                  {unitsSortKey === "deload"
-                                    ? unitsSortDir === "asc"
-                                      ? "▲"
-                                      : "▼"
-                                    : ""}
-                                </button>
-                              </th>
-
-                              <th className="px-3 py-2 text-center font-semibold border border-gray-300">
-                                <div className="leading-tight">
-                                  <div>Total Units</div>
-                                  <div className="text-[11px] font-medium text-gray-500">
-                                    (Teaching + Deloading)
-                                  </div>
-                                </div>
-                              </th>
-                            </tr>
-                          </thead>
-
-                          <tbody>
-                            {facultySummary.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={6}
-                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
-                                >
-                                  No faculty have assignments yet for this term.
-                                </td>
-                              </tr>
-                            ) : facultySummaryView.length === 0 ? (
-                              <tr>
-                                <td
-                                  colSpan={6}
-                                  className="px-3 py-6 text-center text-sm text-gray-500 border border-gray-300"
-                                >
-                                  No matching faculty rows.
-                                </td>
-                              </tr>
-                            ) : null}
-
-                            {facultySummaryView.map((f) => {
-                              const hasPref = f.preferredUnits != null;
-
-                              // const isOnLeave = !!(f.facultyId && onLeaveSet.has(f.facultyId));
-                              // const leaveUnits = isOnLeave ? 12 : 0;
-
-                              const teachingUnits = Number(f.assignedUnits ?? 0);
-                              const deloadUnits = Number(
-                                (f.facultyId && deloadUnitsByFacultyId[f.facultyId]) || 0
-                              );
-                              // const totalUnits = teachingUnits + deloadUnits + leaveUnits;
-                              const totalUnits = teachingUnits + deloadUnits
-                              
-                              const teachTone = classForTeaching(teachingUnits);
-                              const adminTone = classForAdmin(deloadUnits);
-                              const totalTone = classForTotal(totalUnits);
-
-                              const diff = hasPref ? totalUnits - Number(f.preferredUnits) : null;
-
-                              const fmt = (n: number) => Number(n).toFixed(1).replace(/\.0$/, "");
-
-                              return (
-                                <tr key={f.facultyId || f.facultyName} className="hover:bg-gray-50">
-                                  <td className="px-3 py-2 align-middle border border-gray-300">
-                                    <div className="font-medium text-gray-900">{f.facultyName}</div>
-                                  </td>
-
-                                  {/* old pill status */}
-                                  {/* <td className="px-3 py-2 align-middle border border-gray-300">
-                                  {hasPref && diff != null ? (
-                                    <span
-                                      className={cls(
-                                        "inline-flex items-stretch overflow-hidden rounded-md border text-[11px] font-semibold",
-                                        diff > 0
-                                          ? "border-red-200"
-                                          : diff < 0
-                                          ? "border-amber-200"
-                                          : "border-emerald-200"
-                                      )}
-                                    >
-                                      <span
-                                        className={cls(
-                                          "px-2 py-0.5",
-                                          diff > 0
-                                            ? "bg-red-50 text-red-700"
-                                            : diff < 0
-                                            ? "bg-amber-50 text-amber-700"
-                                            : "bg-emerald-50 text-emerald-700"
-                                        )}
-                                      >
-                                        {diff > 0 ? "OVER" : diff < 0 ? "UNDER" : "MATCH"}
-                                      </span>
-
-                                      <span className="px-2 py-0.5 bg-white text-gray-900 tabular-nums">
-                                        {diff === 0 ? "0" : Math.abs(diff)}
-                                      </span>
-
-                                      <span className="px-2 py-0.5 bg-white text-gray-500 font-medium">
-                                        units
-                                      </span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-xs text-gray-400">—</span>
-                                  )}
-                                </td> */}
-                                  
-                                  <td
-                                    className="px-3 py-2 text-left align-middle border border-gray-300 tabular-nums"
-                                    title={
-                                      hasPref && diff != null
-                                        ? diff === 0
-                                          ? "Match: Total equals Preferred"
-                                          : diff > 0
-                                          ? `Over: Total is ${diff} unit(s) above Preferred`
-                                          : `Under: Total is ${Math.abs(diff)} unit(s) below Preferred`
-                                        : ""
-                                    }
-                                  >
-                                    {hasPref && diff != null ? (
-                                      <span
-                                        className={cls(
-                                          "font-semibold",
-                                          diff === 0
-                                            ? "text-emerald-700"
-                                            : diff > 0
-                                            ? "text-red-700"
-                                            : "text-amber-700"
-                                        )}
-                                      >
-                                        {diff > 0 ? `+${diff}` : `${diff}`}
-                                      </span>
-                                    ) : (
-                                      <span className="text-xs text-gray-400">—</span>
-                                    )}
-                                  </td>
-
-                                {/* <td className="px-3 py-2 text-center align-middle border border-gray-300 tabular-nums">
-                                  {leaveUnits > 0 ? fmt(leaveUnits) : "0"}
-                                </td> */}
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", teachTone)}>
-                                    {fmt(teachingUnits)}
-                                  </td>
-
-                                  <td className="px-3 py-2 text-center align-middle border border-gray-300">
-                                    {hasPref ? fmt(Number(f.preferredUnits)) : "—"}
-                                  </td>
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300", adminTone)}>
-                                    {fmt(deloadUnits)}
-                                  </td>
-
-                                  <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
-                                    {fmt(totalUnits)}
-                                  </td>
-
-                                  {/* <td className={cls("px-3 py-2 text-center align-middle border border-gray-300 tabular-nums font-semibold", totalTone)}>
-                                  <span className="whitespace-nowrap">
-                                    {fmt(totalUnits)}
-                                    {(deloadUnits > 0 || teachingUnits > 0) && (
-                                      <span
-                                      className={cls(
-                                        "ml-2 font-medium",
-                                        totalUnits === 12 || totalUnits > 12 || totalUnits === 0
-                                          ? "text-white/90"
-                                          : "text-gray-600"
-                                      )}
-                                    >
-                                      ({fmt(teachingUnits)} + {fmt(deloadUnits)})
-                                    </span>
-                                    )}
-                                  </span>
-                                </td> */}
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                      </div>
+                      {renderFacultySummaryTable("Full Time", fullTimeSummaryRows)}
+                      {renderFacultySummaryTable("Part Time", partTimeSummaryRows)}
                     </div>
                   )}
 

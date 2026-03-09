@@ -2005,7 +2005,7 @@ function EditForm({
                           <ul className="list-disc space-y-1 pl-5 text-[14px]">
                             <li>
                               <a
-                                href="https://docs.google.com/spreadsheets/d/1g5IwjyfNWyWzlOM7d34-BUw3NpeMz71o/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                href="https://docs.google.com/spreadsheets/d/1Wok-oGiVfWbihnz56hcI8WtrA9hil-7nHM6H0SYo7U4/edit?usp=sharing"
                                 target="_blank"
                                 rel="noreferrer"
                                 className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"
@@ -2015,7 +2015,7 @@ function EditForm({
                             </li>
                             <li>
                               <a
-                                href="https://docs.google.com/spreadsheets/d/1wtXpLMb9Gw9qQLB_P9xE9_BeqG_t4OCA/edit?usp=sharing&ouid=111791041834976052314&rtpof=true&sd=true"
+                                href="https://docs.google.com/spreadsheets/d/19vzZOglLGz6Gn68uRYv8kTPC2cbzQrclrJExrTcSxUM/edit?usp=sharing"
                                 target="_blank"
                                 rel="noreferrer"
                                 className="font-medium text-emerald-800 underline decoration-emerald-400 underline-offset-2 hover:decoration-emerald-700"

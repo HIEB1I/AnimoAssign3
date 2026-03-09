@@ -14,6 +14,7 @@ import {
   Info,
   AlertTriangle,
   X,
+  PanelRightClose,
 } from "lucide-react";
 import {
   getOMFOptions,
@@ -128,21 +129,6 @@ function DeadlineBanner({
 }
 /* ------------------------------------------------------------------------- */
 
-/* ---- Row action: view preference ---- */
-function ViewPreferenceButton({ onView }: { onView: () => void }) {
-  return (
-    <button
-      type="button"
-      onClick={onView}
-      className="inline-flex items-center justify-center rounded-full p-2 text-gray-700 hover:bg-gray-100"
-      title="View Preference"
-      aria-label="View Preference"
-    >
-      <Eye className="h-4 w-4" />
-    </button>
-  );
-}
-
 /* ---------------- Page ---------------- */
 export default function OM_FacultyForm() {
   const [searchParams] = useSearchParams();
@@ -185,7 +171,7 @@ export default function OM_FacultyForm() {
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // modal
+  // inline preference viewer
   const [selected, setSelected] = useState<OMFRow | null>(null);
   const [pref, setPref] = useState<any>(null);
   const [prefLoading, setPrefLoading] = useState(false);
@@ -440,6 +426,7 @@ useEffect(() => {
   }, [department, facultyType, status, search, activeTerm?.term_id, deepLinkTermId]);
 
   const openView = async (row: OMFRow, termIdOverride?: string) => {
+    if (selected?.faculty_id === row.faculty_id && (prefLoading || pref)) return;
     setSelected(row);
     setPref(null);
     setPrefLoading(true);
@@ -456,12 +443,7 @@ useEffect(() => {
   const closeView = () => {
     setSelected(null);
     setPref(null);
-  };
-
-  const fmtDate = (iso?: string) => {
-    if (!iso) return "N/A";
-    const d = new Date(iso);
-    return isNaN(d.getTime()) ? "N/A" : d.toLocaleDateString();
+    setPrefLoading(false);
   };
 
   const headerLabel = activeTerm?.label || "—";
@@ -570,62 +552,334 @@ useEffect(() => {
         <SelectBox value={facultyType} onChange={setFacultyType} options={typeOptions} />
       </div>
 
-      {/* Table */}
-        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
-          <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-900">
-            <tr>
-              <th className="w-[22%] text-left px-4 py-3">Faculty</th>
-              <th className="w-[32%] text-center px-4 py-3">Department</th>
-              <th className="w-[13.5%] text-center px-4 py-3">Faculty Type</th>
-              <th className="w-[13.5%] text-center px-4 py-3">Last Submitted</th>
-              <th className="w-[23.5%] text-center px-4 py-3">Status</th>
-              <th className="w-[14%] text-center px-4 py-3"> </th>
-            </tr>
-          </thead>
-          <tbody className="divide-y">
-            {loading ? (
-              <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
-                  Loading…
-                </td>
-              </tr>
-            ) : rows.length === 0 ? (
-              <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
-                  No results
-                </td>
-              </tr>
-            ) : (
-              rows.map((r) => (
-                <tr key={r.faculty_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 text-emerald-700 font-semibold">
-                    {r.name}
-                    <div className="text-xs text-gray-500">{r.email}</div>
-                  </td>
-                  <td className="text-center">{r.department || "—"}</td>
-                  <td className="px-4 py-3 text-center">{r.type || "—"}</td>
-                  <td className="px-4 py-3 text-center">{fmtDate(r.submission_date)}</td>
-                  <td className="px-4 py-3 text-center">
-                    <span
-                      className={cls(
-                        "inline-block rounded-full px-3 py-1 text-xs font-semibold",
-                        r.status === "Submitted"
-                          ? "bg-emerald-100 text-emerald-700"
-                          : "bg-gray-100 text-gray-700"
-                      )}
-                    >
-                      {r.status || "—"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    <ViewPreferenceButton onView={() => openView(r)} />
-                  </td>
+      {/* Table + inline viewer */}
+      <div className="grid grid-cols-1 items-start gap-6 md:grid-cols-[minmax(240px,0.82fr)_minmax(0,1.68fr)]">
+        <div className="min-w-0 overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm md:max-h-[calc(100vh-3rem)]">
+          <div className="overflow-auto md:max-h-[calc(100vh-3rem)]">
+            <table className="w-full table-fixed text-sm">
+              <colgroup>
+                <col className="w-[68%]" />
+                <col className="w-[32%]" />
+              </colgroup>
+              <thead className="border-b bg-gray-50 text-gray-900">
+                <tr>
+                  <th className="px-4 py-3 text-left">Faculty</th>
+                  <th className="px-3 py-3 text-center">Status</th>
                 </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+              </thead>
+              <tbody className="divide-y">
+                {loading ? (
+                  <tr>
+                    <td colSpan={2} className="px-4 py-6 text-center text-gray-500">
+                      Loading…
+                    </td>
+                  </tr>
+                ) : rows.length === 0 ? (
+                  <tr>
+                    <td colSpan={2} className="px-4 py-6 text-center text-gray-500">
+                      No results
+                    </td>
+                  </tr>
+                ) : (
+                  rows.map((r) => {
+                    const isActive = selected?.faculty_id === r.faculty_id;
+                    return (
+                      <tr
+                        key={r.faculty_id}
+                        onClick={() => openView(r)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            openView(r);
+                          }
+                        }}
+                        tabIndex={0}
+                        role="button"
+                        aria-label={`View ${r.name || "faculty"} preference`}
+                        className={cls(
+                          "cursor-pointer transition-colors hover:bg-gray-50 focus:outline-none focus:ring-2 focus:ring-inset focus:ring-emerald-500/30",
+                          isActive && "bg-emerald-50/70"
+                        )}
+                      >
+                        <td className="px-4 py-4 font-semibold text-emerald-700">
+                          <div className="truncate" title={r.name || "—"}>{r.name || "—"}</div>
+                          <div className="truncate text-xs font-normal text-gray-500" title={r.email || "—"}>{r.email || "—"}</div>
+                        </td>
+                        <td className="px-3 py-4 text-center text-gray-700">
+                          {(() => {
+                            const statusLabel = r.status || "—";
+                            const normalizedStatus = String(statusLabel).trim().toLowerCase();
+                            const isSubmitted = normalizedStatus === "submitted";
+
+                            return (
+                              <span
+                                className={cls(
+                                  "inline-flex max-w-full items-center justify-center rounded-full px-2.5 py-1 text-xs font-semibold ring-1",
+                                  isSubmitted
+                                    ? "bg-emerald-100 text-emerald-800 ring-emerald-200"
+                                    : "bg-gray-100 text-gray-700 ring-gray-200"
+                                )}
+                                title={statusLabel}
+                              >
+                                <span className="truncate">{statusLabel}</span>
+                              </span>
+                            );
+                          })()}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside className="min-w-0 md:sticky md:top-6 md:self-start">
+          <div className="flex max-h-[calc(100vh-3rem)] min-h-0 flex-col overflow-hidden rounded-2xl border border-gray-200 bg-white shadow-sm">
+            <div className="border-b bg-gradient-to-r from-slate-900 via-emerald-900 to-emerald-700 px-5 py-5 text-white">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <div className="text-xs font-semibold uppercase tracking-[0.2em] text-white/70">
+                    Preference Viewer
+                  </div>
+                  <h2 className="mt-1 text-lg font-semibold">
+                    {selected?.name || "Select a faculty member"}
+                  </h2>
+                  <p className="mt-1 text-sm text-white/85">
+                    {selected?.email || "Choose any faculty from the table to inspect their latest submitted preferences."}
+                  </p>
+                </div>
+                {selected && (
+                  <button
+                    type="button"
+                    onClick={closeView}
+                    className="rounded-xl border border-white/15 bg-white/10 p-2 text-white/90 transition hover:bg-white/20"
+                    aria-label="Close preference viewer"
+                    title="Close preference viewer"
+                  >
+                    <PanelRightClose className="h-5 w-5" />
+                  </button>
+                )}
+              </div>
+
+              {selected && (
+                <div className="mt-4 grid grid-cols-1 gap-2 sm:grid-cols-2">
+                  <div className="rounded-xl bg-white/10 px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-wide text-white/70">Department</div>
+                    <div className="mt-1 text-sm font-medium text-white">{selected.department || "—"}</div>
+                  </div>
+                  <div className="rounded-xl bg-white/10 px-3 py-2">
+                    <div className="text-[11px] uppercase tracking-wide text-white/70">Faculty Type</div>
+                    <div className="mt-1 text-sm font-medium text-white">{selected.type || "—"}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto bg-gray-50 p-5">
+              {!selected && (
+                <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-5 py-10 text-center">
+                  <div className="mx-auto grid h-14 w-14 place-items-center rounded-2xl bg-emerald-50 text-emerald-700">
+                    <Eye className="h-6 w-6" />
+                  </div>
+                  <h3 className="mt-4 text-base font-semibold text-gray-900">No faculty selected yet</h3>
+                  <p className="mt-2 text-sm text-gray-600">
+                    Click any faculty row to preview preferences here without opening a modal.
+                  </p>
+                </div>
+              )}
+
+              {selected && prefLoading && (
+                <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                  Loading preference…
+                </div>
+              )}
+
+              {selected && !prefLoading && !pref && (
+                <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
+                  No preference record found for the active term.
+                  <div className="mt-1 text-xs text-gray-500">
+                    If the faculty has submitted before, their last submitted preferences will appear here.
+                  </div>
+                </div>
+              )}
+
+              {selected && !prefLoading && pref && isFallbackShown && (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+                  <div className="flex items-start gap-2">
+                    <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                    <div>
+                      <div className="font-semibold">No submission for the active term</div>
+                      <div className="mt-0.5 text-[13px] text-amber-900/90">
+                        Showing the faculty&apos;s last submitted preferences from <span className="font-semibold">{shownLabel}</span>.
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {selected && !prefLoading && pref && (
+                <div className="grid grid-cols-1 gap-4">
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center gap-2 text-gray-900">
+                      <GraduationCap className="h-4 w-4 text-emerald-700" />
+                      <h3 className="font-semibold">Teaching Load</h3>
+                    </div>
+
+                    <div className="mt-3 space-y-3 text-sm">
+                      <div>
+                        <p className="text-xs font-medium text-gray-600">Preferred Teaching Units</p>
+                        <p className="mt-1 break-words text-gray-800">
+                          {pref.teaching?.preferred_units ?? "—"}
+                        </p>
+                      </div>
+
+                      <div>
+                        <p className="text-xs font-medium text-gray-600">Deloading</p>
+
+                        {(() => {
+                          const raw = pref.teaching?.deloading;
+                          const deload: string[] = Array.isArray(raw)
+                            ? raw
+                            : raw
+                              ? [String(raw)]
+                              : [];
+
+                          if (!deload.length) {
+                            return (
+                              <div className="mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+                                <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
+                                <div>
+                                  <div className="font-semibold">No deloading indicated</div>
+                                  <div className="mt-0.5 text-amber-800/90">
+                                    This faculty has no deloading entry for the current preference record.
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <ul className="mt-2 space-y-1 text-gray-700">
+                              {deload.map((d, i) => (
+                                <li key={i} className="flex gap-2">
+                                  <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-400" />
+                                  <span className="flex-1 break-words">{d}</span>
+                                </li>
+                              ))}
+                            </ul>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center gap-2 text-gray-900">
+                      <Calendar className="h-4 w-4 text-emerald-700" />
+                      <h3 className="font-semibold">Schedule</h3>
+                    </div>
+
+                    <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
+                      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">Days</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {(() => {
+                              const days: string[] = Array.isArray(pref.schedule?.days) ? pref.schedule.days : [];
+                              if (!days.length) return <span className="text-sm text-gray-800">—</span>;
+                              return days.map((d, idx) => (
+                                <span
+                                  key={`${d}-${idx}`}
+                                  className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
+                                >
+                                  {d}
+                                </span>
+                              ));
+                            })()}
+                          </div>
+                        </div>
+
+                        <div>
+                          <p className="text-xs font-medium text-gray-600">Time Slots</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {(() => {
+                              const times: string[] = Array.isArray(pref.schedule?.times) ? pref.schedule.times : [];
+                              if (!times.length) return <span className="text-sm text-gray-800">—</span>;
+                              return times.map((t, idx) => (
+                                <span
+                                  key={`${t}-${idx}`}
+                                  className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
+                                >
+                                  {t}
+                                </span>
+                              ));
+                            })()}
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center gap-2 text-gray-900">
+                      <MapPin className="h-4 w-4 text-emerald-700" />
+                      <h3 className="font-semibold">Location and Mode</h3>
+                    </div>
+
+                    <div className="mt-3 text-sm">
+                      <p className="text-xs font-medium text-gray-600">Mode</p>
+                      <p className="mt-1 break-words text-gray-800">
+                        {typeof pref.location_mode?.mode === "object"
+                          ? JSON.stringify(pref.location_mode?.mode)
+                          : pref.location_mode?.mode ?? "—"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center gap-2 text-gray-900">
+                      <BookOpen className="h-4 w-4 text-emerald-700" />
+                      <h3 className="font-semibold">Academic Specialization</h3>
+                    </div>
+
+                    <div className="mt-3 text-sm">
+                      <p className="text-xs font-medium text-gray-600">KAC's</p>
+                      {(pref.specialization?.courses || []).length ? (
+                        <ul className="mt-2 space-y-2 text-gray-800">
+                          {(pref.specialization?.courses || []).map((kac: string, idx: number) => (
+                            <li
+                              key={`${kac}-${idx}`}
+                              className="rounded-xl border border-gray-200 bg-gray-50 px-3 py-2 break-words"
+                            >
+                              {kac}
+                            </li>
+                          ))}
+                        </ul>
+                      ) : (
+                        <p className="mt-1 break-words text-gray-800">—</p>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex items-center gap-2 text-gray-900">
+                      <Info className="h-4 w-4 text-emerald-700" />
+                      <h3 className="font-semibold">Remarks</h3>
+                    </div>
+                    <p className="mt-3 whitespace-pre-wrap break-words text-sm text-gray-800">
+                      {pref.submission?.notes && String(pref.submission.notes).trim()
+                        ? pref.submission.notes
+                        : "—"}
+                    </p>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </aside>
+      </div>
 
         {/* Start/Restart Window Confirm Modal */}
         {confirmState && (
@@ -693,262 +947,6 @@ useEffect(() => {
             </div>
           </div>
         )}
-
-        {/* View Preference Modal */}
-        {selected && (
-          <div className="fixed inset-0 z-[100] grid place-items-center bg-black/40 p-4">
-            <div className="w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl max-h-[90vh] flex flex-col">
-              {/* Header */}
-              <div className="relative flex-none bg-gradient-to-r from-emerald-700 to-emerald-600 px-6 py-5 text-white">
-                <button
-                  onClick={closeView}
-                  className="absolute right-4 top-4 rounded-lg p-2 text-white/90 hover:bg-white/10 focus:outline-none focus:ring-2 focus:ring-white/40"
-                  aria-label="Close"
-                  title="Close"
-                >
-                  <X className="h-5 w-5" />
-                </button>
-
-                <div className="flex items-start gap-4">
-                  <div className="grid h-12 w-12 shrink-0 place-items-center rounded-xl bg-white/15 ring-1 ring-white/25 text-lg font-semibold">
-                    {(selected.name || "?")
-                      .trim()
-                      .split(/\s+/)
-                      .filter(Boolean)
-                      .slice(0, 2)
-                      .map((p) => p[0]?.toUpperCase())
-                      .join("")}
-                  </div>
-
-                  <div className="min-w-0">
-                    <h2 className="text-lg font-semibold leading-tight truncate">
-                      {selected.name || "—"}
-                    </h2>
-                    <p className="mt-0.5 text-sm text-white/90 truncate">
-                      {selected.email || ""}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* Body */}
-              <div className="flex-1 min-h-0 overflow-y-auto bg-gray-50 p-6">
-                {prefLoading && (
-                  <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
-                    Loading preference…
-                  </div>
-                )}
-
-                {!prefLoading && !pref && (
-                  <div className="rounded-xl border border-gray-200 bg-white p-4 text-sm text-gray-600">
-                    No preference record found for the active term.
-                    <div className="mt-1 text-xs text-gray-500">
-                      If the faculty has submitted before, their last submitted preferences will appear here.
-                    </div>
-                  </div>
-                )}
-
-                {!prefLoading && pref && isFallbackShown && (
-                  <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-                    <div className="flex items-start gap-2">
-                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
-                      <div>
-                        <div className="font-semibold">
-                          No submission for the active term
-                        </div>
-                        <div className="mt-0.5 text-[13px] text-amber-900/90">
-                          Showing the faculty&apos;s last submitted preferences from <span className="font-semibold">{shownLabel}</span>.
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {!prefLoading && pref && (
-                  <div className="grid grid-cols-1 gap-4 md:grid-cols-2 items-stretch">
-  <div className="flex flex-col gap-4 h-full">
-    {/* Teaching Load */}
-                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                          <div className="flex items-center gap-2 text-gray-900">
-                            <GraduationCap className="h-4 w-4 text-emerald-700" />
-                            <h3 className="font-semibold">Teaching Load</h3>
-                          </div>
-
-                          <div className="mt-3 space-y-3 text-sm">
-                            <div>
-                              <p className="text-xs font-medium text-gray-600">
-                                Preferred Teaching Units
-                              </p>
-                              <p className="mt-1 break-words text-gray-800">
-                                {pref.teaching?.preferred_units ?? "—"}
-                              </p>
-                            </div>
-
-                            <div>
-                              <p className="text-xs font-medium text-gray-600">
-                                Deloading
-                              </p>
-
-                              {(() => {
-                                const raw = pref.teaching?.deloading;
-                                const deload: string[] = Array.isArray(raw)
-                                  ? raw
-                                  : raw
-                                  ? [String(raw)]
-                                  : [];
-
-                                if (!deload.length) {
-                                  return (
-                                    <div className="mt-2 flex items-start gap-2 rounded-xl border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-                                      <Info className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" />
-                                      <div>
-                                        <div className="font-semibold">
-                                          No deloading indicated
-                                        </div>
-                                        <div className="mt-0.5 text-amber-800/90">
-                                          This faculty has no deloading entry for
-                                          the current preference record.
-                                        </div>
-                                      </div>
-                                    </div>
-                                  );
-                                }
-
-                                return (
-                                  <ul className="mt-2 space-y-1 text-gray-700">
-                                    {deload.map((d, i) => (
-                                      <li key={i} className="flex gap-2">
-                                        <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-gray-400" />
-                                        <span className="flex-1 break-words">
-                                          {d}
-                                        </span>
-                                      </li>
-                                    ))}
-                                  </ul>
-                                );
-                              })()}
-                            </div>
-                          </div>
-                        </div>
-    {/* Schedule */}
-                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                          <div className="flex items-center gap-2 text-gray-900">
-                            <Calendar className="h-4 w-4 text-emerald-700" />
-                            <h3 className="font-semibold">Schedule</h3>
-                          </div>
-
-
-                          <div className="mt-4 rounded-xl border border-gray-200 bg-gray-50 p-4 text-sm">
-                            <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                              <div>
-                                <p className="text-xs font-medium text-gray-600">Days</p>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {(() => {
-                                    const days: string[] = Array.isArray(pref.schedule?.days) ? pref.schedule.days : [];
-                                    if (!days.length) return <span className="text-sm text-gray-800">—</span>;
-                                    return days.map((d, idx) => (
-                                      <span
-                                        key={`${d}-${idx}`}
-                                        className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
-                                      >
-                                        {d}
-                                      </span>
-                                    ));
-                                  })()}
-                                </div>
-                              </div>
-
-                              <div>
-                                <p className="text-xs font-medium text-gray-600">Time Slots</p>
-                                <div className="mt-2 flex flex-wrap gap-2">
-                                  {(() => {
-                                    const times: string[] = Array.isArray(pref.schedule?.times) ? pref.schedule.times : [];
-                                    if (!times.length) return <span className="text-sm text-gray-800">—</span>;
-                                    return times.map((t, idx) => (
-                                      <span
-                                        key={`${t}-${idx}`}
-                                        className="inline-flex items-center rounded-full bg-white px-3 py-1 text-xs font-semibold text-gray-800 ring-1 ring-gray-200"
-                                      >
-                                        {t}
-                                      </span>
-                                    ));
-                                  })()}
-                                </div>
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex flex-col gap-4 h-full">
-                        {/* Location and Mode */}
-                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm h-fit w-full">
-                          <div className="flex items-center gap-2 text-gray-900">
-                            <MapPin className="h-4 w-4 text-emerald-700" />
-                            <h3 className="font-semibold">Location and Mode</h3>
-                          </div>
-
-                          <div className="mt-3 text-sm">
-                            <p className="text-xs font-medium text-gray-600">Mode</p>
-                            <p className="mt-1 break-words text-gray-800">
-                              {typeof pref.location_mode?.mode === "object"
-                                ? JSON.stringify(pref.location_mode?.mode)
-                                : pref.location_mode?.mode ?? "—"}
-                            </p>
-                          </div>
-                        </div>
-    {/* Academic Specialization */}
-                        <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm flex-1 min-h-0 flex flex-col">
-                          <div className="flex items-center gap-2 text-gray-900">
-                            <BookOpen className="h-4 w-4 text-emerald-700" />
-                            <h3 className="font-semibold">
-                              Academic Specialization
-                            </h3>
-                          </div>
-
-                          <div className="mt-3 text-sm flex-1 min-h-0 overflow-auto">
-                            <p className="text-xs font-medium text-gray-600">
-                              KAC's
-                            </p>
-                            {(pref.specialization?.courses || []).length ? (
-                              <ul className="mt-1 list-disc space-y-1 pl-5 text-gray-800">
-                                {(pref.specialization?.courses || []).map(
-                                  (kac: string, idx: number) => (
-                                    <li key={`${kac}-${idx}`} className="break-words">
-                                      {kac}
-                                    </li>
-                                  )
-                                )}
-                              </ul>
-                            ) : (
-                              <p className="mt-1 break-words text-gray-800">—</p>
-                            )}
-                          </div>
-                        </div>
-  </div>
-  {/* Remarks */}
-                      <div className="md:col-span-2 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                        <div className="grid grid-cols-1 gap-4 md:grid-cols-1">
-                          <div>
-                            <p className="text-xs font-medium text-gray-600">
-                              Remarks
-                            </p>
-                            <p className="mt-1 whitespace-pre-wrap break-words text-sm text-gray-800">
-                              {pref.submission?.notes &&
-                              String(pref.submission.notes).trim()
-                                ? pref.submission.notes
-                                : "—"}
-                            </p>
-                          </div>
-                        </div>
-                      </div>
-</div>
-                )}
-              </div>
-
-            </div>
-          </div>
-        )}
-      </div>
     </main>
     </div>
   );

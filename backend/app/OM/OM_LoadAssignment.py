@@ -1446,6 +1446,138 @@ async def _notify_apo_room_allocation_ready(
             email_from_user_id=om_user_id,
         )
 
+async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[Dict[str, Any]]:
+    """Build read-only OM rows from approved/responded Faculty Service requests.
+
+    Requirement:
+      - Approved CHAIR_FacultyService requests must appear in OM Load Assignment
+        as NEW display-only rows.
+      - They must auto-reflect later edits made on the CHAIR side.
+
+    We intentionally read directly from `faculty_service` instead of relying solely
+    on `faculty_assignments`/`section_schedules` mutations so the OM table always
+    reflects the latest accepted request payload.
+    """
+
+    dept_ids = await _loadassignment_department_ids(user_id, db)
+    if not dept_ids:
+        return []
+
+    dept_names: List[str] = []
+    for did in dept_ids:
+        try:
+            name = (await _dept_name_by_id(did, db) or '').strip()
+        except Exception:
+            name = ''
+        if name and name not in dept_names:
+            dept_names.append(name)
+
+    if not dept_names:
+        return []
+
+    # Active OM rows only; archived terms should not be polluted by live faculty-service rows.
+    term_id = str(term_id or '').strip()
+
+    q: Dict[str, Any] = {
+        'status': 'responded',
+        'from_department': {'$in': dept_names},
+    }
+    fs_docs = await db['faculty_service'].find(q, {'_id': 0}).sort([('updated_at', -1), ('created_at', -1)]).to_list(None)
+    if not fs_docs:
+        return []
+
+    # Keep only rows that still belong to the requested term when we can prove it.
+    section_ids = sorted({str(d.get('section_id') or '').strip() for d in fs_docs if str(d.get('section_id') or '').strip()})
+    valid_section_ids: set[str] = set()
+    section_code_by_id: Dict[str, str] = {}
+    checked_term_membership = False
+    if section_ids and term_id:
+        checked_term_membership = True
+        try:
+            sec_docs = await db[COL_SECTIONS_SUBMITTED].find(
+                {'term_id': term_id, 'section_id': {'$in': section_ids}},
+                {'_id': 0, 'section_id': 1, 'section_code': 1, 'enrollment_cap': 1, 'campus_id': 1},
+            ).to_list(None)
+            for s in sec_docs or []:
+                sid = str(s.get('section_id') or '').strip()
+                if sid:
+                    valid_section_ids.add(sid)
+                    section_code_by_id[sid] = str(s.get('section_code') or '').strip()
+        except Exception:
+            checked_term_membership = False
+            valid_section_ids = set()
+            section_code_by_id = {}
+
+    rows: List[Dict[str, Any]] = []
+    seen_fs_ids: set[str] = set()
+
+    for d in fs_docs:
+        fs_id = str(d.get('fs_id') or '').strip()
+        if not fs_id or fs_id in seen_fs_ids:
+            continue
+        seen_fs_ids.add(fs_id)
+
+        sid = str(d.get('section_id') or '').strip()
+        if checked_term_membership:
+            if not sid or sid not in valid_section_ids:
+                continue
+
+        faculty = (d.get('faculty') or {}) if isinstance(d.get('faculty'), dict) else {}
+        faculty_name = (
+            f"{str(faculty.get('last_name') or '').strip()}, {str(faculty.get('first_name') or '').strip()}"
+            .strip(', ')
+        )
+
+        units_val = d.get('units', '')
+        if units_val is None:
+            units_val = ''
+
+        sec_code = str(d.get('section') or '').strip() or section_code_by_id.get(sid, '')
+
+        # Best-effort campus resolution so deadline labels / other campus-aware UI stay stable.
+        campus_id = ''
+        if sid:
+            try:
+                ss = await db[COL_SECTIONS_SUBMITTED].find_one(
+                    {'term_id': term_id, 'section_id': sid},
+                    {'_id': 0, 'campus_id': 1},
+                ) or {}
+                campus_id = str(ss.get('campus_id') or '').strip()
+            except Exception:
+                campus_id = ''
+
+        rows.append({
+            'id': f'FSR::{fs_id}',
+            'section_id': sid,
+            'fs_id': fs_id,
+            'course_id': '',
+            'course': str(d.get('course_code') or '').strip(),
+            'title': str(d.get('course_title') or '').strip(),
+            'units': units_val,
+            'section': sec_code,
+            'faculty_id': str(faculty.get('faculty_id') or '').strip(),
+            'faculty': faculty_name,
+            'day1': str(d.get('day1') or '').strip(),
+            'begin1': _fmt_time(str(d.get('begin1') or '').strip()),
+            'end1': _fmt_time(str(d.get('end1') or '').strip()),
+            'room1': '',
+            'day2': str(d.get('day2') or '').strip(),
+            'begin2': _fmt_time(str(d.get('begin2') or '').strip()),
+            'end2': _fmt_time(str(d.get('end2') or '').strip()),
+            'room2': '',
+            'capacity': '',
+            'mode': '',
+            'remarks': str(d.get('remarks') or '').strip(),
+            'status': 'Approved',
+            'editable': False,
+            'campus_id': campus_id,
+            'synced_from_faculty_service': True,
+            'faculty_service_display_only': True,
+        })
+
+    return rows
+
+
 async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = False) -> Dict[str, Any]:
     dept_ids = await _loadassignment_department_ids(user_id, db)
     if not dept_ids:
@@ -1678,9 +1810,12 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
             # Campus is needed for campus-specific APO deadlines (Manila vs Laguna).
             # Prefer explicit campus_id on the submitted snapshot; fall back to prefix inference.
             "campus_id": (str(d.get("campus_id") or "").strip() or _section_to_campus_id(d.get("section_code", ""))),
+            "owner_program_id": str(d.get("owner_program_id") or "").strip(),
+            "owner_batch_id": str(d.get("owner_batch_id") or "").strip(),
             # NEW: keep both faculty_id and display name so manual edits can persist correctly
             "faculty_id": (d.get("asg") or {}).get("faculty_id") or "",
             "faculty": d.get("faculty_name_display", "") or "",
+            "assignment_metadata": (d.get("asg") or {}).get("assignment_metadata") or None,
             **pair,
             "capacity": cap_value,
             "mode": mode_display,
@@ -2904,37 +3039,9 @@ async def om_notify_chair_load_forwarded(
 async def om_get_all_faculty(db = Depends(get_db)):
     pipeline = [
         {
-            # Only include faculty under the required department.
             "$match": {
                 "is_archived": {"$ne": True},
                 "department_id": "DEPT0001",
-            }
-        },
-        # Exclude faculty who are currently on an approved leave.
-        # NOTE: Per requirement, any APPROVED leave record is sufficient to exclude.
-        {
-            "$lookup": {
-                "from": COL_LEAVES,
-                "let": {"fid": "$faculty_id"},
-                "pipeline": [
-                    {
-                        "$match": {
-                            "$expr": {
-                                "$and": [
-                                    {"$eq": ["$faculty_id", "$$fid"]},
-                                    {"$eq": ["$approval_status", "APPROVED"]},
-                                ]
-                            }
-                        }
-                    },
-                    {"$project": {"_id": 0, "faculty_id": 1}},
-                ],
-                "as": "approved_leaves",
-            }
-        },
-        {
-            "$match": {
-                "approved_leaves.0": {"$exists": False}
             }
         },
         {
@@ -2949,12 +3056,12 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$unwind": "$user"
         },
         {
-            "$unset": "approved_leaves"
-        },
-        {
             "$set": {
                 "faculty_name_display": {
                     "$concat": ["$user.last_name", ", ", "$user.first_name"]
+                },
+                "employment_type": {
+                    "$toUpper": {"$ifNull": ["$employment_type", ""]}
                 }
             }
         },
@@ -2962,7 +3069,8 @@ async def om_get_all_faculty(db = Depends(get_db)):
             "$project": {
                 "_id": 0,
                 "faculty_id": 1,
-                "faculty_name_display": 1
+                "faculty_name_display": 1,
+                "employment_type": 1,
             }
         },
         {
@@ -3174,6 +3282,14 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
     base = await _fetch_rows(user_id, term_id=active["term_id"], db=db, archived_view=is_archived_view)
     rows = base["rows"]
 
+    # Overlay approved Faculty Service requests as separate read-only rows.
+    # Active term only: archived views must stay historical and unchanged.
+    if not is_archived_view:
+        try:
+            rows = list(rows or []) + await _faculty_service_overlay_rows(user_id, active["term_id"], db)
+        except Exception:
+            rows = list(rows or [])
+
     # `selected` is a UI-only flag used by the OM table checkboxes.
     # It must NEVER be treated as persisted data (clean-restores can reintroduce
     # stale `selected: true` values, which can cause the OM "To Faculty" action
@@ -3369,15 +3485,19 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
             faculty_allowed_modes[fid] = [mode_str]
 
 
-    # Build preferred units map
+    # Build preferred units map for the summary using ONLY submitted preferences
+    # for the resolved planning/current term (do not use fallback old-term prefs here).
+    strict_submitted_prefs = getattr(ctx, "submitted_prefs_by_faculty", None) or {}
     preferred_units_by_faculty = {}
-    for fid, pref in fac_prefs.items():
+    for fid, pref in strict_submitted_prefs.items():
         val = pref.get("preferred_units") or pref.get("load_units")
         try:
-            if val:
+            if val is not None:
                 preferred_units_by_faculty[fid] = int(val)
         except:
             continue
+
+    submitted_pref_faculty_ids = sorted(list(strict_submitted_prefs.keys()))
 
     campus_blocked = getattr(ctx, "campus_blocked", {}) or {}
     blocked_ge_cmps2: list[dict] = []
@@ -3619,6 +3739,7 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "om_submit_deadline_passed": bool(om_submit_deadline_passed),
         "om_submit_has_apo_submission": bool(om_submit_has_apo_submission),
         "preferred_units_by_faculty": preferred_units_by_faculty,
+        "submitted_pref_faculty_ids": submitted_pref_faculty_ids,
         "on_leave_faculty_ids": on_leave_faculty_ids,
         "courseToKacs": course_to_kacs_payload,
         "facultyToKacs": faculty_to_kacs,
@@ -3628,6 +3749,8 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         "facultyHasPhd": faculty_has_phd,
         "sectionCampus": section_campus,
         "sectionCourse": section_course,
+        "sectionOwnerProgram": {str(r.get("id") or "").strip(): str(r.get("owner_program_id") or "").strip() for r in rows if str(r.get("id") or "").strip()},
+        "sectionOwnerBatch": {str(r.get("id") or "").strip(): str(r.get("owner_batch_id") or "").strip() for r in rows if str(r.get("id") or "").strip()},
         "courseTypeOfCourse": course_type_of_course,
         "blockedGeCmps2": blocked_ge_cmps2,
     }
@@ -5026,6 +5149,14 @@ async def run_auto_assignment(
     base = await _fetch_rows(user_id, term_id=term_id, db=db)
     rows = [dict(r) for r in base["rows"]]
 
+    # Keep Faculty Service display-only rows in the auto-assign response.
+    # They are not part of the load-assignment algorithm and should continue
+    # to share the OM table strictly for display, even after auto-assign runs.
+    try:
+        rows.extend(await _faculty_service_overlay_rows(user_id, term_id, db))
+    except Exception:
+        pass
+
     rows_by_id: dict[str, dict] = {
         str(r.get("id")): r for r in rows if r.get("id")
     }
@@ -5279,7 +5410,7 @@ async def run_auto_assignment(
             # If Phase 7 explicitly failed to find a slot for this section,
             # clear faculty so UI shows it as unassigned, and mark a note.
             info = phase7_no_time.get(sid) or {}
-            if info.get("reason") == "no_free_slot_from_pool":
+            if info.get("reason") in {"no_free_slot_from_pool", "cross_campus_gap"}:
                 # we know there was a faculty_id in Phase 7 (info["faculty_id"])
                 r["faculty"] = ""
                 r["faculty_id"] = ""
@@ -5289,10 +5420,15 @@ async def run_auto_assignment(
 
                 # mark as unassigned but with a conflict note so it's traceable
                 r["status"] = "Unassigned"
-                r["conflictNote"] = (
-                    "Auto-assign removed previous faculty: no compatible " 
-                    "time slot found (preferences / 4.5h rule)."
-                )
+                if info.get("reason") == "cross_campus_gap":
+                    r["conflictNote"] = (
+                        "Auto-assign removed previous faculty: no compatible time slot found after enforcing the 3-hour cross-campus gap rule."
+                    )
+                else:
+                    r["conflictNote"] = (
+                        "Auto-assign removed previous faculty: no compatible " 
+                        "time slot found (preferences / 4.5h rule)."
+                    )
 
             # nothing else to overlay for this row
             continue
@@ -5770,6 +5906,17 @@ async def run_auto_assignment(
                 "reason_label": md.get("reason_label") or "",
                 "reason_sentence": md.get("reason_sentence") or "",
             }
+        elif fid:
+            existing_md = r.get("assignment_metadata") if isinstance(r.get("assignment_metadata"), dict) else None
+            if existing_md:
+                r["assignment_metadata"] = {
+                    "assigned_faculty": str(existing_md.get("assigned_faculty") or fname or "").strip(),
+                    "assigned_faculty_id": str(existing_md.get("assigned_faculty_id") or fid or "").strip(),
+                    "reason_label": str(existing_md.get("reason_label") or "").strip(),
+                    "reason_sentence": str(existing_md.get("reason_sentence") or "").strip(),
+                }
+            else:
+                r.pop("assignment_metadata", None)
         else:
             r.pop("assignment_metadata", None)
 
@@ -6044,9 +6191,10 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
             "mode": 1,
         },
     ).to_list(None)
-    prefs_by_faculty = {
+    submitted_prefs_by_faculty = {
         r["faculty_id"]: r for r in pref_rows if r.get("faculty_id")
     }
+    prefs_by_faculty = dict(submitted_prefs_by_faculty)
 
     # # --- DEBUG: Print final faculty preferences (after applying fallback logic) ---
     # print("DEBUG-PREF-SUMMARY: ============================")
@@ -6259,6 +6407,7 @@ async def phase0_load(term_id: str, db, department_id: str | None = None) -> Con
     ctx.course_to_kacs = course_to_kacs          # type: ignore[attr-defined]
     ctx.leave_blocked = blocked
     ctx.pref_windows_quality = debug_pref_windows  # type: ignore[attr-defined]
+    ctx.submitted_prefs_by_faculty = submitted_prefs_by_faculty  # type: ignore[attr-defined]
     ctx.campus_blocked = campus_blocked
     ctx.current_assigned_units = current_assigned_units
     print("phase0_load → leave_rows:", len(leave_rows), "blocked:", len(blocked), "has FAC0002:", "FAC0002" in blocked)  # debug
@@ -8565,19 +8714,14 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
 
     def _is_blocked_ge_cmps2_slot(sid: str, di: int, interval: tuple[int, int]) -> bool:
         """
-        Owner-scoped blocking:
-        A CMPS0002 GE blocked window only blocks sections that share the same
-        (owner_program_id, owner_batch_id).
+        Owner-scoped Laguna GE blocking:
+        GE sections in CMPS0002 reserve their timeslots for sections that share the same
+        (owner_program_id, owner_batch_id). Any overlapping CMPS0002 section in the same
+        owner scope should avoid those blocked windows.
         """
         sec = sections_by_id.get(sid, {})
         campus = (sec.get("campus_id") or "").strip().upper()
         if campus != "CMPS0002":
-            return False
-
-        cid = (sec.get("course_id") or "").strip()
-        c = (courses.get(cid) or {})
-        ttype = str(c.get("type_of_course") or c.get("type") or "").strip().upper()
-        if ttype != "GE":
             return False
 
         owner_key = (
@@ -8592,8 +8736,14 @@ async def run_milestone_e_phase7(term_id: str, db, department_id: str | None = N
         blocked_arr = day_map.get(di, [])
 
         st, en = interval
-        for bst, ben, *_rest in blocked_arr:
-            if not (en <= bst or st >= ben):  # overlap
+        for item in blocked_arr:
+            if not isinstance(item, (list, tuple)) or len(item) < 2:
+                continue
+            bst, ben = item[0], item[1]
+            blocked_sid = str(item[2] or "").strip() if len(item) >= 3 else ""
+            if blocked_sid and blocked_sid == sid:
+                continue
+            if not (en <= bst or st >= ben):
                 return True
         return False
 
@@ -9311,6 +9461,22 @@ async def _persist_rows_no_auto(term_id: str, rows: list[dict], db):
             if existing.get("load_id"):
                 set_fields["load_id"] = existing["load_id"]
 
+            incoming_assignment_metadata = r.get("assignment_metadata")
+            if isinstance(incoming_assignment_metadata, dict) and incoming_assignment_metadata:
+                set_fields["assignment_metadata"] = {
+                    "assigned_faculty": str(incoming_assignment_metadata.get("assigned_faculty") or "").strip(),
+                    "assigned_faculty_id": str(incoming_assignment_metadata.get("assigned_faculty_id") or "").strip(),
+                    "reason_label": str(incoming_assignment_metadata.get("reason_label") or "").strip(),
+                    "reason_sentence": str(incoming_assignment_metadata.get("reason_sentence") or "").strip(),
+                }
+                set_fields["auto_assigned"] = True
+            elif fid_raw:
+                set_fields["assignment_metadata"] = None
+                set_fields["auto_assigned"] = False
+            else:
+                set_fields["assignment_metadata"] = None
+                set_fields["auto_assigned"] = False
+
             await db[COL_ASSIGN].update_one(
                 {"section_id": sid},
                 {"$set": set_fields, "$setOnInsert": {"created_at": _utcnow()}},
@@ -9926,6 +10092,46 @@ def _aa_schedule_conflict(used_slots: dict[str, list[tuple[str, int, int, str]]]
     return False
 
 
+def _aa_cross_campus_gap_violation(
+    used_slots: dict[str, list[tuple[str, int, int, str]]],
+    faculty_id: str,
+    day: str,
+    start_min: int,
+    end_min: int,
+    new_section_id: str,
+    section_lookup: dict[str, dict],
+    *,
+    min_gap_min: int = 180,
+) -> bool:
+    new_section = section_lookup.get(str(new_section_id) or "") or {}
+    new_campus = str(new_section.get("campus_id") or "").strip().upper()
+    if not new_campus:
+        return False
+
+    for d, st, en, existing_section_id in used_slots.get(faculty_id, []):
+        if d != day:
+            continue
+        existing_section = section_lookup.get(str(existing_section_id) or "") or {}
+        existing_campus = str(existing_section.get("campus_id") or "").strip().upper()
+        if not existing_campus or existing_campus == new_campus:
+            continue
+
+        if max(st, start_min) < min(en, end_min):
+            return True
+
+        if end_min <= st:
+            gap = st - end_min
+        elif en <= start_min:
+            gap = start_min - en
+        else:
+            return True
+
+        if gap < min_gap_min:
+            return True
+
+    return False
+
+
 def _aa_respects_pref_window(pref: dict | None, day: str, start_min: int, end_min: int) -> bool:
     days = _aa_pref_days(pref)
     if days and day not in days:
@@ -10418,7 +10624,7 @@ def _aa_slot_candidates(section: dict, faculty_state: dict, ctx: ContextA, sched
     return candidates
 
 
-def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used_slots: dict[str, list[tuple[str, int, int, str]]], course_day_usage: dict[str, dict[str, int]]) -> int:
+def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used_slots: dict[str, list[tuple[str, int, int, str]]], course_day_usage: dict[str, dict[str, int]], section_lookup: dict[str, dict] | None = None) -> int:
     day1 = candidate["day1"]
     day2 = candidate.get("day2")
     begin = candidate["begin"]
@@ -10442,6 +10648,30 @@ def _aa_schedule_score(candidate: dict, faculty_state: dict, section: dict, used
     if day2:
         score -= 20 * course_day_usage.get(section["course_id"], {}).get(day2, 0)
     score -= 5 * len(used_slots.get(faculty_state["faculty_id"], []))
+
+    section_lookup = section_lookup or {}
+    new_campus = str((section or {}).get("campus_id") or "").strip().upper()
+    if new_campus:
+        for check_day in [day1, day2]:
+            if not check_day:
+                continue
+            for used_day, used_st, used_en, used_sid in used_slots.get(faculty_state["faculty_id"], []):
+                if used_day != check_day:
+                    continue
+                used_section = section_lookup.get(str(used_sid) or "") or {}
+                used_campus = str(used_section.get("campus_id") or "").strip().upper()
+                if not used_campus or used_campus == new_campus:
+                    continue
+                if en <= used_st:
+                    gap = used_st - en
+                elif used_en <= st:
+                    gap = st - used_en
+                else:
+                    gap = -1
+                if gap >= 180:
+                    score -= 25
+                else:
+                    score -= 200
     return score
 
 
@@ -10485,6 +10715,7 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
         fstate = faculty_state_by_id.get(fid) or {}
         chosen = None
         best_score = None
+        campus_gap_rejections = 0
         for cand in _aa_slot_candidates(sec, fstate, ctx, schedule_history):
             day1 = cand["day1"]
             day2 = cand.get("day2")
@@ -10496,6 +10727,12 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
                 continue
             if day2 and _aa_schedule_conflict(used_slots, fid, day2, st, en):
                 continue
+            if _aa_cross_campus_gap_violation(used_slots, fid, day1, st, en, item["section_id"], section_lookup, min_gap_min=180):
+                campus_gap_rejections += 1
+                continue
+            if day2 and _aa_cross_campus_gap_violation(used_slots, fid, day2, st, en, item["section_id"], section_lookup, min_gap_min=180):
+                campus_gap_rejections += 1
+                continue
             if not _aa_respects_pref_window(fstate.get("pref"), day1, st, en):
                 continue
             if day2 and not _aa_respects_pref_window(fstate.get("pref"), day2, st, en):
@@ -10504,15 +10741,17 @@ def _aa_assign_schedule(assignments: list[dict], section_lookup: dict[str, dict]
                 continue
             if day2 and _streak_violation(used_slots, fid, day2, st, en):
                 continue
-            score = _aa_schedule_score(cand, fstate, sec, used_slots, course_day_usage)
+            score = _aa_schedule_score(cand, fstate, sec, used_slots, course_day_usage, section_lookup)
             if chosen is None or score > best_score:
                 chosen = cand
                 best_score = score
         if not chosen:
+            reason = "cross_campus_gap" if campus_gap_rejections else "no_free_slot_from_pool"
             no_time[item["section_id"]] = {
-                "reason": "no_free_slot_from_pool",
+                "reason": reason,
                 "faculty_id": fid,
                 "course_id": item.get("course_id"),
+                "min_gap_min": 180 if campus_gap_rejections else None,
             }
             continue
         day1 = chosen["day1"]
@@ -10845,4 +11084,3 @@ async def compute_load_recommendations(
     )
 
 
-# ================== END NEW AUTO-ASSIGNMENT ENGINE ==================
