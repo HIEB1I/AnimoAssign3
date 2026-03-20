@@ -1,5 +1,5 @@
 // frontend/src/pages/CHAIR/CHAIR_FacultyService.tsx
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Search, Send, ChevronDown, X, CheckCircle2, AlertCircle, Info, Undo2, Redo2, Plus, Trash2, MessageSquareText } from "lucide-react";
 import {
   getFSOptions,
@@ -361,16 +361,126 @@ const CONTROL =
   "w-full min-w-0 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm " +
   "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300";
 
-/* ---------------- Plantilla table design system (source of truth) ---------------- */
-const PLANTILLA_TABLE_WRAP =
-  "rounded-xl border border-gray-200 bg-white shadow-sm";
+const CARD_SHELL = "rounded-2xl border border-gray-200 bg-white shadow-sm";
+const INFO_TILE = "rounded-xl border border-gray-200 bg-gray-50 px-4 py-3";
 
-const PLANTILLA_TABLE =
-  "min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-middle [&_td]:whitespace-normal [&_td]:break-words";
-// Column headers: center-aligned by default (override per-column when needed).
-const PLANTILLA_TH = "px-4 py-2 text-center";
-const PLANTILLA_TD = "px-4 py-3 text-center";
-const PLANTILLA_ROW = "hover:bg-gray-50 [&>td]:border-b [&>td]:border-gray-200";
+function SectionShell({
+  title,
+  subtitle,
+  children,
+  actions,
+  accent = "emerald",
+}: {
+  title: string;
+  subtitle: string;
+  children: ReactNode;
+  actions?: ReactNode;
+  accent?: "emerald" | "slate";
+}) {
+  const headerTone =
+    accent === "slate"
+      ? "from-slate-900 via-slate-800 to-slate-700"
+      : "from-slate-900 via-emerald-900 to-emerald-700";
+
+  return (
+    <section className={CARD_SHELL}>
+      <div className={cls("rounded-t-2xl px-5 py-5 text-white", "bg-gradient-to-r", headerTone)}>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div>
+            <h2 className="text-lg font-semibold">{title}</h2>
+            <p className="mt-1 text-sm text-white/80">{subtitle}</p>
+          </div>
+          {actions ? <div className="flex items-center gap-2">{actions}</div> : null}
+        </div>
+      </div>
+      <div className="bg-gray-50 p-5">{children}</div>
+    </section>
+  );
+}
+
+function FieldTile({
+  label,
+  value,
+  className = "",
+}: {
+  label: string;
+  value: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cls(INFO_TILE, className)}>
+      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">{label}</div>
+      <div className="mt-1 text-sm font-medium text-gray-900 break-words">{value}</div>
+    </div>
+  );
+}
+
+function statusSelectTone(value?: string) {
+  const v = String(value || "").trim().toLowerCase();
+  if (v === "approved") return "border-emerald-300 bg-emerald-50 text-emerald-800";
+  if (v === "rejected") return "border-red-300 bg-red-50 text-red-800";
+  if (v === "pending") return "border-amber-300 bg-amber-50 text-amber-800";
+  return "";
+}
+
+function StatusChip({ label }: { label: string }) {
+  const tone =
+    label === "Approved"
+      ? "bg-emerald-100 text-emerald-800 ring-emerald-200"
+      : label === "Rejected"
+      ? "bg-red-100 text-red-800 ring-red-200"
+      : label === "Draft"
+      ? "bg-slate-200 text-slate-700 ring-slate-300"
+      : "bg-amber-100 text-amber-800 ring-amber-200";
+
+  return (
+    <span className={cls("inline-flex items-center rounded-full px-3 py-1 text-xs font-semibold ring-1", tone)}>
+      {label}
+    </span>
+  );
+}
+
+function ScheduleSummary({
+  day1,
+  begin1,
+  end1,
+  day2,
+  begin2,
+  end2,
+  emptyLabel = "Awaiting receiver response",
+}: {
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+  emptyLabel?: string;
+}) {
+  const lines = [
+    [day1, begin1, end1],
+    [day2, begin2, end2],
+  ]
+    .map(([day, begin, end]) => {
+      const d = String(day || "").trim();
+      const b = String(begin || "").trim();
+      const e = String(end || "").trim();
+      if (!d && !b && !e) return "";
+      const time = b && e ? `${b} - ${e}` : b || e;
+      return [d, time].filter(Boolean).join(" · ");
+    })
+    .filter(Boolean);
+
+  if (lines.length === 0) {
+    return (
+      <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-amber-200">
+        {emptyLabel}
+      </span>
+    );
+  }
+
+  return <div className="text-sm text-gray-700">{lines.join("  |  ")}</div>;
+}
 
 /* ---------------- Dropdown (portal-less, fixed-positioned) ---------------- */
 function Dropdown({
@@ -383,6 +493,7 @@ function Dropdown({
   align = "left",
   onOpen,
   disabled = false,
+  tone = "default",
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -393,6 +504,7 @@ function Dropdown({
   align?: "left" | "right";
   onOpen?: () => void;
   disabled?: boolean;
+  tone?: "default" | "status";
 }) {
   const [open, setOpen] = useState(false);
   const [term, setTerm] = useState("");
@@ -478,8 +590,13 @@ function Dropdown({
   };
 
   const baseBtn = cls(
-    "w-full h-10 rounded-lg border px-3 text-left text-sm outline-none pr-8 flex items-center",
-    "border-gray-300 bg-white shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
+    "w-full h-10 rounded-lg border px-3 text-left text-sm outline-none pr-8 flex items-center transition-colors",
+    tone === "status"
+      ? cls(
+          "shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
+          statusSelectTone(value) || "border-gray-300 bg-white"
+        )
+      : "border-gray-300 bg-white shadow-sm focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300",
     disabled && "cursor-not-allowed bg-gray-100 text-gray-400"
   );
 
@@ -612,62 +729,6 @@ const DAY2_BY_DAY1: Partial<Record<DayShort, DayShort>> = {
 };
 
 
-/** full receiver layout (13 columns)
- *  NOTE: day/begin/end columns are intentionally wider for better readability.
- */
-const COLS_14 = [
-  "34ch", // Course Code & Title
-  "18ch", // Section
-  "8ch", // Units
-  "30ch", // From
-  "36ch", // Faculty
-  "16ch", // Day1
-  "16ch", // Begin1
-  "16ch", // End1
-  "16ch", // Day2
-  "16ch", // Begin2
-  "16ch", // End2
-  "28ch", // Remarks
-  "30ch", // Status (wider for message + status control)
-];
-
-function ColGroup14() {
-  return (
-    <colgroup>
-      {COLS_14.map((w, i) => (
-        <col key={i} style={{ width: w }} />
-      ))}
-    </colgroup>
-  );
-}
-
-/** combined create + sent layout (14 columns) */
-const COLS_COMBINED = [
-  "6ch", // checkbox
-  "34ch", // course code & title
-  "23ch", // section
-  "8ch", // units
-  "40ch", // to
-  "30ch", // faculty
-  "10ch", // day1
-  "10ch", // begin1
-  "10ch", // end1
-  "10ch", // day2
-  "10ch", // begin2
-  "10ch", // end2
-  "30ch", // remarks
-  "14ch", // status
-];
-
-function ColGroupCombined() {
-  return (
-    <colgroup>
-      {COLS_COMBINED.map((w, i) => (
-        <col key={i} style={{ width: w }} />
-      ))}
-    </colgroup>
-  );
-}
 
 type FSCreate = {
   course_code: string;
@@ -836,6 +897,8 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
 
   // RFC presence/status cache for Faculty Service rows (used in Received Requests table)
   const [rfcPendingByKey, setRfcPendingByKey] = useState<Record<string, boolean>>({});
+  const [rfcUpdatedAtByKey, setRfcUpdatedAtByKey] = useState<Record<string, string>>({});
+  const [rfcLastSenderByKey, setRfcLastSenderByKey] = useState<Record<string, string>>({});
   const rfcKey = (sectionId?: string | null, facultyId?: string | null) =>
     `${String(sectionId || "")}::${String(facultyId || "")}`;
 
@@ -1129,7 +1192,6 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
      Key is section_id::faculty_id (same as rfcKey()).
   */
 
-  const [rfcUpdatedAtByKey, setRfcUpdatedAtByKey] = useState<Record<string, string>>({});
   const seenRfcRef = useRef<Record<string, string>>({});
 
   const rfcSeenKey = useMemo(() => {
@@ -1170,6 +1232,10 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
   const isRfcUnseen = (key: string) => {
     const upd = rfcUpdatedAtByKey[key];
     if (!upd) return false;
+
+    const lastSender = norm(String(rfcLastSenderByKey[key] || ""));
+    if (lastSender && lastSender !== "faculty") return false;
+
     const seen = seenRfcRef.current?.[key];
     if (!seen) return true;
     return new Date(seen).getTime() < new Date(upd).getTime();
@@ -1267,6 +1333,13 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
     return "";
   };
 
+  const getRfcLastSenderRole = (rfc: any): string => {
+    if (!rfc) return "";
+    const msgs = (rfc.messages || rfc.thread || []) as any[];
+    const last = Array.isArray(msgs) && msgs.length ? msgs[msgs.length - 1] : null;
+    return norm(String(last?.sender_role || last?.from || ""));
+  };
+
   async function hydrateRfcPendingForReceived(receivedList: FacultyServiceRow[]) {
     if (!meUserId || !termId) return;
     const targets = (receivedList || [])
@@ -1288,6 +1361,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
     const limit = 6;
     const nextMap: Record<string, boolean> = {};
     const nextUpdated: Record<string, string> = {};
+    const nextLastSender: Record<string, string> = {};
 
     for (let i = 0; i < need.length; i += limit) {
       const chunk = need.slice(i, i + limit);
@@ -1302,15 +1376,17 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
             const pending = computeRfcPending(res?.rfc);
             const key = rfcKey(sid, fid);
             const upd = getRfcUpdatedAt(res?.rfc);
-            return { key, pending, updatedAt: upd };
+            const lastSender = getRfcLastSenderRole(res?.rfc);
+            return { key, pending, updatedAt: upd, lastSender };
           } catch {
-            return { key: rfcKey(sid, fid), pending: false, updatedAt: "" };
+            return { key: rfcKey(sid, fid), pending: false, updatedAt: "", lastSender: "" };
           }
         })
       );
       for (const r of results) {
         nextMap[r.key] = r.pending;
         if (r.updatedAt) nextUpdated[r.key] = r.updatedAt;
+        nextLastSender[r.key] = r.lastSender || "";
       }
     }
 
@@ -1319,6 +1395,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
     }
     if (Object.keys(nextUpdated).length) {
       setRfcUpdatedAtByKey((prev) => ({ ...prev, ...nextUpdated }));
+    }
+    if (Object.keys(nextLastSender).length) {
+      setRfcLastSenderByKey((prev) => ({ ...prev, ...nextLastSender }));
     }
   }
 
@@ -1330,12 +1409,16 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
         faculty_id: facultyId,
         section_id: sectionId,
       });
+      const key = rfcKey(sectionId, facultyId);
       const pending = computeRfcPending(res?.rfc);
-      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: pending }));
+      setRfcPendingByKey((prev) => ({ ...prev, [key]: pending }));
       const upd = getRfcUpdatedAt(res?.rfc);
-      if (upd) setRfcUpdatedAtByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: upd }));
+      if (upd) setRfcUpdatedAtByKey((prev) => ({ ...prev, [key]: upd }));
+      setRfcLastSenderByKey((prev) => ({ ...prev, [key]: getRfcLastSenderRole(res?.rfc) }));
     } catch {
-      setRfcPendingByKey((prev) => ({ ...prev, [rfcKey(sectionId, facultyId)]: false }));
+      const key = rfcKey(sectionId, facultyId);
+      setRfcPendingByKey((prev) => ({ ...prev, [key]: false }));
+      setRfcLastSenderByKey((prev) => ({ ...prev, [key]: "" }));
     }
   }
 
@@ -1686,9 +1769,18 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
   };
 
   const filteredSentRows = useMemo(() => (q ? mySentRows.filter(rowMatches) : mySentRows), [mySentRows, q]);
+  const sortedReceivedRows = useMemo(() => {
+    const rows = [...receivedRows];
+    return rows.sort((a, b) => {
+      const aApproved = toFsStatusLabel((a as any)?.status) === "Approved" ? 1 : 0;
+      const bApproved = toFsStatusLabel((b as any)?.status) === "Approved" ? 1 : 0;
+      return aApproved - bApproved;
+    });
+  }, [receivedRows]);
+
   const filteredReceivedRows = useMemo(
-    () => (q ? receivedRows.filter(rowMatches) : receivedRows),
-    [receivedRows, q]
+    () => (q ? sortedReceivedRows.filter(rowMatches) : sortedReceivedRows),
+    [sortedReceivedRows, q]
   );
 
 
@@ -1723,29 +1815,45 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
       )}
 
       <main className={cls("w-full pb-24 space-y-8", variant !== "embedded" && "px-8")}>
-        {/* Search + actions (shared) */}
-        <div className="rounded-xl border border-gray-200 bg-white shadow-sm p-4">
-          <div className="flex flex-col gap-3 md:flex-row md:items-center">
+
+
+        <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
             <div className="relative flex-1">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
               <input
                 className={cls(
-                  "w-full h-10 rounded-lg border border-gray-300 bg-white pl-9 pr-3 text-sm shadow-sm",
+                  "w-full h-10 rounded-lg border border-gray-300 bg-white pl-9 pr-10 text-sm shadow-sm",
                   "focus:outline-none focus:ring-2 focus:ring-emerald-200 focus:border-emerald-300"
                 )}
-                placeholder="Search by course code or faculty…"
+                placeholder="Search by course, section, department, or faculty…"
                 value={tableSearch}
                 onChange={(e) => setTableSearch(e.target.value)}
               />
+              {tableSearch && (
+                <button
+                  type="button"
+                  onClick={() => setTableSearch("")}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 rounded p-0.5 text-gray-400 transition hover:bg-gray-100 hover:text-gray-600"
+                  aria-label="Clear search"
+                  title="Clear search"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              )}
             </div>
+          </div>
+        </div>
 
-            <div className="flex items-center justify-end gap-2">
+        <SectionShell
+          title="Create Request & Sent Requests"
+          subtitle="Create request, then review previously sent requests."
+          actions={(
+            <>
               <button
                 type="button"
                 onClick={addDraftRow}
-                className={cls(
-                  "inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm"
-                )}
+                className="inline-flex items-center gap-2 rounded-lg bg-white/10 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-white/20"
                 title="Add another request row"
               >
                 <Plus className="h-4 w-4" />
@@ -1755,381 +1863,427 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
               <button
                 type="button"
                 onClick={handleCreateAndSend}
-                className={cls(
-                "inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110"
-                )}
+                className="inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2 text-sm font-medium text-emerald-800 shadow-sm transition hover:bg-emerald-50"
                 title="Send selected requests"
               >
                 <Send className="h-4 w-4" />
-                Send
+                Send Selected
               </button>
-            </div>
-          </div>
-        </div>
+            </>
+          )}
+        >
+          <div className="space-y-4">
+            {draftRows.map((r, idx) => {
+              const checked = selectedDraftIds[r._tmpId] ?? true;
+              const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
+              const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
+              const sectionDisabled = !r.course_code || sectionCodes.length === 0;
 
-        {/* 1) CREATE & SENT REQUESTS (From = activeDeptName) */}
-        <section className="space-y-2">
-          <h2 className="text-base font-semibold text-gray-800">Sent Requests</h2>
+              return (
+                <div key={r._tmpId} className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div className="flex items-start gap-3">
+                      <label className="mt-1 inline-flex items-center gap-2 text-sm font-medium text-gray-700">
+                        <input
+                          type="checkbox"
+                          className="h-4 w-4 accent-emerald-600"
+                          checked={checked}
+                          onChange={(e) => {
+                            const v = e.target.checked;
+                            setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
+                          }}
+                          aria-label="Select row to send"
+                        />
+                        Select
+                      </label>
+                    </div>
 
-          <div className={PLANTILLA_TABLE_WRAP}>
-            <div className="overflow-x-auto rounded-xl">
-              <table className={PLANTILLA_TABLE}>
-                <ColGroupCombined />
-                <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
-                    <th className={PLANTILLA_TH}>
-                      <span className="sr-only">Select</span>
-                    </th>
-                    <th className="px-4 py-2 text-left">Course Code &amp; Title<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Section<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Units</th>
-                    <th className={PLANTILLA_TH}>To<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Faculty</th>
-                    <th className={PLANTILLA_TH}>Day1</th>
-                    <th className={PLANTILLA_TH}>Begin1</th>
-                    <th className={PLANTILLA_TH}>End1</th>
-                    <th className={PLANTILLA_TH}>Day2</th>
-                    <th className={PLANTILLA_TH}>Begin2</th>
-                    <th className={PLANTILLA_TH}>End2</th>
-                    <th className={PLANTILLA_TH}>Remarks</th>
-                    <th className={PLANTILLA_TH}>Status</th>
-                  </tr>
-                </thead>
+                    <div className="flex items-center gap-2 self-start">
+                      <StatusChip label="Draft" />
+                      <button
+                        type="button"
+                        onClick={() => removeDraftRow(r._tmpId)}
+                        className="inline-flex items-center justify-center rounded-lg border border-red-200 bg-red-50 p-2 text-red-600 transition hover:bg-red-100"
+                        title="Delete draft row"
+                        aria-label="Delete draft row"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </div>
 
-                <tbody className="text-gray-800">
-                  {/* Draft rows (editable before sending) */}
-                  {draftRows.map((r) => {
-                    const checked = selectedDraftIds[r._tmpId] ?? true;
-                    const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
-                    const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
-                    const sectionDisabled = !r.course_code || sectionCodes.length === 0;
+                  <div className="mt-4 grid grid-cols-1 gap-3 xl:grid-cols-12">
+                    <div className="xl:col-span-4">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Course Code &amp; Title <span className="text-red-600">*</span></div>
+                      <div className="mt-1">
+                        <Dropdown
+                          value={r.course_code}
+                          onChange={(code) => {
+                            const hit = courseSuggestions.find((c) => c.code === code);
+                            updateDraftRow(r._tmpId, {
+                              course_code: code,
+                              section_id: "",
+                              section: "",
+                              course_title: hit?.title ?? "",
+                              units: hit?.units ?? null,
+                            });
+                            setCourseTerm("");
+                          }}
+                          options={codeOptions}
+                          placeholder="— Select Course —"
+                          searchable
+                          className="w-full"
+                          onOpen={() => setCourseTerm("")}
+                        />
+                      </div>
+                      <div className="mt-2 min-h-[20px] text-sm text-gray-600">{r.course_title || "—"}</div>
+                    </div>
 
-                    return (
-                      <tr key={r._tmpId} className={PLANTILLA_ROW}>
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <input
-                            type="checkbox"
-                            className="h-4 w-4 accent-emerald-600"
-                            checked={checked}
-                            onChange={(e) => {
-                              const v = e.target.checked;
-                              setSelectedDraftIds((prev) => ({ ...prev, [r._tmpId]: v }));
-                            }}
-                            aria-label="Select row to send"
-                          />
-                        </td>
+                    <div className="xl:col-span-2">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Section <span className="text-red-600">*</span></div>
+                      <div className="mt-1">
+                        <Dropdown
+                          value={r.section}
+                          onChange={(sec) => {
+                            const hit = secs.find((s) => s.section_code === sec);
+                            updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
+                          }}
+                          options={sectionCodes}
+                          placeholder="— Select —"
+                          className="w-full"
+                          searchable={false}
+                          disabled={sectionDisabled}
+                        />
+                      </div>
+                    </div>
 
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <Dropdown
-                            value={r.course_code}
-                            onChange={(code) => {
-                              const hit = courseSuggestions.find((c) => c.code === code);
-                              updateDraftRow(r._tmpId, {
-                                course_code: code,
-                                section_id: "",
-                                section: "",
-                                course_title: hit?.title ?? "",
-                                units: hit?.units ?? null,
-                              });
-                              setCourseTerm("");
-                            }}
-                            options={codeOptions}
-                            placeholder="— Select Course —"
-                            searchable
-                            className="w-full"
-                            onOpen={() => setCourseTerm("")}
-                          />
-                          <div className="mt-1 text-[12px] text-neutral-600 leading-tight">{r.course_title || ""}</div>
-                        </td>
+                    <div className="xl:col-span-2">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Units</div>
+                      <div className="mt-1">
+                        <div className={cls(CONTROL, "flex h-10 items-center bg-gray-50 text-gray-700")}>{r.units ?? "—"}</div>
+                      </div>
+                    </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <Dropdown
-                            value={r.section}
-                            onChange={(sec) => {
-                              const hit = secs.find((s) => s.section_code === sec);
-                              updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
-                            }}
-                            options={sectionCodes}
-                            placeholder={r.course_code ? "— Select —" : "— Select —"}
-                            className="w-full"
-                            searchable={false}
-                            disabled={sectionDisabled}
-                          />
-                        </td>
+                    <div className="xl:col-span-4">
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">To Department <span className="text-red-600">*</span></div>
+                      <div className="mt-1">
+                        <Dropdown
+                          value={r.to_department}
+                          onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
+                          options={toDepts}
+                          placeholder="— Select Department —"
+                          className="w-full"
+                          searchable={false}
+                        />
+                      </div>
+                    </div>
+                  </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle tabular-nums")}> 
-                          <span className="inline-block leading-6">{r.units ?? "—"}</span>
-                        </td>
+                  <div className="mt-3 space-y-3">
+                    <div>
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Remarks</div>
+                      <input
+                        className={cls(CONTROL, "mt-1 w-full")}
+                        value={r.remarks}
+                        onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
+                        placeholder="Remarks…"
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <Dropdown
-                            value={r.to_department}
-                            onChange={(v) => updateDraftRow(r._tmpId, { to_department: v })}
-                            options={toDepts}
-                            placeholder="— Select Department —"
-                            className="w-full"
-                            searchable={false}
-                          />
-                        </td>
+            <div className="space-y-4">
+              {loadingList && (
+                <div className="rounded-2xl border border-gray-200 bg-white px-4 py-6 text-center text-sm text-gray-500 shadow-sm">
+                  Loading…
+                </div>
+              )}
 
-                        {/* disabled fields until receiver responds */}
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
-                        <td className={PLANTILLA_TD}>—</td>
+              {!loadingList && mySentRows.length === 0 && (
+                <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-4 py-10 text-center text-sm text-gray-500 shadow-sm">
+                  No sent requests yet.
+                </div>
+              )}
 
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <input
-                            className={CONTROL}
-                            value={r.remarks}
-                            onChange={(ev) => updateDraftRow(r._tmpId, { remarks: ev.target.value })}
-                            placeholder="Remarks…"
-                          />
-                        </td>
+              {!loadingList && mySentRows.length > 0 && filteredSentRows.length === 0 && !!q && (
+                <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-4 py-10 text-center text-sm text-gray-500 shadow-sm">
+                  No matches found.
+                </div>
+              )}
 
-                        <td className={PLANTILLA_TD}>
-                          <div className="flex items-center justify-center gap-2">
-                            <span className="inline-block rounded-full px-2 py-[2px] text-[12px] bg-neutral-200 text-neutral-700">
-                              Draft
+              {filteredSentRows.map((r) => {
+                const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
+                const fid = String((r as any)?.faculty?.faculty_id || "");
+                const sid = String((r as any)?.section_id || "");
+
+                return (
+                  <div key={r.fs_id} className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
+                    <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                      <div>
+                        <div className="text-lg font-semibold text-emerald-700">{r.course_code || "—"}</div>
+                        <div className="text-sm text-gray-600">{r.course_title || "—"}</div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 self-start">
+                        <button
+                          type="button"
+                          aria-label="Message"
+                          disabled={!termId || !sid || !fid}
+                          onClick={() => {
+                            if (!fid || !sid) return;
+                            setRfcModal({
+                              open: true,
+                              facultyId: fid,
+                              facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
+                              sectionId: sid,
+                            });
+                          }}
+                          className={cls(
+                            "inline-flex items-center justify-center rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-700 transition hover:bg-blue-100",
+                            (!termId || !sid || !fid) && "cursor-not-allowed opacity-50 hover:bg-blue-50"
+                          )}
+                          title={!termId || !sid || !fid ? "Assign a faculty first to open conversation" : "Message"}
+                        >
+                          <MessageSquareText className="h-4 w-4" />
+                        </button>
+                        <StatusChip label={label} />
+                      </div>
+                    </div>
+
+                    <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+                      <FieldTile label="Section" value={r.section || "—"} />
+                      <FieldTile label="Units" value={r.units ?? "—"} />
+                      <FieldTile label="To Department" value={r.to_department || "—"} />
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
+                      <FieldTile
+                        label="Faculty"
+                        value={
+                          facultyLabel((r as any)?.faculty) || (
+                            <span className="inline-flex items-center rounded-full bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700 ring-1 ring-amber-200">
+                              Awaiting assignment
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => removeDraftRow(r._tmpId)}
-                              className={cls(
-                                "inline-flex items-center justify-center rounded-md p-1.5",
-                                "hover:bg-red-50 focus:outline-none focus:ring-2 focus:ring-red-500/30"
-                              )}
-                              title="Delete draft row"
-                              aria-label="Delete draft row"
-                            >
-                              <Trash2 className="h-4 w-4 text-red-600" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {/* Sent rows (read-only) */}
-                  {filteredSentRows.map((r) => {
-                    const label = r.status === "responded" ? "Approved" : r.status === "rejected" ? "Rejected" : "Pending";
-                    const badge =
-                      r.status === "responded"
-                        ? "bg-emerald-100 text-emerald-700"
-                        : r.status === "rejected"
-                        ? "bg-red-100 text-red-700"
-                        : "bg-amber-100 text-amber-700";
-
-                    return (
-                      <tr key={r.fs_id} className={PLANTILLA_ROW}>
-                        <td className={PLANTILLA_TD} />
-
-                        <td className={cls(PLANTILLA_TD, "text-left")}> 
-                          <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
-                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title || "—"}</div>
-                        </td>
-
-                        <td className={PLANTILLA_TD}>{r.section || "—"}</td>
-                        <td className={PLANTILLA_TD}>{r.units ?? "—"}</td>
-                        <td className={PLANTILLA_TD}>{r.to_department || "—"}</td>
-
-                        <td className={PLANTILLA_TD}>{facultyLabel((r as any)?.faculty) || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.day1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.begin1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.end1 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.day2 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.begin2 || "—"}</td>
-                        <td className={PLANTILLA_TD}>{(r as any)?.end2 || "—"}</td>
-                        <td className={cls(PLANTILLA_TD, "text-left")}>{r.remarks || "—"}</td>
-
-                        <td className={PLANTILLA_TD}>
-                          <div className="flex items-center justify-center gap-2">
-                            <button
-                              type="button"
-                              aria-label="Message"
-                              disabled={!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)}
-                              onClick={() => {
-                                const fid = String((r as any)?.faculty?.faculty_id || "");
-                                const sid = String((r as any)?.section_id || "");
-                                if (!fid || !sid) return;
-                                setRfcModal({
-                                  open: true,
-                                  facultyId: fid,
-                                  facultyName: facultyLabel((r as any)?.faculty) || "Faculty",
-                                  sectionId: sid,
-                                });
-                              }}
-                              className={cls(
-                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
-                                (!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) &&
-                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
-                              )}
-                              title={(!termId || !(r as any)?.section_id || !((r as any)?.faculty?.faculty_id)) ? "Assign a faculty first to open conversation" : "Message"}
-                            >
-                              <MessageSquareText className="h-4 w-4" />
-                            </button>
-
-                            <span className={cls("inline-block rounded-full px-2 py-[2px] text-[12px]", badge)}>{label}</span>
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {mySentRows.length === 0 && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        No sent requests yet.
-                      </td>
-                    </tr>
-                  )}
-
-                  {mySentRows.length > 0 && filteredSentRows.length === 0 && !!q && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        No matches found.
-                      </td>
-                    </tr>
-                  )}
-
-                  {loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={14}>
-                        Loading…
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                          )
+                        }
+                      />
+                      <FieldTile
+                        label="Schedule"
+                        value={
+                          <ScheduleSummary
+                            day1={(r as any)?.day1}
+                            begin1={(r as any)?.begin1}
+                            end1={(r as any)?.end1}
+                            day2={(r as any)?.day2}
+                            begin2={(r as any)?.begin2}
+                            end2={(r as any)?.end2}
+                            emptyLabel="Awaiting receiver response"
+                          />
+                        }
+                      />
+                      <FieldTile label="Remarks" value={r.remarks || "—"} />
+                    </div>
+                  </div>
+                );
+              })}
             </div>
           </div>
-        </section>
+        </SectionShell>
 
-        {/* 2) RECEIVED REQUESTS (To = activeDeptName) */}
-        <section className="space-y-2">
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-center gap-2">
-              <h2 className="text-base font-semibold text-gray-800">Received Requests</h2>
+        <SectionShell
+          title="Received Requests"
+          subtitle="Review incoming requests, assign faculty, set schedule details, then approve, reject, or keep them pending."
+          accent="slate"
+          actions={(
+            <>
               {hasNewReceived && (
                 <span
-                  className="inline-flex items-center rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-semibold text-emerald-800"
+                  className="inline-flex items-center rounded-full bg-emerald-100 px-3 py-1 text-xs font-semibold text-emerald-900"
                   title="New requests received"
                 >
                   New
                 </span>
               )}
-            </div>
-
-            <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => undoEdit()}
                 disabled={!canUndoReceived}
                 className={cls(
-                  "inline-flex items-center justify-center rounded-md p-2",
-                  "border border-gray-200 bg-white hover:bg-gray-50",
-                  !canUndoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
+                  "inline-flex items-center justify-center rounded-lg border border-white/15 bg-white/10 p-2 text-white transition hover:bg-white/20",
+                  !canUndoReceived && "cursor-not-allowed opacity-50 hover:bg-white/10"
                 )}
                 title="Undo (Ctrl/Cmd+Z)"
                 aria-label="Undo"
               >
                 <Undo2 className="h-4 w-4" />
               </button>
-
               <button
                 type="button"
                 onClick={() => redoEdit()}
                 disabled={!canRedoReceived}
                 className={cls(
-                  "inline-flex items-center justify-center rounded-md p-2",
-                  "border border-gray-200 bg-white hover:bg-gray-50",
-                  !canRedoReceived && "opacity-50 cursor-not-allowed hover:bg-white"
+                  "inline-flex items-center justify-center rounded-lg border border-white/15 bg-white/10 p-2 text-white transition hover:bg-white/20",
+                  !canRedoReceived && "cursor-not-allowed opacity-50 hover:bg-white/10"
                 )}
                 title="Redo (Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z)"
                 aria-label="Redo"
               >
                 <Redo2 className="h-4 w-4" />
               </button>
-            </div>
-          </div>
+            </>
+          )}
+        >
+          <div className="space-y-4">
+            {loadingList && (
+              <div className="rounded-2xl border border-gray-200 bg-white px-4 py-6 text-center text-sm text-gray-500 shadow-sm">
+                Loading…
+              </div>
+            )}
 
-          <div className={PLANTILLA_TABLE_WRAP}>
-            <div className="overflow-x-auto rounded-xl">
-              <table className={PLANTILLA_TABLE}>
-                <ColGroup14 />
-                <thead className="bg-gray-50 border-b text-gray-900">
-                <tr>
-                    <th className={cls(PLANTILLA_TH, "text-left")}>Course Code &amp; Title</th>
-                    <th className={PLANTILLA_TH}>Section</th>
-                    <th className={PLANTILLA_TH}>Units</th>
-                    <th className={PLANTILLA_TH}>From</th>
-                    <th className={PLANTILLA_TH}>Faculty<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Day1<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Begin1<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>End1<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Day2<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Begin2<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>End2<span className="text-red-600 ml-0.5">*</span></th>
-                    <th className={PLANTILLA_TH}>Remarks</th>
-                    <th className={PLANTILLA_TH}>Status<span className="text-red-600 ml-0.5">*</span></th>
-                  </tr>
-                </thead>
+            {!loadingList && receivedRows.length === 0 && (
+              <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-4 py-10 text-center text-sm text-gray-500 shadow-sm">
+                No received requests for your department.
+              </div>
+            )}
 
-                <tbody className="text-gray-800">
-                  {filteredReceivedRows.map((r) => {
-                    const fsid = r.fs_id!;
-                    const dept = r.to_department || "";
-                    const e = getEdit(fsid);
-                    const facultyOptions = facultyCache[dept] || [];
+            {!loadingList && receivedRows.length > 0 && filteredReceivedRows.length === 0 && !!q && (
+              <div className="rounded-2xl border border-dashed border-gray-300 bg-white px-4 py-10 text-center text-sm text-gray-500 shadow-sm">
+                No matches found.
+              </div>
+            )}
 
-                    // RFC status (Approve/Pending) for Faculty Service rows
-                    const sid = String((r as any)?.section_id || "").trim();
-                    const fid = String((r as any)?.faculty?.faculty_id || (e.faculty as any)?.faculty_id || "").trim();
-                    const rkey = sid && fid ? rfcKey(sid, fid) : "";
-                    const pendingRfc = rkey ? Boolean(rfcPendingByKey[rkey]) : false;
-                    const curStatusLabel = toFsStatusLabel((r as any)?.status);
+            {filteredReceivedRows.map((r) => {
+              const fsid = r.fs_id!;
+              const dept = r.to_department || "";
+              const e = getEdit(fsid);
+              const facultyOptions = facultyCache[dept] || [];
+              const sid = String((r as any)?.section_id || "").trim();
+              const fid = String((r as any)?.faculty?.faculty_id || (e.faculty as any)?.faculty_id || "").trim();
+              const rkey = sid && fid ? rfcKey(sid, fid) : "";
+              const pendingRfc = rkey ? Boolean(rfcPendingByKey[rkey]) : false;
+              const curStatusLabel = toFsStatusLabel((r as any)?.status);
 
-                    return (
-                      <tr key={fsid} className={PLANTILLA_ROW} onMouseEnter={() => ensureFacultyForDept(dept)}>
-                        <td className={cls(PLANTILLA_TD, "text-left align-top")}> 
-                          <div className="font-semibold text-emerald-700">{r.course_code}</div>
-                          <div className="text-[12px] text-neutral-600 leading-tight">{r.course_title}</div>
-                        </td>
+              return (
+                <div key={fsid} className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm" onMouseEnter={() => ensureFacultyForDept(dept)}>
+                  <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+                    <div>
+                      <div className="text-lg font-semibold text-emerald-700">{r.course_code || "—"}</div>
+                      <div className="text-sm text-gray-600">{r.course_title || "—"}</div>
+                    </div>
 
-                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.section || "—"}</td>
-                        <td className={cls(PLANTILLA_TD, "tabular-nums")}>{r.units ?? ""}</td>
-                        <td className={cls(PLANTILLA_TD, "truncate")} title={r.from_department}>{r.from_department}</td>
+                    <div className="flex flex-wrap items-center gap-2 self-start">
+                      <button
+                        type="button"
+                        aria-label="Message"
+                        disabled={!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)}
+                        onClick={() => {
+                          const modalFacultyId = String(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id || "");
+                          const sid2 = String(r.section_id || "");
+                          if (!modalFacultyId || !sid2) return;
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <Dropdown
-                            value={
-                              e.faculty?.faculty_id
-                                ? facultyOptions.find((f) => f.faculty_id === e.faculty?.faculty_id)?.label || ""
-                                : facultyLabel(e.faculty)
+                          try {
+                            markRfcSeen(rfcKey(sid2, modalFacultyId));
+                          } catch {}
+
+                          try {
+                            if (fsid) {
+                              seenReceivedRef.current.add(String(fsid));
+                              saveSeenReceived();
+                              setHasNewReceived(receivedRows.some((x) => {
+                                const id = x?.fs_id || (x as any)?.id;
+                                return !!id && !seenReceivedRef.current.has(String(id));
+                              }));
                             }
-                            onChange={(label) => {
-                              const match = facultyOptions.find((f) => f.label === label);
-                              if (match) {
-                                patchEdit(fsid, {
-                                  faculty: {
-                                    faculty_id: match.faculty_id,
-                                    first_name: match.first_name,
-                                    last_name: match.last_name,
-                                    email: match.email,
-                                  },
-                                });
-                              }
-                            }}
-                            options={facultyOptions.map((f) => f.label).filter(Boolean)}
-                            placeholder={facultyOptions.length ? "— Select Faculty —" : "Loading…"}
-                            searchable
-                          />
-                        </td>
+                          } catch {}
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                          setRfcModal({
+                            open: true,
+                            facultyId: modalFacultyId,
+                            facultyName: facultyLabel(e.faculty) || facultyLabel((r as any)?.faculty) || "Faculty",
+                            sectionId: sid2,
+                            fsId: String(fsid),
+                          });
+                        }}
+                        className={cls(
+                          "relative inline-flex items-center justify-center rounded-lg border border-blue-200 bg-blue-50 p-2 text-blue-700 transition hover:bg-blue-100",
+                          (!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) &&
+                            "cursor-not-allowed opacity-50 hover:bg-blue-50"
+                        )}
+                        title={(!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) ? "Select a faculty first to open conversation" : "Message"}
+                      >
+                        <span className="relative inline-flex">
+                          <MessageSquareText className="h-4 w-4" />
+                          {pendingRfc && rkey && isRfcUnseen(rkey) && (
+                            <span
+                              className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white"
+                              aria-label="New RFC"
+                              title="New RFC"
+                            />
+                          )}
+                        </span>
+                      </button>
+                      <div className="min-w-[148px]">
+                        <Dropdown
+                          value={curStatusLabel}
+                          onChange={(v) => void changeReceivedStatus(fsid, String(v), r)}
+                          options={[...FS_STATUS_OPTIONS] as any}
+                          placeholder="Pending"
+                          className="w-full"
+                          searchable={false}
+                          tone="status"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+                    <FieldTile label="Section" value={r.section || "—"} />
+                    <FieldTile label="Units" value={r.units ?? "—"} />
+                    <FieldTile label="From Department" value={r.from_department || "—"} />
+                    <div className={INFO_TILE}>
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Faculty <span className="text-red-600">*</span></div>
+                      <div className="mt-1">
+                        <Dropdown
+                          value={
+                            e.faculty?.faculty_id
+                              ? facultyOptions.find((f) => f.faculty_id === e.faculty?.faculty_id)?.label || ""
+                              : facultyLabel(e.faculty)
+                          }
+                          onChange={(label) => {
+                            const match = facultyOptions.find((f) => f.label === label);
+                            if (match) {
+                              patchEdit(fsid, {
+                                faculty: {
+                                  faculty_id: match.faculty_id,
+                                  first_name: match.first_name,
+                                  last_name: match.last_name,
+                                  email: match.email,
+                                },
+                              });
+                            }
+                          }}
+                          options={facultyOptions.map((f) => f.label).filter(Boolean)}
+                          placeholder={facultyOptions.length ? "— Select Faculty —" : "Loading…"}
+                          searchable
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="mb-3 flex items-center justify-between gap-3">
+                      <div>
+                        <div className="text-sm font-semibold text-gray-900">Schedule Details</div>
+                        <div className="text-xs text-gray-500">Set the faculty schedule before approving the request.</div>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 gap-3 lg:grid-cols-2 2xl:grid-cols-3">
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Day 1 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.day1 || ""}
                             onChange={(val) => {
@@ -2140,13 +2294,15 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                               });
                             }}
                             options={[...DAY1_OPTIONS]}
-                            placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Begin 1 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.begin1 || ""}
                             onChange={(val) => {
@@ -2157,35 +2313,41 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                               });
                             }}
                             options={timeBegins}
-                            placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">End 1 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.end1 || ""}
                             onChange={(v) => patchEdit(fsid, { end1: v })}
                             options={timeBegins}
-                            placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Day 2 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.day2 || ""}
                             onChange={(v) => patchEdit(fsid, { day2: v as DayShort | "" })}
                             options={[...DAY1_OPTIONS]}
-                            placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Begin 2 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.begin2 || ""}
                             onChange={(val) => {
@@ -2196,127 +2358,43 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                               });
                             }}
                             options={timeBegins}
-                            placeholder=""
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
+                      <div className={INFO_TILE}>
+                        <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">End 2 <span className="text-red-600">*</span></div>
+                        <div className="mt-1">
                           <Dropdown
                             value={e.end2 || ""}
                             onChange={(v) => patchEdit(fsid, { end2: v })}
                             options={timeBegins}
-                            placeholder="—"
-                            className="max-w-[110px] mx-auto"
+                            placeholder="— Select —"
                             searchable={false}
                           />
-                        </td>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
 
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <input
-                            value={e.remarks}
-                            onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
-                            placeholder="Enter remarks…"
-                            className={CONTROL}
-                          />
-                        </td>
-
-                        <td className={cls(PLANTILLA_TD, "align-middle")}> 
-                          <div className="flex items-center justify-center gap-2">
-                            <button
-                              type="button"
-                              aria-label="Message"
-                              disabled={!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)}
-                              onClick={() => {
-                                const fid = String(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id || "");
-                                const sid2 = String(r.section_id || "");
-                                if (!fid || !sid2) return;
-
-                                try {
-                                  markRfcSeen(rfcKey(sid2, fid));
-                                } catch {}
-
-                                try {
-                                  if (fsid) {
-                                    seenReceivedRef.current.add(String(fsid));
-                                    saveSeenReceived();
-                                    setHasNewReceived(receivedRows.some((x) => {
-                                      const id = x?.fs_id || (x as any)?.id;
-                                      return !!id && !seenReceivedRef.current.has(String(id));
-                                    }));
-                                  }
-                                } catch {}
-
-                                setRfcModal({
-                                  open: true,
-                                  facultyId: fid,
-                                  facultyName: facultyLabel(e.faculty) || facultyLabel((r as any)?.faculty) || "Faculty",
-                                  sectionId: sid2,
-                                  fsId: String(fsid),
-                                });
-                              }}
-                              className={cls(
-                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
-                                (!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) &&
-                                  "opacity-50 cursor-not-allowed hover:bg-transparent"
-                              )}
-                              title={(!termId || !r.section_id || !(e.faculty?.faculty_id || (r as any)?.faculty?.faculty_id)) ? "— Select —" : "Message"}
-                            >
-                              <span className="relative inline-flex">
-                                <MessageSquareText className="h-4 w-4" />
-                                {pendingRfc && rkey && isRfcUnseen(rkey) && (
-                                  <span
-                                    className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600 ring-2 ring-white"
-                                    aria-label="New RFC"
-                                    title="New RFC"
-                                  />
-                                )}
-                              </span>
-                            </button>
-                            {/* Faculty Service request status (clickable) */}
-                            <Dropdown
-                              value={curStatusLabel}
-                              onChange={(v) => void changeReceivedStatus(fsid, String(v), r)}
-                              options={[...FS_STATUS_OPTIONS] as any}
-                              placeholder="Pending"
-                              className="min-w-[140px]"
-                              searchable={false}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {receivedRows.length === 0 && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
-                        No received requests for your department.
-                      </td>
-                    </tr>
-                  )}
-
-                  {receivedRows.length > 0 && filteredReceivedRows.length === 0 && !!q && !loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
-                        No matches found.
-                      </td>
-                    </tr>
-                  )}
-
-                  {loadingList && (
-                    <tr className={PLANTILLA_ROW}>
-                      <td className={cls(PLANTILLA_TD, "py-6 text-sm text-gray-500")} colSpan={13}>
-                        Loading…
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+                  <div className="mt-3">
+                    <div className={INFO_TILE}>
+                      <div className="text-[11px] font-medium uppercase tracking-wide text-gray-500">Remarks</div>
+                      <input
+                        value={e.remarks}
+                        onChange={(ev) => patchEdit(fsid, { remarks: ev.target.value })}
+                        placeholder="Enter remarks…"
+                        className={cls(CONTROL, "mt-1")}
+                      />
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
           </div>
-        </section>
+        </SectionShell>
 
         {/* RFC / Message thread (mirrors OM Load Assignment) */}
         <ServiceRfcModal

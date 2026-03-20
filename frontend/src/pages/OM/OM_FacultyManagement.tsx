@@ -607,20 +607,6 @@ export default function OM_FacultyManagement() {
           </div>
         )}
 
-        <div className="mb-6 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700">
-          <div className="flex items-start gap-3">
-            <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
-              <GraduationCap className="h-5 w-5" />
-            </div>
-            <div>
-              <div className="font-semibold">Faculty Management</div>
-              <div className="text-xs text-slate-600">
-                Select any faculty member to review profile details on the right, with schedule and teaching history displayed directly in the viewer.
-              </div>
-            </div>
-          </div>
-        </div>
-
         <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
           <div className="relative min-w-[260px] flex-1">
             <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
