@@ -1701,7 +1701,7 @@ const scheduleFinalLabel = (() => {
 	                    onChange={(e) => setSendToGcal(e.target.checked)}
 	                    disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
 	                  />
-	                  <span>Send to GCalendar</span>
+	                  <span>Sync to GCalendar</span>
 	                </label>
 	              </div>
 	            ) : (
