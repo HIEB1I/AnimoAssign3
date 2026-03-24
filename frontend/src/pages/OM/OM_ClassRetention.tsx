@@ -422,7 +422,14 @@ export default function OM_ClassRetention(
                     }
                     onChange={async (label) => {
                       const cid = courseLabelToId[label] || "";
-                      setDraft(d => ({ ...d, course_id: cid, section_id: undefined }));
+                      const selected = courseOpts.find(o => o.course_id === cid);
+                      setDraft(d => ({
+                        ...d,
+                        course_id: cid,
+                        section_id: undefined,
+                        student_units: selected?.units ?? null,
+                        faculty_units: selected?.faculty_units ?? null,
+                      }));
                       await refreshSections(cid);
                     }}
                     options={courseLabels}
@@ -448,21 +455,11 @@ export default function OM_ClassRetention(
                 </td>
 
                 <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={draft.student_units ?? 0}
-                    onChange={(e) => setDraft((d) => ({ ...d, student_units: toNumOrNull(e.target.value) }))}
-                    className={cls(SOFT_INPUT, "w-24 text-center")}
-                  />
+                  <span className="font-medium">{draft.student_units ?? "—"}</span>
                 </td>
 
                 <td className="px-4 py-3 text-center">
-                  <input
-                    type="number"
-                    value={draft.faculty_units ?? 0}
-                    onChange={(e) => setDraft((d) => ({ ...d, faculty_units: toNumOrNull(e.target.value) }))}
-                    className={cls(SOFT_INPUT, "w-24 text-center")}
-                  />
+                  <span className="font-medium">{draft.faculty_units ?? "—"}</span>
                 </td>
 
                 <td className="px-4 py-3 text-center">
@@ -539,7 +536,14 @@ export default function OM_ClassRetention(
                           value={currentCourseLabel}
                           onChange={async (label) => {
                             const cid = courseLabelToId[label] || "";
-                            setDraft(d => ({ ...d, course_id: cid, section_id: undefined }));
+                            const selected = courseOpts.find(o => o.course_id === cid);
+                            setDraft(d => ({
+                              ...d,
+                              course_id: cid,
+                              section_id: undefined,
+                              student_units: selected?.units ?? null,
+                              faculty_units: selected?.faculty_units ?? null,
+                            }));
                             await refreshSections(cid);
                           }}
                           options={courseLabels}
@@ -573,12 +577,7 @@ export default function OM_ClassRetention(
 
                     <td className="px-4 py-3 text-center">
                       {editing ? (
-                        <input
-                          type="number"
-                          value={draft.student_units ?? r.student_units ?? 0}
-                          onChange={(e) => setDraft((d) => ({ ...d, student_units: toNumOrNull(e.target.value) }))}
-                          className={cls(SOFT_INPUT, "w-24 text-center")}
-                        />
+                        <span className="font-medium">{draft.student_units ?? r.student_units ?? "—"}</span>
                       ) : (
                         r.student_units ?? "—"
                       )}
@@ -586,12 +585,7 @@ export default function OM_ClassRetention(
 
                     <td className="px-4 py-3 text-center">
                       {editing ? (
-                        <input
-                          type="number"
-                          value={draft.faculty_units ?? r.faculty_units ?? 0}
-                          onChange={(e) => setDraft((d) => ({ ...d, faculty_units: toNumOrNull(e.target.value) }))}
-                          className={cls(SOFT_INPUT, "w-24 text-center")}
-                        />
+                        <span className="font-medium">{draft.faculty_units ?? r.faculty_units ?? "—"}</span>
                       ) : (
                         r.faculty_units ?? "—"
                       )}

@@ -18,6 +18,7 @@ COL_TERMS = "terms"
 COL_CURRICULUM = "curriculum"
 COL_ADMIN = "student_petitions_admin"      # optional, used by OM to pin status/remarks
 COL_PREEN_COUNT = "preenlistment_count" 
+COL_PETITION_WINDOWS = "student_petition_windows"
 # ---------------- helpers ----------------
 
 def _now_dt() -> datetime:
@@ -86,6 +87,45 @@ async def _active_term() -> Dict[str, Any]:
 
     # If no next term, stick with current (still better than returning nothing)
     return current
+
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _petition_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_PETITION_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
 
 async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
     """
@@ -296,8 +336,11 @@ async def petition_handler(
                 "programs": [],
                 "reasons": cfg.get("reasons", []),
                 "statuses": cfg.get("statuses", []),
+                "submission_window": {"openISO": "", "deadlineISO": "", "term_id": None},
                 "message": "No active term found. Please configure a current term."
             }
+
+        submission_window = await _petition_window_for_term(active)
 
         # courses offered this term (via curriculum.term_id + curriculum.course_list -> courses.course_id)
         pipeline = [
@@ -355,6 +398,7 @@ async def petition_handler(
             "programs": programs,      # {program_id, program_code}
             "reasons": cfg.get("reasons", []),
             "statuses": cfg.get("statuses", []),
+            "submission_window": submission_window,
         }
 
     # ---------- SUBMIT ----------
@@ -402,6 +446,21 @@ async def petition_handler(
         term_id = active_term.get("term_id", "")
         if not term_id:
             raise HTTPException(status_code=503, detail="No active term configured.")
+
+        submission_window = await _petition_window_for_term(active_term)
+        open_dt = _parse_date_any(submission_window.get("openISO"))
+        deadline_dt = _parse_date_any(submission_window.get("deadlineISO"))
+        now = _now_dt()
+        if not open_dt or not deadline_dt:
+            raise HTTPException(status_code=403, detail="Petition submission window has not been started.")
+        if open_dt.tzinfo is None:
+            open_dt = open_dt.replace(tzinfo=timezone.utc)
+        if deadline_dt.tzinfo is None:
+            deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+        if now < open_dt:
+            raise HTTPException(status_code=403, detail="Petition submission window has not started yet.")
+        if now > deadline_dt:
+            raise HTTPException(status_code=403, detail="Petition submission deadline has passed.")
 
         # Validate via curriculum that course is offered this term
         cur_hit = await db[COL_CURRICULUM].find_one({

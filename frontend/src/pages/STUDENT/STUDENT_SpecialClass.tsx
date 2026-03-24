@@ -1,10 +1,10 @@
 // frontend/src/pages/STUDENT/STUDENT_SpecialClass.tsx
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Calendar, AlertCircle, Send } from "lucide-react";
+import { Calendar, AlertCircle, Send, Upload, FileText, X, Eye, Download } from "lucide-react";
 
 import Tabs from "../../component/Tabs";
 import SelectBox from "../../component/SelectBox";
-
+import { cls } from "../../utilities/cls";
 
 import TopBar from "../../component/TopBar";
 import {
@@ -46,9 +46,21 @@ type FormData = {
   reasonOther: string;
   department: string;
 
+  // EAF
+  eafFile: File | null;
+
   // Terms
   agree: boolean;
 };
+
+const MAX_EAF_BYTES = 5 * 1024 * 1024;
+const EAF_ACCEPT = ".pdf,application/pdf";
+
+function formatFileSize(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 KB";
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
 
 /* ---------------- Searchable, Typable Combo for Course Code ---------------- */
 function SearchableCourseCode({
@@ -195,6 +207,88 @@ function SearchableCourseCode({
   );
 }
 
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; deadlineISO: string; className?: string }) {
+  const hasWindow = !!openISO && !!deadlineISO;
+  if (!hasWindow) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 h-2.5 w-2.5 rounded-full bg-slate-400" />
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="mt-0.5 text-xs text-slate-600">The Office Manager has not started the submission window yet.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: openPassed, label: openLabel } = useCountdown(openISO);
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (!openPassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Submissions Open In</div>
+          <div className="mt-0.5">
+            Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" "}
+            • <span className="font-bold text-amber-700">{openLabel}</span>
+          </div>
+          <div className="mt-1 text-[12px] opacity-80">Editing is locked until the window opens.</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Editing Locked</div>
+          <div className="mt-0.5">
+            Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
+            • <span className="font-bold text-red-700">Deadline passed</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+      <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+      <div className="text-sm">
+        <div className="font-semibold">Submission Deadline Approaching</div>
+        <div className="mt-0.5">
+          Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
+          • <span className="font-bold text-amber-700">{deadlineLabel}</span>
+        </div>
+        <div className="mt-1 text-[12px] opacity-80">Please finalize your preferences before the deadline.</div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Small helpers ---------------- */
 function formatDateShort(dt?: string) {
   if (!dt) return "—";
@@ -247,6 +341,12 @@ type StudentSpecialClassView = SpecialClassView & {
 /* ---------------- Status Card (clean, non-redundant) ---------------- */
 function StatusCard({ a }: { a: StudentSpecialClassView }) {
   const statusRaw = String(a.status || "").trim();
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+  const [previewError, setPreviewError] = useState("");
+  const [previewUrl, setPreviewUrl] = useState("");
+  const [downloading, setDownloading] = useState(false);
+  const [actionError, setActionError] = useState("");
 
   const pill =
     statusRaw.toLowerCase().includes("approved")
@@ -279,9 +379,86 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
 
   // ✅ Remarks column shows APPLICATION remarks
   const remarksCell = String(a.remarks || "").trim() || "—";
+  const eafName = String((a as any).eaf_original_name || "").trim();
+  const eafViewUrl = String((a as any).eaf_view_url || "").trim();
+  const hasEaf = Boolean((a as any).has_eaf) && !!eafName && !!eafViewUrl;
+
+  useEffect(() => {
+    return () => {
+      if (previewUrl) URL.revokeObjectURL(previewUrl);
+    };
+  }, [previewUrl]);
+
+  const loadEafBlob = async () => {
+    if (!eafViewUrl) throw new Error("EAF not found.");
+    const res = await fetch(eafViewUrl, { credentials: "include", cache: "no-store" });
+    if (!res.ok) {
+      let message = "EAF not found.";
+      try {
+        const data = await res.json();
+        if (data?.detail) message = String(data.detail);
+      } catch {
+        // ignore parse failures and use default message
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    if (!blob || blob.size === 0) throw new Error("EAF file is unavailable.");
+    return blob;
+  };
+
+  const handleOpenPreview = async () => {
+    if (!hasEaf) return;
+    setActionError("");
+    setPreviewOpen(true);
+    setPreviewLoading(true);
+    setPreviewError("");
+    if (previewUrl) {
+      URL.revokeObjectURL(previewUrl);
+      setPreviewUrl("");
+    }
+    try {
+      const blob = await loadEafBlob();
+      setPreviewUrl(URL.createObjectURL(blob));
+    } catch (err: any) {
+      setPreviewError(err?.message || "Unable to preview the uploaded EAF.");
+    } finally {
+      setPreviewLoading(false);
+    }
+  };
+
+  const handleDownload = async () => {
+    if (!hasEaf) return;
+    setActionError("");
+    setDownloading(true);
+    try {
+      const blob = await loadEafBlob();
+      const objectUrl = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = objectUrl;
+      link.download = eafName || `${course || "special-class-eaf"}.pdf`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(objectUrl);
+    } catch (err: any) {
+      setActionError(err?.message || "Unable to download the uploaded EAF.");
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const closePreview = () => {
+    setPreviewOpen(false);
+    setPreviewLoading(false);
+    setPreviewError("");
+    if (previewUrl) URL.revokeObjectURL(previewUrl);
+    setPreviewUrl("");
+  };
 
   return (
-    <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden mb-5">
+    <>
+      <div className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden mb-5">
       {/* Header */}
       <div className="px-5 pt-4 pb-3">
         <div className="flex items-start justify-between gap-3">
@@ -298,6 +475,40 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
                 {ayLabel} · Term {(a as any).term_number ?? "—"}
               </span>
             </div>
+            {eafName && (
+              <div className="mt-3 min-w-0">
+                <div className="flex items-center gap-2 min-w-0 text-sm">
+                  <span className="min-w-0 inline-flex flex-1 items-center gap-2 rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-emerald-800">
+                    <FileText className="h-4 w-4 shrink-0" />
+                    <span className="truncate">{eafName}</span>
+                  </span>
+                  {hasEaf && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={handleOpenPreview}
+                        className="inline-flex shrink-0 items-center gap-2 rounded-full border border-gray-300 bg-white px-3 py-1 text-gray-700 hover:bg-gray-50"
+                        title="View EAF"
+                      >
+                        <Eye className="h-4 w-4" />
+                        <span>View</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleDownload}
+                        disabled={downloading}
+                        title={downloading ? "Downloading EAF" : "Download EAF"}
+                        aria-label={downloading ? "Downloading EAF" : "Download EAF"}
+                        className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-gray-300 bg-white text-gray-700 hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Download className="h-4 w-4" />
+                      </button>
+                    </>
+                  )}
+                </div>
+                {!!actionError && <div className="mt-2 text-xs text-red-600">{actionError}</div>}
+              </div>
+            )}
           </div>
 
           <span className={`shrink-0 px-3 py-1 text-xs rounded-full font-medium ${pill}`}>
@@ -357,6 +568,48 @@ function StatusCard({ a }: { a: StudentSpecialClassView }) {
         </div>
       </div>
     </div>
+      {previewOpen && (
+        <div className="fixed inset-0 z-[100] flex items-center justify-center bg-black/50 p-4" onClick={closePreview}>
+          <div
+            className="max-h-[90vh] w-full max-w-5xl overflow-hidden rounded-2xl bg-white shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-4">
+              <div className="min-w-0">
+                <div className="text-base font-semibold text-gray-900">EAF Preview</div>
+                <div className="truncate text-sm text-gray-500">{eafName || "Uploaded EAF"}</div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={closePreview}
+                  className="inline-flex items-center gap-2 rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-700 hover:bg-gray-50"
+                >
+                  <X className="h-4 w-4" />
+                  <span>Close</span>
+                </button>
+              </div>
+            </div>
+
+            <div className="h-[75vh] bg-gray-50">
+              {previewLoading ? (
+                <div className="flex h-full items-center justify-center text-sm text-gray-600">Loading EAF preview...</div>
+              ) : previewError ? (
+                <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
+                  <AlertCircle className="h-10 w-10 text-amber-500" />
+                  <div className="text-base font-semibold text-gray-900">Unable to preview EAF</div>
+                  <div className="max-w-md text-sm text-gray-600">{previewError}</div>
+                </div>
+              ) : previewUrl ? (
+                <iframe title={`EAF Preview ${eafName || ""}`} src={previewUrl} className="h-full w-full bg-white" />
+              ) : (
+                <div className="flex h-full items-center justify-center text-sm text-gray-600">No EAF preview available.</div>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 
@@ -395,12 +648,19 @@ export default function STUDENT_SpecialClass() {
     reason: "",
     reasonOther: "",
     department: "",
+    eafFile: null,
     agree: false,
   });
 
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
+  const eafInputRef = useRef<HTMLInputElement | null>(null);
   const [error, setError] = useState<string>("");
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+
+  const { past: openPassedPage } = useCountdown(submissionWindow.openISO || "");
+  const { past: deadlinePassedPage } = useCountdown(submissionWindow.deadlineISO || "");
+  const editingLocked = !submissionWindow.openISO || !submissionWindow.deadlineISO || !openPassedPage || deadlinePassedPage;
 
   // Load options + list + profile (same pattern as Petition)
   useEffect(() => {
@@ -415,6 +675,10 @@ export default function STUDENT_SpecialClass() {
         ]);
 
         setOptions(opt);
+        setSubmissionWindow({
+          openISO: opt?.submission_window?.openISO || "",
+          deadlineISO: opt?.submission_window?.deadlineISO || "",
+        });
         setApplications(((apps?.applications || []) as StudentSpecialClassView[]) ?? []);
 
         if (prof && prof.ok) {
@@ -473,7 +737,8 @@ export default function STUDENT_SpecialClass() {
     Boolean(form.department) &&
     (form.reason !== "Other" || Boolean(form.reasonOther.trim()));
 
-  const section4Ok = section3Ok && form.agree === true;
+  const section4Ok = section3Ok && !!form.eafFile;
+  const section5Ok = section4Ok && form.agree === true;
 
   const handleCoursePick = async (code: string) => {
     const cleaned = String(code || "").trim().toUpperCase();
@@ -542,19 +807,59 @@ export default function STUDENT_SpecialClass() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [form.courseCode, courseMap]);
 
+  const handleEafSelected = (file?: File | null) => {
+    const picked = file || null;
+    if (!picked) {
+      setForm((prev) => ({ ...prev, eafFile: null }));
+      return;
+    }
+
+    const fileName = String(picked.name || "").trim();
+    const ext = fileName.toLowerCase().endsWith(".pdf");
+    const mime = String(picked.type || "").toLowerCase();
+    const mimeOk = !mime || mime === "application/pdf" || mime === "application/octet-stream";
+    if (!ext || !mimeOk) {
+      setError("Please upload your EAF as a PDF file.");
+      if (eafInputRef.current) eafInputRef.current.value = "";
+      setForm((prev) => ({ ...prev, eafFile: null }));
+      return;
+    }
+    if (picked.size > MAX_EAF_BYTES) {
+      setError("EAF file must be 5 MB or smaller.");
+      if (eafInputRef.current) eafInputRef.current.value = "";
+      setForm((prev) => ({ ...prev, eafFile: null }));
+      return;
+    }
+    setError("");
+    setForm((prev) => ({ ...prev, eafFile: picked }));
+  };
+
+  const removeEafFile = () => {
+    if (eafInputRef.current) eafInputRef.current.value = "";
+    setForm((prev) => ({ ...prev, eafFile: null }));
+  };
+
   const handleSubmit = async () => {
     if (!userId) {
       setError("User not logged in.");
       return;
     }
-    if (!section4Ok) {
-      setError("Please complete all sections and agree to the Terms and Conditions.");
+    if (editingLocked) {
+      setError("Special class submissions are currently locked.");
+      return;
+    }
+    if (!section5Ok) {
+      setError("Please complete all sections, attach your EAF, and agree to the Terms and Conditions.");
       return;
     }
 
     try {
       setSubmitting(true);
       setError("");
+
+      if (!form.eafFile) {
+        throw new Error("Please attach your EAF file before submitting.");
+      }
 
       const payload: SpecialClassSubmitPayload = {
         studentNumber: form.studentNumber,
@@ -567,6 +872,7 @@ export default function STUDENT_SpecialClass() {
         reasonOther: form.reason === "Other" ? form.reasonOther.trim() : "",
         department: form.department,
         agree: true,
+        eafFile: form.eafFile,
       };
 
       const res = await submitStudentSpecialClass(userId, payload);
@@ -585,8 +891,10 @@ export default function STUDENT_SpecialClass() {
           reason: "",
           reasonOther: "",
           department: "",
+          eafFile: null,
           agree: false,
         }));
+        if (eafInputRef.current) eafInputRef.current.value = "";
       } else {
         throw new Error("Submission failed.");
       }
@@ -631,6 +939,8 @@ export default function STUDENT_SpecialClass() {
                 </li>
               </ul>
             </div>
+
+            <DeadlineBanner openISO={submissionWindow.openISO} deadlineISO={submissionWindow.deadlineISO} />
 
             {error && (
               <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg">
@@ -679,8 +989,9 @@ export default function STUDENT_SpecialClass() {
                         const onlyDigits = e.target.value.replace(/\D/g, "").slice(0, 8);
                         setForm((prev) => ({ ...prev, studentNumber: onlyDigits }));
                       }}
+                      disabled={editingLocked || submitting}
                       placeholder="Enter 8-digit ID number"
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                     />
                   </div>
 
@@ -693,6 +1004,7 @@ export default function STUDENT_SpecialClass() {
                       onChange={(v) => setForm((prev) => ({ ...prev, degree: v }))}
                       options={options.programs.map((p) => p.program_code)}
                       placeholder="-- Select Degree Program --"
+                      disabled={editingLocked || submitting}
                     />
                   </div>
                 </div>
@@ -716,7 +1028,7 @@ export default function STUDENT_SpecialClass() {
                           const digits = e.target.value.replace(/\D/g, "");
                           setForm((prev) => ({ ...prev, unitsRemaining: digits }));
                         }}
-                        disabled={!section1Ok}
+                        disabled={editingLocked || submitting || !section1Ok}
                         placeholder="Number only"
                         className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                       />
@@ -731,7 +1043,7 @@ export default function STUDENT_SpecialClass() {
                         onChange={(v) => setForm((prev) => ({ ...prev, graduatingAfterTerm: v as any }))}
                         options={["Yes", "No"]}
                         placeholder="-- Select --"
-                        disabled={!section1Ok}
+                        disabled={editingLocked || submitting || !section1Ok}
                       />
                     </div>
                   </div>
@@ -756,7 +1068,7 @@ export default function STUDENT_SpecialClass() {
                         onChange={(v) => handleCoursePick(v)}
                         options={courseCodeOptions}
                         placeholder="-- Select / Type Course Code --"
-                        disabled={!section2Ok}
+                        disabled={editingLocked || submitting || !section2Ok}
                       />
                     </div>
 
@@ -767,7 +1079,7 @@ export default function STUDENT_SpecialClass() {
                       <input
                         value={form.courseTitle}
                         readOnly
-                        disabled={!section2Ok}
+                        disabled={editingLocked || submitting || !section2Ok}
                         className="w-full bg-gray-100 rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                       />
                     </div>
@@ -781,8 +1093,7 @@ export default function STUDENT_SpecialClass() {
                       <input
                         value={form.units}
                         readOnly
-                        disabled={!section2Ok}
-                        placeholder="Auto-filled"
+                        disabled={editingLocked || submitting || !section2Ok}
                         className="w-full bg-gray-100 rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                       />
                     </div>
@@ -796,7 +1107,7 @@ export default function STUDENT_SpecialClass() {
                         onChange={(v) => setForm((prev) => ({ ...prev, department: v }))}
                         options={options.departments}
                         placeholder="-- Select Department --"
-                        disabled={!section2Ok}
+                        disabled={editingLocked || submitting || !section2Ok}
                       />
                     </div>
                   </div>
@@ -816,7 +1127,7 @@ export default function STUDENT_SpecialClass() {
                       }
                       options={options.reasons}
                       placeholder="-- Select Reason --"
-                      disabled={!section2Ok}
+                      disabled={editingLocked || submitting || !section2Ok}
                     />
                   </div>
 
@@ -828,7 +1139,7 @@ export default function STUDENT_SpecialClass() {
                       <input
                         value={form.reasonOther}
                         onChange={(e) => setForm((prev) => ({ ...prev, reasonOther: e.target.value }))}
-                        disabled={!section2Ok}
+                        disabled={editingLocked || submitting || !section2Ok}
                         placeholder="Type your reason…"
                         className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                       />
@@ -836,8 +1147,98 @@ export default function STUDENT_SpecialClass() {
                   )}
                 </div>
 
-                {/* ---------- Terms and Condition ---------- */}
+                {/* ---------- EAF ---------- */}
                 {section3Ok && (
+                  <div className="rounded-xl border border-gray-200 p-4">
+                    <h3 className="font-semibold text-emerald-700 mb-3">EAF</h3>
+                    <p className="text-sm text-gray-600 mb-4">
+                      Attach your latest EAF as a PDF file before proceeding to the Terms and Conditions.
+                    </p>
+
+                    <div className={cls(
+                      "rounded-xl border border-dashed p-4",
+                      editingLocked || submitting ? "bg-gray-50 border-gray-200" : "bg-emerald-50/50 border-emerald-200"
+                    )}>
+                      {!form.eafFile ? (
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-start gap-3">
+                            <div className="mt-0.5 rounded-full bg-white p-2 border border-emerald-200">
+                              <Upload className="h-4 w-4 text-emerald-700" />
+                            </div>
+                            <div>
+                              <div className="text-sm font-semibold text-gray-900">Upload EAF</div>
+                              <div className="text-sm text-gray-600">Accepted format: PDF only. Maximum file size: 5 MB.</div>
+                            </div>
+                          </div>
+
+                          <div>
+                            <input
+                              ref={eafInputRef}
+                              type="file"
+                              accept={EAF_ACCEPT}
+                              className="hidden"
+                              disabled={editingLocked || submitting}
+                              onChange={(e) => handleEafSelected(e.target.files?.[0] || null)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => eafInputRef.current?.click()}
+                              disabled={editingLocked || submitting}
+                              className="inline-flex items-center gap-2 rounded-lg border border-emerald-600 bg-white px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                            >
+                              <Upload className="h-4 w-4" />
+                              Choose File
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+                          <div className="flex items-start gap-3 min-w-0">
+                            <div className="mt-0.5 rounded-full bg-white p-2 border border-emerald-200">
+                              <FileText className="h-4 w-4 text-emerald-700" />
+                            </div>
+                            <div className="min-w-0">
+                              <div className="text-sm font-semibold text-gray-900 truncate">{form.eafFile.name}</div>
+                              <div className="text-sm text-gray-600">{formatFileSize(form.eafFile.size)} • PDF file attached</div>
+                            </div>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <input
+                              ref={eafInputRef}
+                              type="file"
+                              accept={EAF_ACCEPT}
+                              className="hidden"
+                              disabled={editingLocked || submitting}
+                              onChange={(e) => handleEafSelected(e.target.files?.[0] || null)}
+                            />
+                            <button
+                              type="button"
+                              onClick={() => eafInputRef.current?.click()}
+                              disabled={editingLocked || submitting}
+                              className="inline-flex items-center gap-2 rounded-lg border border-emerald-600 bg-white px-4 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:opacity-60"
+                            >
+                              <Upload className="h-4 w-4" />
+                              Replace File
+                            </button>
+                            <button
+                              type="button"
+                              onClick={removeEafFile}
+                              disabled={editingLocked || submitting}
+                              className="inline-flex items-center gap-2 rounded-lg border border-red-200 bg-white px-4 py-2 text-sm font-medium text-red-600 hover:bg-red-50 disabled:opacity-60"
+                            >
+                              <X className="h-4 w-4" />
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {/* ---------- Terms and Condition ---------- */}
+                {section4Ok && (
                   <div className="rounded-xl border border-gray-200 p-4">
                     <h3 className="font-semibold text-emerald-700 mb-3">Terms and Condition</h3>
 
@@ -864,6 +1265,7 @@ export default function STUDENT_SpecialClass() {
                         type="checkbox"
                         checked={form.agree}
                         onChange={(e) => setForm((prev) => ({ ...prev, agree: e.target.checked }))}
+                        disabled={editingLocked || submitting || !section4Ok}
                         className="h-4 w-4"
                       />
                       <span>I understand and Agree</span>
@@ -873,7 +1275,7 @@ export default function STUDENT_SpecialClass() {
 
                 <button
                   onClick={handleSubmit}
-                  disabled={!section4Ok || submitting}
+                  disabled={editingLocked || !section5Ok || submitting}
                   className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-[#21804A] px-6 py-2 text-white font-medium hover:bg-[#18693B] disabled:opacity-60"
                 >
                   <Send className="h-4 w-4" />

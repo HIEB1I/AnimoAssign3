@@ -1,17 +1,94 @@
 import { useEffect, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import { Check, Search as SearchIcon, Edit } from "lucide-react";
+import { AlertTriangle, CalendarClock, Check, Edit, Info, Search as SearchIcon } from "lucide-react";
 import {
-  getOMSPOptions,
-  listOMSP,
-  updateOMSPCourse,
-  type OMPetitionRow,
-  type OMPetitionOptions,
+  getChairSPOptions,
+  listChairSP,
+  updateChairSPCourse,
+  type ChairPetitionRow,
+  type ChairPetitionOptions,
 } from "../../api";
 import { getSessionUserId } from "../../lib/session";
 
-// simple textbox
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({
+  deadlineISO,
+  className,
+}: {
+  deadlineISO: string;
+  className?: string;
+}) {
+  if (!deadlineISO) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+            <Info className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="text-xs text-slate-600">
+              The Operations Manager has not set a submission deadline for this term yet.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Editing Locked</div>
+            <div className="text-xs text-red-800">Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+          <CalendarClock className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="font-semibold">Submission Deadline Approaching</div>
+          <div className="text-xs text-amber-900">
+            Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"} · {deadlineISO ? deadlineLabel : "TBA"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
 function TextBox({
   value,
   onChange,
@@ -58,11 +135,11 @@ function TextBox({
     </div>
   );
 }
-// Map each status to a Tailwind pill (bg + text + optional border)
+
 const STATUS_PILL: Record<string, string> = {
   "Less Than Minimum": "bg-amber-100 text-amber-800",
   "Forwarded To Department": "bg-amber-50 text-amber-800",
-  "Rejected": "bg-red-100 text-red-800",
+  Rejected: "bg-red-100 text-red-800",
   "Wait For Frosh Block": "bg-purple-100 text-purple-800",
   "Wait For College Enlistment": "bg-yellow-100 text-yellow-800",
   "Open Slots Available": "bg-green-100 text-green-800",
@@ -77,54 +154,58 @@ function pillClass(status?: string) {
 }
 
 export default function CHAIR_StudentPetition() {
-  // filters
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [search, setSearch] = useState("");
 
-  // options
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({
+    openISO: "",
+    deadlineISO: "",
+  });
 
-  // table
-  const [rows, setRows] = useState<OMPetitionRow[]>([]);
+  const [rows, setRows] = useState<ChairPetitionRow[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
-  // edit state
   const [editCourseId, setEditCourseId] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ status?: string; remarks?: string }>({});
 
-  // load options (statuses + active term)
+
   useEffect(() => {
     (async () => {
       try {
-        const opt: OMPetitionOptions = await getOMSPOptions();
+        const opt: ChairPetitionOptions = await getChairSPOptions();
         if (!opt.ok) throw new Error("Failed to load options");
         setStatuses(["All Status", ...(opt.statuses || [])]);
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+        const win = opt.submission_window || {};
+        const nextWindow = {
+          openISO: win.openISO || "",
+          deadlineISO: win.deadlineISO || "",
+        };
+        setSubmissionWindow(nextWindow);
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
   }, []);
 
-  // debounce search
   useEffect(() => {
     const t = setTimeout(() => setSearch(searchInput.trim()), 250);
     return () => clearTimeout(t);
   }, [searchInput]);
 
-  // fetch rows when filters change
   useEffect(() => {
     (async () => {
       try {
         setLoading(true);
         setErr("");
-        const { ok, rows } = await listOMSP({ status, search });
+        const { ok, rows } = await listChairSP({ status, search, userId: getSessionUserId() || undefined });
         if (!ok) throw new Error("Failed to load petitions.");
         setRows(rows);
         setSelected((sel) => sel.filter((cid) => rows.some((r) => r.course_id === cid)));
@@ -139,7 +220,7 @@ export default function CHAIR_StudentPetition() {
 
   const toggleAll = (checked: boolean) => setSelected(checked ? rows.map((r) => r.course_id) : []);
 
-  const beginEdit = (row: OMPetitionRow) => {
+  const beginEdit = (row: ChairPetitionRow) => {
     setEditCourseId(row.course_id);
     setDraft({ status: row.status, remarks: row.remarks || "" });
   };
@@ -149,8 +230,8 @@ export default function CHAIR_StudentPetition() {
     try {
       setLoading(true);
       setErr("");
-      await updateOMSPCourse(editCourseId, draft, getSessionUserId());
-      const { rows } = await listOMSP({ status, search });
+      await updateChairSPCourse(editCourseId, draft);
+      const { rows } = await listChairSP({ status, search, userId: getSessionUserId() || undefined });
       setRows(rows);
       setEditCourseId(null);
       setDraft({});
@@ -161,24 +242,22 @@ export default function CHAIR_StudentPetition() {
     }
   };
 
+
   return (
     <main className="w-full px-8 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Student Petition</h1>
-        <p className="text-sm text-gray-600">
-          Manage course section requests {activeTermLabel && `for ${activeTermLabel}`}
-        </p>
+      <header className="mb-4">
+        <div>
+          <h1 className="text-2xl font-bold">Student Petition</h1>
+          <p className="text-sm text-gray-600">Manage course section requests {activeTermLabel && `for ${activeTermLabel}`}</p>
+        </div>
       </header>
 
-      {err && (
-        <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
-          {err}
-        </div>
-      )}
+      <DeadlineBanner deadlineISO={submissionWindow.deadlineISO} className="mb-6" />
 
-      {/* Filters */}
-      <div className="flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm mb-6">
-        <div className="relative flex-1 min-w-[240px]">
+      {err && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{err}</div>}
+
+      <div className="mb-6 flex flex-wrap items-center gap-3 rounded-xl border border-gray-200 bg-white p-4 shadow-sm">
+        <div className="relative min-w-[240px] flex-1">
           <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-neutral-500" />
           <input
             value={searchInput}
@@ -187,14 +266,12 @@ export default function CHAIR_StudentPetition() {
             className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
         </div>
-
         <SelectBox value={status} onChange={setStatus} options={statuses} />
       </div>
 
-      {/* Table */}
-        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
-          <table className="w-full text-sm table-auto">
-            <thead className="bg-gray-50 border-b text-gray-900">
+      <div className="overflow-auto rounded-xl border border-gray-200 bg-white shadow-sm">
+        <table className="w-full table-auto text-sm">
+          <thead className="border-b bg-gray-50 text-gray-900">
             <tr>
               <th className="w-10 px-3 py-2 text-center">
                 <input
@@ -204,10 +281,10 @@ export default function CHAIR_StudentPetition() {
                   className="h-4 w-4 accent-emerald-600"
                 />
               </th>
-              <th className="text-left px-4 py-2">Course Code & Title</th>
-              <th className="text-center px-4 py-2">Petition Count</th>
-              <th className="text-center px-4 py-2">Status</th>
-              <th className="text-left px-4 py-2 w-[40%]">Remarks</th>
+              <th className="px-4 py-2 text-left">Course Code & Title</th>
+              <th className="px-4 py-2 text-center">Petition Count</th>
+              <th className="px-4 py-2 text-center">Status</th>
+              <th className="w-[40%] px-4 py-2 text-left">Remarks</th>
               <th className="w-10 px-4 py-2" />
             </tr>
           </thead>
@@ -228,29 +305,24 @@ export default function CHAIR_StudentPetition() {
               rows.map((r) => {
                 const editing = editCourseId === r.course_id;
                 return (
-                  <tr key={r.course_id} className="hover:bg-gray-50 align-top">
+                  <tr key={r.course_id} className="align-top hover:bg-gray-50">
                     <td className="px-3 py-3 text-center">
                       <input
                         type="checkbox"
                         checked={selected.includes(r.course_id)}
                         onChange={() =>
                           setSelected((prev) =>
-                            prev.includes(r.course_id)
-                              ? prev.filter((id) => id !== r.course_id)
-                              : [...prev, r.course_id]
+                            prev.includes(r.course_id) ? prev.filter((id) => id !== r.course_id) : [...prev, r.course_id]
                           )
                         }
                         className="h-4 w-4 accent-emerald-600"
                       />
                     </td>
-
                     <td className="px-4 py-3 text-left font-semibold text-emerald-700">
                       {r.course_code}
                       <div className="text-xs text-gray-500">{r.course_title}</div>
                     </td>
-
                     <td className="px-4 py-3 text-center">{r.count}</td>
-
                     <td className="px-4 py-3 text-center">
                       {editing ? (
                         <SelectBox
@@ -264,7 +336,6 @@ export default function CHAIR_StudentPetition() {
                         </span>
                       )}
                     </td>
-
                     <td className="px-4 py-3 text-left">
                       {editing ? (
                         <TextBox
@@ -275,12 +346,9 @@ export default function CHAIR_StudentPetition() {
                           className="w-full"
                         />
                       ) : (
-                        <span className="text-gray-700 block whitespace-pre-wrap">
-                          {r.remarks || <span className="text-gray-400">—</span>}
-                        </span>
+                        <span className="block whitespace-pre-wrap text-gray-700">{r.remarks || <span className="text-gray-400">—</span>}</span>
                       )}
                     </td>
-
                     <td className="px-4 py-3 text-center">
                       {editing ? (
                         <button
@@ -291,11 +359,7 @@ export default function CHAIR_StudentPetition() {
                           <Check className="h-4 w-4" />
                         </button>
                       ) : (
-                        <button
-                          onClick={() => beginEdit(r)}
-                          className="text-emerald-700 hover:brightness-110"
-                          title="Edit"
-                        >
+                        <button onClick={() => beginEdit(r)} className="text-emerald-700 hover:brightness-110" title="Edit">
                           <Edit className="h-4 w-4" />
                         </button>
                       )}

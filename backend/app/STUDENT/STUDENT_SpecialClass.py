@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+import binascii
+from pathlib import Path
+from uuid import uuid4
 import re
 from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi.responses import Response
 from pymongo import ReturnDocument
 
 from ..main import db
@@ -20,6 +25,12 @@ COL_COURSES = "courses"
 COL_PROGRAMS = "programs"
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
+COL_SPECIAL_WINDOWS = "specialclass_windows"
+
+SPECIAL_EAF_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads" / "specialclass_eaf"
+SPECIAL_EAF_MAX_BYTES = 5 * 1024 * 1024
+SPECIAL_EAF_ALLOWED_EXTS = {".pdf"}
+SPECIAL_EAF_ALLOWED_CONTENT_TYPES = {"", "application/pdf", "application/octet-stream"}
 
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
@@ -95,6 +106,119 @@ async def _active_term() -> Dict[str, Any]:
         return next_terms[0]
 
     return current
+
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _special_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_SPECIAL_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
+
+
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_filename(name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "").strip())
+    return base.strip("._") or "eaf.pdf"
+
+
+def _write_eaf_bytes(filename: str, content_type: str, data: bytes) -> Dict[str, Any]:
+    filename = _safe_filename(filename or "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Please attach your EAF file.")
+
+    ext = Path(filename).suffix.lower()
+    if ext not in SPECIAL_EAF_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="EAF must be uploaded as a PDF file.")
+
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type not in SPECIAL_EAF_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid EAF file type. Please upload a PDF file.")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded EAF file is empty.")
+    if len(data) > SPECIAL_EAF_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="EAF file must be 5 MB or smaller.")
+
+    SPECIAL_EAF_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid4().hex}.pdf"
+    full_path = SPECIAL_EAF_UPLOAD_DIR / stored_name
+    full_path.write_bytes(data)
+
+    return {
+        "eaf_original_name": filename,
+        "eaf_content_type": content_type or "application/pdf",
+        "eaf_size": len(data),
+        "eaf_storage_path": str(full_path),
+        "eaf_uploaded_at": _now_dt(),
+        "eaf_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def _save_eaf_base64(file_name: str, content_type: str, b64data: str) -> Dict[str, Any]:
+    if not b64data:
+        raise HTTPException(status_code=400, detail="Please attach your EAF file.")
+    raw = str(b64data)
+    if "," in raw and raw.strip().lower().startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Uploaded EAF file is invalid or corrupted.")
+    return _write_eaf_bytes(file_name, content_type, data)
+
+
+def _eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        p = Path(raw_path)
+        if p.exists() and p.is_file():
+            return True
+    if str(doc.get("eaf_base64") or "").strip():
+        return True
+    return False
+
+
+def _build_eaf_view_url(user_id: str, special_id: str) -> str:
+    return f"/api/student/specialclass/eaf?userId={user_id}&specialId={special_id}"
+
 
 async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if not code:
@@ -468,6 +592,44 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
 
 # ---------------- route ----------------
 
+@router.get("/specialclass/eaf")
+async def special_class_view_eaf(
+    userId: str = Query(..., min_length=3),
+    specialId: str = Query(..., min_length=3),
+):
+    doc = await db[COL_SPECIAL].find_one(
+        {"user_id": userId, "special_id": specialId},
+        {"_id": 0, "eaf_storage_path": 1, "eaf_original_name": 1, "eaf_content_type": 1, "eaf_base64": 1},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="EAF not found.")
+
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        file_path = Path(raw_path)
+        if file_path.exists() and file_path.is_file():
+            data = file_path.read_bytes()
+            return Response(
+                content=data,
+                media_type=str(doc.get("eaf_content_type") or "application/pdf"),
+                headers={"Content-Disposition": f'inline; filename="{str(doc.get("eaf_original_name") or file_path.name)}"'},
+            )
+
+    b64 = str(doc.get("eaf_base64") or "").strip()
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        return Response(
+            content=data,
+            media_type=str(doc.get("eaf_content_type") or "application/pdf"),
+            headers={"Content-Disposition": f'inline; filename="{str(doc.get("eaf_original_name") or "eaf.pdf")}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+
+
 @router.post("/specialclass")
 async def special_class_handler(
     userId: str = Query(..., min_length=3),
@@ -518,6 +680,12 @@ async def special_class_handler(
                 "status": 1,
                 "remarks": 1,
                 "submitted_at": 1,
+                "eaf_original_name": 1,
+                "eaf_content_type": 1,
+                "eaf_size": 1,
+                "eaf_uploaded_at": 1,
+                "eaf_storage_path": 1,
+                "eaf_base64": 1,
 
                 # assignment ids/fields (if OM already updated record)
                 "section_id": 1,
@@ -609,6 +777,12 @@ async def special_class_handler(
                 "special_id": r.get("special_id", ""),
                 "user_id": r.get("user_id", ""),
                 "course_id": r.get("course_id"),
+                "has_eaf": _eaf_available(r),
+                "eaf_original_name": r.get("eaf_original_name", ""),
+                "eaf_content_type": r.get("eaf_content_type", ""),
+                "eaf_size": r.get("eaf_size", 0),
+                "eaf_uploaded_at": r.get("eaf_uploaded_at"),
+                "eaf_view_url": _build_eaf_view_url(r.get("user_id", ""), r.get("special_id", "")),
 
                 "course_code": r.get("courses", {}).get("course_code", ""),
                 "course_title": r.get("courses", {}).get("course_title", ""),
@@ -725,6 +899,9 @@ async def special_class_handler(
         ]
         courses = [c async for c in db[COL_COURSES].aggregate(pipeline)]
 
+        active_term = await _active_term()
+        submission_window = await _special_window_for_term(active_term)
+
         return {
             "ok": True,
             "departments": dept_names,
@@ -732,6 +909,7 @@ async def special_class_handler(
             "programs": programs_out,
             "reasons": cfg.get("reasons", []),
             "statuses": cfg.get("statuses", []),
+            "submission_window": submission_window,
         }
 
     # ---------- COURSE INFO (units/title/department from DB) ----------
@@ -790,8 +968,14 @@ async def special_class_handler(
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
-        if payload.get("agree") is not True:
+        if _as_bool(payload.get("agree")) is not True:
             raise HTTPException(status_code=400, detail="You must agree to the Terms and Conditions.")
+
+        eaf_meta = _save_eaf_base64(
+            str(payload.get("eafFileName") or ""),
+            str(payload.get("eafContentType") or "application/pdf"),
+            str(payload.get("eafBase64") or ""),
+        )
 
         degree = str(payload["degree"]).strip()
         prog = await _get_program_by_code(degree)
@@ -805,7 +989,7 @@ async def special_class_handler(
         if units_remaining < 0:
             raise HTTPException(status_code=400, detail="Units Remaining cannot be negative.")
 
-        graduating_after_term = bool(payload["graduatingAfterTerm"])
+        graduating_after_term = _as_bool(payload["graduatingAfterTerm"])
 
         cfg = await _get_special_config()
         reasons = set(cfg.get("reasons", []))
@@ -845,6 +1029,21 @@ async def special_class_handler(
         if not term_id:
             raise HTTPException(status_code=503, detail="No active term configured.")
 
+        submission_window = await _special_window_for_term(active_term)
+        open_dt = _parse_date_any(submission_window.get("openISO"))
+        deadline_dt = _parse_date_any(submission_window.get("deadlineISO"))
+        now = _now_dt()
+        if not open_dt or not deadline_dt:
+            raise HTTPException(status_code=403, detail="Special class submission window has not been started.")
+        if open_dt.tzinfo is None:
+            open_dt = open_dt.replace(tzinfo=timezone.utc)
+        if deadline_dt.tzinfo is None:
+            deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+        if now < open_dt:
+            raise HTTPException(status_code=403, detail="Special class submission window has not started yet.")
+        if now > deadline_dt:
+            raise HTTPException(status_code=403, detail="Special class submission deadline has passed.")
+
         dup = await db[COL_SPECIAL].find_one({
             "user_id": userId,
             "course_id": course["course_id"],
@@ -875,6 +1074,8 @@ async def special_class_handler(
             "course_units": course_units,
             "reason": reason,
             "reason_other": reason_other,
+
+            **eaf_meta,
 
             "status": initial_status,
             "remarks": "",
@@ -942,6 +1143,12 @@ async def special_class_handler(
             "special_id": special_id,
             "user_id": userId,
             "course_id": course["course_id"],
+            "has_eaf": True,
+            "eaf_original_name": eaf_meta.get("eaf_original_name", ""),
+            "eaf_content_type": eaf_meta.get("eaf_content_type", ""),
+            "eaf_size": eaf_meta.get("eaf_size", 0),
+            "eaf_uploaded_at": eaf_meta.get("eaf_uploaded_at"),
+            "eaf_view_url": _build_eaf_view_url(userId, special_id),
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
             "department_name": dept_name,

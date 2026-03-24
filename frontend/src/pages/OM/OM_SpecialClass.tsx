@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import { getSessionUserId } from "../../lib/session";
@@ -13,11 +13,103 @@ import {
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
   downloadBlob,
+  startOMSCWindow,
   type OMSpecialClassRow,
   type OMSpecialClassOptions,
   type OMSCSchedulePreset,
   type OMSpecialClassDetail,
 } from "../../api";
+
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({
+  deadlineISO,
+  className,
+}: {
+  deadlineISO: string;
+  className?: string;
+}) {
+  if (!deadlineISO) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+            <Info className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="text-xs text-slate-600">
+              Set a deadline above. Until then, students will not be able to submit requests for this term.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Editing Locked</div>
+            <div className="text-xs text-red-800">Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+          <CalendarClock className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="font-semibold">Submission Deadline Approaching</div>
+          <div className="text-xs text-amber-900">
+            Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"} · {deadlineISO ? deadlineLabel : "TBA"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function toLocalInput(isoOrDate: string) {
+  const d = new Date(isoOrDate);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function nextMinuteFrom(date = new Date()) {
+  const d = new Date(date);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  return d;
+}
 
 /* ---------------- RFC Conversation Modal (Special Class) ---------------- */
 function SpecialConversationModal({
@@ -425,6 +517,10 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
+  const [activeTerm, setActiveTerm] = useState<OMSpecialClassOptions["activeTerm"] | null>(null);
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+  const [deadlineDraft, setDeadlineDraft] = useState("");
+  const [startingWindow, setStartingWindow] = useState(false);
 
   // Faculty
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
@@ -464,6 +560,12 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
   const [viewErr, setViewErr] = useState("");
   const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
 
+  const confirmResolverRef = useRef<((v: boolean) => void) | null>(null);
+  const [confirmState, setConfirmState] = useState<
+    | { title: string; message: string; accent: "emerald" | "amber"; confirmText: string; note?: string }
+    | null
+  >(null);
+
   // RFC / conversation modal (Special Class)
   const [conv, setConv] = useState<{
     open: boolean;
@@ -483,12 +585,27 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
   }, []);
 
   const toast = (message: string, kind?: "success" | "error") => {
-    // This screen uses an inline banner for feedback; keep it consistent.
     setErrKind(kind === "success" ? "success" : "error");
     setErr(message);
-    if (kind === "success") {
-      window.setTimeout(() => setErr(""), 2500);
-    }
+    if (kind === "success") window.setTimeout(() => setErr(""), 2500);
+  };
+
+  const openConfirm = (payload: {
+    title: string;
+    message: string;
+    accent: "emerald" | "amber";
+    confirmText: string;
+    note?: string;
+  }) => new Promise<boolean>((resolve) => {
+    confirmResolverRef.current = resolve;
+    setConfirmState(payload);
+  });
+
+  const closeConfirm = (result: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmState(null);
+    resolver?.(result);
   };
 
   const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
@@ -520,6 +637,54 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     return parts.length ? parts.join(" • ") : undefined;
   };
 
+  const handleStartWindow = async () => {
+    if (startingWindow) return;
+
+    const deadlineDate = new Date(deadlineDraft);
+    if (!deadlineDraft || Number.isNaN(deadlineDate.getTime())) {
+      setErr("Please provide a valid deadline date and time.");
+      return;
+    }
+
+    const minDeadlineDate = nextMinuteFrom();
+    if (deadlineDate.getTime() < minDeadlineDate.getTime()) {
+      setErr(`Deadline must be at or after ${minDeadlineDate.toLocaleString()}.`);
+      return;
+    }
+
+    const openDate = new Date();
+
+    const ok = await openConfirm({
+      title: "Set submission deadline?",
+      message: `Set the submission deadline to ${deadlineDate.toLocaleString()}? This will apply immediately.`,
+      accent: "emerald",
+      confirmText: "Set deadline",
+      note: `Students will be able to submit immediately until the selected deadline. The earliest valid deadline is ${minDeadlineDate.toLocaleString()}.`,
+    });
+    if (!ok) return;
+
+    try {
+      setStartingWindow(true);
+      setErr("");
+      const data = await startOMSCWindow({
+        termId: activeTerm?.term_id,
+        openISO: openDate.toISOString(),
+        deadlineISO: deadlineDate.toISOString(),
+      });
+      if (!data?.ok || !data.submission_window) throw new Error("Failed to set submission window.");
+
+      setSubmissionWindow({
+        openISO: data.submission_window.openISO || "",
+        deadlineISO: data.submission_window.deadlineISO || "",
+      });
+      setDeadlineDraft(toLocalInput(data.submission_window.deadlineISO || deadlineDate.toISOString()));
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || e?.message || "Failed to set submission window.");
+    } finally {
+      setStartingWindow(false);
+    }
+  };
+
   // load options
   useEffect(() => {
     (async () => {
@@ -528,9 +693,20 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
         if (!opt.ok) throw new Error("Failed to load options");
         setStatuses(["All Status", ...(opt.statuses || [])]);
 
+        setActiveTerm(opt.activeTerm || null);
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+        const win = opt.submission_window || {};
+        const nextWindow = { openISO: win.openISO || "", deadlineISO: win.deadlineISO || "" };
+        setSubmissionWindow(nextWindow);
+        if (nextWindow.deadlineISO) {
+          setDeadlineDraft(toLocalInput(nextWindow.deadlineISO));
+        } else {
+          const base = nextMinuteFrom();
+          const plus7 = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
+          setDeadlineDraft(toLocalInput(plus7.toISOString()));
+        }
 
         const names = (opt.facultyOptions || [])
           .map((f) => (f.faculty_name || "").trim())
@@ -1055,15 +1231,43 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
   };
 
   const allVisibleSelected = rows.length > 0 && rows.every((r) => !!selectedIds[r.special_id]);
+  const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
 
   return (
     <main className="w-full px-8 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Special Class</h1>
-        <p className="text-sm text-gray-600">
-          Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
-        </p>
+      <header className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Special Class</h1>
+          <p className="text-sm text-gray-600">
+            Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Deadline</span>
+              <input
+                type="datetime-local"
+                min={minDeadlineLocal}
+                className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                value={deadlineDraft}
+                onChange={(e) => setDeadlineDraft(e.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleStartWindow}
+              disabled={startingWindow}
+              className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+              title="Set or update the submission deadline"
+            >
+              {startingWindow ? "Saving…" : "Set Deadline"}
+            </button>
+          </div>
+        </div>
       </header>
+
+      <DeadlineBanner deadlineISO={submissionWindow.deadlineISO} className="mb-6" />
 
       {err && (
         <div
@@ -1719,6 +1923,38 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                 className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-100"
               >
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {confirmState && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+            <div className={cls("flex items-start gap-3 px-5 py-4 text-white", confirmState.accent === "amber" ? "bg-amber-600" : "bg-emerald-700")}>
+              <div className="mt-0.5 rounded-full bg-white/15 p-2">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-base font-semibold">{confirmState.title}</div>
+                {confirmState.note && <div className="mt-1 text-sm text-white/85">{confirmState.note}</div>}
+              </div>
+              <button type="button" onClick={() => closeConfirm(false)} className="rounded-lg p-1 text-white/90 transition hover:bg-white/10" aria-label="Close confirmation">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 text-sm whitespace-pre-line text-slate-700">{confirmState.message}</div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 px-5 py-4">
+              <button type="button" onClick={() => closeConfirm(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-gray-50">
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => closeConfirm(true)}
+                className={cls("rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm", confirmState.accent === "amber" ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-700 hover:bg-emerald-800")}
+              >
+                {confirmState.confirmText}
               </button>
             </div>
           </div>

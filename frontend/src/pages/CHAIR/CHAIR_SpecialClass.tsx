@@ -1,23 +1,101 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import { getSessionUserId } from "../../lib/session";
 import {
-  getOMSC_Options,
-  listOMSC,
-  updateOMSC,
-  getOMSC_SchedulePresets,
-  getOMSC_Detail,
-  exportOMSC_Pdf,
+  getChairSCOptions,
+  listChairSC,
+  updateChairSC,
+  getChairSC_SchedulePresets,
+  getChairSC_Detail,
+  exportChairSC_Pdf,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
   downloadBlob,
-  type OMSpecialClassRow,
-  type OMSpecialClassOptions,
-  type OMSCSchedulePreset,
-  type OMSpecialClassDetail,
+  type ChairSpecialClassRow,
+  type ChairSpecialClassOptions,
+  type ChairSCSchedulePreset,
+  type ChairSpecialClassDetail,
 } from "../../api";
+
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({
+  deadlineISO,
+  className,
+}: {
+  deadlineISO: string;
+  className?: string;
+}) {
+  if (!deadlineISO) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+            <Info className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="text-xs text-slate-600">
+              The Operations Manager has not set a submission deadline for this term yet.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Editing Locked</div>
+            <div className="text-xs text-red-800">Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+          <CalendarClock className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="font-semibold">Submission Deadline Approaching</div>
+          <div className="text-xs text-amber-900">
+            Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"} · {deadlineISO ? deadlineLabel : "TBA"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 
 /* ---------------- RFC Conversation Modal (Special Class) ---------------- */
 function SpecialConversationModal({
@@ -289,7 +367,7 @@ function prettyHHMM(hhmm?: string) {
   return `${s.slice(0, 2)}:${s.slice(2)}`;
 }
 
-function scheduleTextFromRow(r: Partial<OMSpecialClassRow>) {
+function scheduleTextFromRow(r: Partial<ChairSpecialClassRow>) {
   const parts: string[] = [];
   if (r.day1 && r.begin1 && r.end1) parts.push(`${r.day1} ${r.begin1}-${r.end1}`);
   if (r.day2 && r.begin2 && r.end2) parts.push(`${r.day2} ${r.begin2}-${r.end2}`);
@@ -425,6 +503,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
 
   // Faculty
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
@@ -439,7 +518,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
   >({});
 
   // table
-  const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
+  const [rows, setRows] = useState<ChairSpecialClassRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [errKind, setErrKind] = useState<"success" | "error">("error");
@@ -449,11 +528,11 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
   // edit
   const [editId, setEditId] = useState<string | null>(null);
-  const [draft, setDraft] = useState<Partial<OMSpecialClassRow>>({});
+  const [draft, setDraft] = useState<Partial<ChairSpecialClassRow>>({});
   const [facultyInput, setFacultyInput] = useState<string>("");
 
   // presets
-  const [presets, setPresets] = useState<OMSCSchedulePreset[]>([]);
+  const [presets, setPresets] = useState<ChairSCSchedulePreset[]>([]);
   const [presetChoice, setPresetChoice] = useState<string>("CUSTOM"); 
   const [clearMode, setClearMode] = useState<"none" | "schedule" | "all">("none");
   const [didClearAll, setDidClearAll] = useState(false);
@@ -462,7 +541,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
   const [viewOpen, setViewOpen] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewErr, setViewErr] = useState("");
-  const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
+  const [viewData, setViewData] = useState<ChairSpecialClassDetail | null>(null);
 
   // RFC / conversation modal (Special Class)
   const [conv, setConv] = useState<{
@@ -483,15 +562,12 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
   }, []);
 
   const toast = (message: string, kind?: "success" | "error") => {
-    // This screen uses an inline banner for feedback; keep it consistent.
     setErrKind(kind === "success" ? "success" : "error");
     setErr(message);
-    if (kind === "success") {
-      window.setTimeout(() => setErr(""), 2500);
-    }
+    if (kind === "success") window.setTimeout(() => setErr(""), 2500);
   };
 
-  const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
+  const roomLabel = (r: Partial<ChairSpecialClassRow>, slot: 1 | 2) => {
     const direct = (slot === 1 ? r.room1 : r.room2) || "";
     const directTrim = direct.trim();
     if (directTrim) {
@@ -508,7 +584,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     return info.room_number;
   };
 
-  const roomTitle = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
+  const roomTitle = (r: Partial<ChairSpecialClassRow>, slot: 1 | 2) => {
     const rid = (slot === 1 ? r.room_id1 : r.room_id2) || "";
     const info = rid ? roomIdToInfo[String(rid).trim()] : null;
     if (!info) return undefined;
@@ -520,17 +596,21 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     return parts.length ? parts.join(" • ") : undefined;
   };
 
+
   // load options
   useEffect(() => {
     (async () => {
       try {
-        const opt: OMSpecialClassOptions = await getOMSC_Options();
+        const opt: ChairSpecialClassOptions = await getChairSCOptions();
         if (!opt.ok) throw new Error("Failed to load options");
         setStatuses(["All Status", ...(opt.statuses || [])]);
 
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+        const win = opt.submission_window || {};
+        const nextWindow = { openISO: win.openISO || "", deadlineISO: win.deadlineISO || "" };
+        setSubmissionWindow(nextWindow);
 
         const names = (opt.facultyOptions || [])
           .map((f) => (f.faculty_name || "").trim())
@@ -579,8 +659,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
       setLoading(true);
       setErr("");
       setErrKind("error");
-      setErrKind("error");
-      const res = await listOMSC({ status, q });
+      const res = await listChairSC({ status, q });
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
       setRows(incoming);
@@ -664,7 +743,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
       // Always export as separate files when multiple are selected.
       for (const id of selectedList) {
-        const blob = await exportOMSC_Pdf({ special_ids: [id] });
+        const blob = await exportChairSC_Pdf({ special_ids: [id] });
         downloadBlob(blob, makeFileName(id));
       }
     } catch (e: any) {
@@ -700,14 +779,14 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     const esc = (v: string) =>
       v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-    const scheduleForRow = (r: OMSpecialClassRow) => {
+    const scheduleForRow = (r: ChairSpecialClassRow) => {
       const parts: string[] = [];
       if (r.day1 && r.begin1 && r.end1) parts.push(`${r.day1} ${prettyHHMM(r.begin1)}-${prettyHHMM(r.end1)}`);
       if (r.day2 && r.begin2 && r.end2) parts.push(`${r.day2} ${prettyHHMM(r.begin2)}-${prettyHHMM(r.end2)}`);
       return parts.join("; ");
     };
 
-    const roomForRow = (r: OMSpecialClassRow) => {
+    const roomForRow = (r: ChairSpecialClassRow) => {
       const parts: string[] = [];
       if (r.room1) parts.push(r.room1);
       if (r.room2) parts.push(r.room2);
@@ -868,7 +947,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     setFacultyInput(p.faculty_name && p.faculty_name !== "UNASSIGNED" ? p.faculty_name : "");
   };
 
-  const beginEdit = async (row: OMSpecialClassRow) => {
+  const beginEdit = async (row: ChairSpecialClassRow) => {
     setEditId(row.special_id);
     setDidClearAll(false);
 
@@ -892,7 +971,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     setFacultyInput(facName === "UNASSIGNED" ? "" : facName);
 
     try {
-      const res = await getOMSC_SchedulePresets(row.course_id);
+      const res = await getChairSC_SchedulePresets(row.course_id);
       setPresets(res.presets || []);
       const match = (res.presets || []).find((p) => p.section_id === row.section_id);
 
@@ -1013,7 +1092,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
         }
       }
 
-      await updateOMSC(editId, payload, getSessionUserId());
+      await updateChairSC(editId, payload, getSessionUserId());
 
       setEditId(null);
       setDraft({});
@@ -1030,14 +1109,14 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     }
   };
 
-  const openView = async (row: OMSpecialClassRow) => {
+  const openView = async (row: ChairSpecialClassRow) => {
     setViewOpen(true);
     setViewLoading(true);
     setViewErr("");
     setViewData(null);
 
     try {
-      const res = await getOMSC_Detail(row.special_id);
+      const res = await getChairSC_Detail(row.special_id);
       if (!res.ok) throw new Error("Failed to load application detail.");
       setViewData(res.row);
     } catch (e: any) {
@@ -1058,12 +1137,16 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
   return (
     <main className="w-full px-8 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Special Class</h1>
-        <p className="text-sm text-gray-600">
-          Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
-        </p>
+      <header className="mb-4">
+        <div>
+          <h1 className="text-2xl font-bold">Special Class</h1>
+          <p className="text-sm text-gray-600">
+            Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
+          </p>
+        </div>
       </header>
+
+      <DeadlineBanner deadlineISO={submissionWindow.deadlineISO} className="mb-6" />
 
       {err && (
         <div

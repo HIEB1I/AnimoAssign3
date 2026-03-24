@@ -26,7 +26,7 @@ COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_PREEN_COUNT = "preenlistment_count" 
 
-STATUS_OPTIONS = ["Approved", "Under Review", "Dissolved"]
+STATUS_OPTIONS = ["Approved", "Under Review", "Convert to Special Class", "Dissolved"]
 
 
 def _status_to_section_remarks_tag(status: str) -> str:
@@ -769,6 +769,31 @@ async def _derive_faculty_for_section(section_id: Optional[str]) -> Optional[str
     return fa.get("faculty_id") if fa else None
 
 
+async def _course_units_for_course(course_id: Optional[str]) -> Dict[str, Optional[int]]:
+    """Return canonical student/faculty units for a course.
+
+    - student_units comes from courses.units
+    - faculty_units comes from courses.faculty_units (fallback 3)
+    """
+    cid = str(course_id or "").strip()
+    if not cid:
+        raise HTTPException(status_code=400, detail="course_id is required")
+
+    course = await db[COL_COURSES].find_one(
+        {"course_id": cid},
+        {"_id": 0, "course_id": 1, "units": 1, "faculty_units": 1},
+    )
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found")
+
+    student_units = _to_int_or_none(course.get("units"))
+    faculty_units = _to_int_or_none(course.get("faculty_units"))
+    if faculty_units is None:
+        faculty_units = 3
+
+    return {"student_units": student_units, "faculty_units": faculty_units}
+
+
 @router.get("/classretention")
 async def cr_get(
     action: str = Query(...),
@@ -839,6 +864,8 @@ async def cr_get(
                 "course_id": {"$ifNull": ["$c.course_id", "$_id"]},
                 "course_code": {"$ifNull": ["$c.course_code", ""]},
                 "course_title": {"$ifNull": ["$c.course_title", ""]},
+                "units": {"$ifNull": ["$c.units", None]},
+                "faculty_units": {"$ifNull": ["$c.faculty_units", 3]},
             }},
             {"$sort": {"course_code": 1}},
         ]
@@ -986,8 +1013,8 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             if "status" in update_doc:
                 s = (update_doc.get("status") or "").strip()
                 if s.lower() == "special class":
-                    # Status removed; treat legacy value as Dissolved.
-                    update_doc["status"] = "Dissolved"
+                    # Legacy alias support.
+                    update_doc["status"] = "Convert to Special Class"
                 if update_doc["status"] not in STATUS_OPTIONS:
                     raise HTTPException(status_code=400, detail="Invalid status")
             update_doc["updated_at"] = now
@@ -1003,6 +1030,11 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             prev_term_id = str(existing.get("term_id") or "").strip()
             prev_course_id = str(existing.get("course_id") or "").strip()
             prev_enrolled = existing.get("enrolled")
+
+            course_id_for_units = update_doc.get("course_id") or existing.get("course_id")
+            course_units = await _course_units_for_course(course_id_for_units)
+            update_doc["student_units"] = course_units.get("student_units")
+            update_doc["faculty_units"] = course_units.get("faculty_units")
 
             # derive faculty from (new/current) section
             section_id_for_fac = update_doc.get("section_id") or existing.get("section_id")
@@ -1070,11 +1102,12 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
         status = payload.get("status", "Under Review")
         s = (status or "").strip()
         if s.lower() == "special class":
-            # Status removed; treat legacy value as Dissolved.
-            status = "Dissolved"
+            # Legacy alias support.
+            status = "Convert to Special Class"
         if status not in STATUS_OPTIONS:
             raise HTTPException(status_code=400, detail="Invalid status")
 
+        course_units = await _course_units_for_course(payload.get("course_id"))
         derived_faculty_id = await _derive_faculty_for_section(payload.get("section_id"))
 
         doc = {
@@ -1082,8 +1115,8 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             "course_id": payload["course_id"],
             "section_id": payload["section_id"],
             "faculty_id": derived_faculty_id,  # snapshot only; UI derives from assignments for display
-            "student_units": payload.get("student_units"),
-            "faculty_units": payload.get("faculty_units"),
+            "student_units": course_units.get("student_units"),
+            "faculty_units": course_units.get("faculty_units"),
             "status": status,
             "enrolled": payload.get("enrolled"),
             "created_at": now,

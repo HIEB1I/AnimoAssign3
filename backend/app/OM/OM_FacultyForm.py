@@ -152,6 +152,14 @@ def _parse_date_any(dt):
     except Exception:
         return None
 
+
+def _ensure_utc(dt: Optional[datetime]) -> Optional[datetime]:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
 # (new) compute open/deadline like FACULTY_Preferences
 def _prefs_window_from_term(term: Dict[str, Any]) -> tuple[datetime, datetime]:
     start = _parse_date_any(term.get("classes_start_date")) or _parse_date_any(term.get("start_date")) or datetime.now(timezone.utc)
@@ -430,8 +438,8 @@ async def _prefs_window_override_for_term(term: Dict[str, Any]) -> Dict[str, Any
     if not override:
         return {"openISO": "", "deadlineISO": "", "term_id": term_id}
 
-    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
-    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    open_dt = _ensure_utc(_parse_date_any(override.get("open_dt") or override.get("openISO")))
+    deadline_dt = _ensure_utc(_parse_date_any(override.get("deadline_dt") or override.get("deadlineISO")))
 
     openISO = open_dt.isoformat() if open_dt else ""
     deadlineISO = deadline_dt.isoformat() if deadline_dt else ""

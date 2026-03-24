@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 import io
 import uuid
@@ -34,6 +34,7 @@ COL_COURSES = "courses"
 COL_ROOMS = "rooms"
 
 COL_SECTIONS_SUBMITTED = "sections_submitted"
+COL_SPECIAL_WINDOWS = "specialclass_windows"
 
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
@@ -738,6 +739,44 @@ async def _active_term() -> Dict[str, Any]:
         .to_list(1)
     )
     return next_terms[0] if next_terms else current
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _special_window_override_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_SPECIAL_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
 
 
 async def _get_allowed_statuses() -> List[str]:
@@ -2047,6 +2086,7 @@ async def om_specialclass_get(
         statuses = await _get_allowed_statuses()
         faculty = await _build_faculty_options()
         rooms = await _build_room_options()
+        window = await _special_window_override_for_term(active or {})
         return {
             "ok": True,
             "statuses": statuses,
@@ -2058,6 +2098,11 @@ async def om_specialclass_get(
             "facultyOptions": faculty,
             # note: rooms are returned but UI does NOT need to edit rooms; display comes from list rows
             "roomOptions": rooms,
+            "submission_window": {
+                "openISO": window.get("openISO") or "",
+                "deadlineISO": window.get("deadlineISO") or "",
+                "term_id": window.get("term_id"),
+            },
         }
 
     if action == "schedulePresets":
@@ -2075,19 +2120,90 @@ async def om_specialclass_get(
 # ---------------- routes (POST) ----------------
 @router.post("/specialclass")
 async def om_specialclass_post(
-    action: str = Query("list", description="list | detail | update | bulkUpdate | exportPdf"),
+    action: str = Query("list", description="list | detail | update | bulkUpdate | exportPdf | startWindow"),
     status: Optional[str] = Query(None),
     q: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
     specialId: Optional[str] = Query(None),
     # Optional: used as Gmail sender for notification emails (best effort).
     userId: Optional[str] = Query(None),
+    durationDays: Optional[int] = Query(None),
+    openISO: Optional[str] = Query(None, description="(Optional) Exact open datetime in ISO 8601"),
+    deadlineISO: Optional[str] = Query(None, description="(Optional) Exact deadline datetime in ISO 8601"),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     active = await _active_term()
     current_term_id = termId or active.get("term_id")
+
     if action in {"list", "detail", "update", "bulkUpdate", "exportPdf"} and not current_term_id:
         raise HTTPException(status_code=503, detail="No active term configured.")
+
+    if action == "startWindow":
+        if termId:
+            term_doc = await db[COL_TERMS].find_one(
+                {"term_id": termId},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+            )
+        else:
+            term_doc = active or await _active_term()
+        if not term_doc or not term_doc.get("term_id"):
+            raise HTTPException(status_code=400, detail="Active term not found; cannot start window.")
+
+        term_id = term_doc["term_id"]
+
+        def _parse_iso_as_utc(s: Optional[str]) -> Optional[datetime]:
+            if not s:
+                return None
+            try:
+                dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            except Exception:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        open_dt = _parse_iso_as_utc(openISO)
+        deadline_dt = _parse_iso_as_utc(deadlineISO)
+        if open_dt and deadline_dt:
+            if deadline_dt <= open_dt:
+                raise HTTPException(status_code=400, detail="deadlineISO must be after openISO.")
+        else:
+            days = durationDays if durationDays is not None else 7
+            try:
+                days = int(days)
+            except Exception:
+                days = 7
+            if days <= 0:
+                raise HTTPException(status_code=400, detail="durationDays must be a positive integer.")
+            now = datetime.now(timezone.utc)
+            open_dt = now
+            deadline_dt = now + timedelta(days=days)
+
+        await db[COL_SPECIAL_WINDOWS].update_one(
+            {"term_id": term_id},
+            {
+                "$set": {
+                    "term_id": term_id,
+                    "open_dt": open_dt,
+                    "deadline_dt": deadline_dt,
+                    "openISO": open_dt.isoformat(),
+                    "deadlineISO": deadline_dt.isoformat(),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+        )
+
+        window = await _special_window_override_for_term(term_doc)
+        return {
+            "ok": True,
+            "submission_window": {
+                "openISO": window.get("openISO") or "",
+                "deadlineISO": window.get("deadlineISO") or "",
+                "term_id": window.get("term_id"),
+            },
+        }
 
     if action == "list":
         match: Dict[str, Any] = {"term_id": current_term_id, "special_id": {"$exists": True}}
