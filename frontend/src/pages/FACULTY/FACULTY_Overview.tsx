@@ -853,6 +853,22 @@ type TLItem = {
   syllabus?: string;
 };
 
+const collectSpecialIds = (item?: Partial<TLItem> | null): string[] => {
+  if (!item) return [];
+  const ids = new Set<string>();
+
+  const push = (value: unknown) => {
+    const sid = String(value ?? "").trim();
+    if (sid) ids.add(sid);
+  };
+
+  (item.special_ids || []).forEach(push);
+  push(item.special_id);
+  (item.student_reason_pairs || []).forEach((pair) => push(pair?.special_id));
+
+  return Array.from(ids);
+};
+
 
 // --- *** NEW: This type is for the Calendar items *** ---
 type TLItemForCalendar = {
@@ -1746,7 +1762,7 @@ const scheduleFinalLabel = (() => {
         );
         const students = studentReasonPairs.map((pair) => pair.student || "—");
         const reasons = studentReasonPairs.map((pair) => pair.reason || "—");
-        const specialIds = Array.from(new Set(items.flatMap((it) => ((it as any)?.special_ids || [(it as any)?.special_id]) as any[]).map((value) => String(value || "").trim()).filter(Boolean)));
+        const specialIds = Array.from(new Set(items.flatMap((it) => collectSpecialIds(it))));
         const backendStudentCount = Math.max(
           0,
           ...items.map((it) => {
@@ -2084,7 +2100,7 @@ const scheduleFinalLabel = (() => {
             const ids = Array.from(
               new Set(
                 selectedSpecialList
-                  .flatMap((it) => (((it as any)?.special_ids || [(it as any)?.special_id]) as any[]))
+                  .flatMap((it) => collectSpecialIds(it as TLItem))
                   .map((v) => String(v || "").trim())
                   .filter(Boolean)
               )
@@ -2173,7 +2189,10 @@ const scheduleFinalLabel = (() => {
             await apiPost("/api/faculty/special-class/respond", {
               user_id: userId,
               special_id: it.special_id,
-              special_ids: it.special_ids || [it.special_id],
+              special_ids: (() => {
+                const specialIds = collectSpecialIds(it as TLItem);
+                return specialIds.length ? specialIds : [it.special_id];
+              })(),
               action: "reject",
             });
 
@@ -2372,10 +2391,11 @@ const scheduleFinalLabel = (() => {
                     if (!userId) throw new Error("User is not logged in");
 
                     const groupKey = String((it as any)?.special_group_key || (it as any)?.special_id || "").trim();
+                    const specialIds = collectSpecialIds(it as TLItem);
                     await apiPost("/api/faculty/special-class/respond", {
                       user_id: userId,
                       special_id: (it as any)?.special_id,
-                      special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
+                      special_ids: specialIds.length ? specialIds : [(it as any)?.special_id],
                       action: "accept",
                     });
 
@@ -2391,10 +2411,11 @@ const scheduleFinalLabel = (() => {
 
                 const onRejectSpecial = async (e: React.MouseEvent) => {
                   e.stopPropagation();
+                  const specialIds = collectSpecialIds(it as TLItem);
                   setRejectSpecialItem({
                     ...it,
                     special_id: (it as any)?.special_id,
-                    special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
+                    special_ids: specialIds.length ? specialIds : [(it as any)?.special_id],
                   });
                   setRejectSpecialOpen(true);
                 };
@@ -2415,7 +2436,10 @@ const scheduleFinalLabel = (() => {
                       syllabus: it.syllabus,
                       is_special_class: true,
                       special_id: (it as any)?.special_id,
-                      special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
+                      special_ids: (() => {
+                        const specialIds = collectSpecialIds(it as TLItem);
+                        return specialIds.length ? specialIds : [(it as any)?.special_id];
+                      })(),
                       forceConversationOnly: true,
                       allowStartConversation: true,
                       originalItem: it,

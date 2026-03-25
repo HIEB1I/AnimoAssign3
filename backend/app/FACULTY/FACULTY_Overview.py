@@ -4,6 +4,7 @@ from ..main import db
 
 # In-app bell notifications (shared Notifications collection)
 from ..Notifications import create_notification
+from .. import Notifications as _notifications
 from ..MESSAGING.store import open_dm_conversation, insert_message
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -148,6 +149,14 @@ async def _special_class_admin_recipient_user_ids(*, actor_user_id: str, sc_docs
     for uid in await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"]):
         if uid:
             recipients.add(uid)
+
+    try:
+        for uid in await _notifications._get_all_om_user_ids():
+            uid = str(uid or "").strip()
+            if uid:
+                recipients.add(uid)
+    except Exception:
+        pass
 
     for uid in await _role_user_ids_by_name_patterns([r"^chair$", r"chair"]):
         if uid:
@@ -1747,6 +1756,7 @@ async def _expand_grouped_special_class_docs(
     sc_docs: List[Dict[str, Any]],
     faculty_id: str = "",
     require_faculty_state: Optional[str] = None,
+    status_filter: Optional[str] = "Approved",
 ) -> List[Dict[str, Any]]:
     """Expand selected special ids to the full grouped course set."""
     base_docs = [d or {} for d in (sc_docs or []) if isinstance(d, dict)]
@@ -1797,11 +1807,18 @@ async def _expand_grouped_special_class_docs(
         "section": 1,
         "om_user_id": 1,
         "chair_user_id": 1,
+        "status": 1,
+        "updated_at": 1,
+        "submitted_at": 1,
     }
+    query: Dict[str, Any] = {"$or": query_or}
+    if status_filter is not None:
+        query["status"] = status_filter
+
     candidates = await db[COL_SPECIAL_CLASS].find(
-        {"status": "Approved", "$or": query_or},
+        query,
         projection,
-    ).to_list(1000)
+    ).sort([("updated_at", -1), ("submitted_at", -1)]).to_list(1000)
 
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
@@ -1888,10 +1905,11 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
     )
 
     docs = await db[COL_SPECIAL_CLASS].find(
-        {"special_id": {"$in": special_ids}, "status": "Approved"},
+        {"special_id": {"$in": special_ids}},
         {
             "_id": 0,
             "special_id": 1,
+            "status": 1,
             "term_id": 1,
             "section_id": 1,
             "assignment_id": 1,
@@ -1908,12 +1926,24 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
             "section": 1,
             "user_id": 1,
             "student_user_id": 1,
+            "updated_at": 1,
+            "submitted_at": 1,
         },
-    ).to_list(max(200, len(special_ids) * 2))
+    ).sort([("updated_at", -1), ("submitted_at", -1)]).to_list(max(400, len(special_ids) * 4))
+    latest_docs: List[Dict[str, Any]] = []
+    seen_special_ids: set[str] = set()
+    for doc in (docs or []):
+        sid = str((doc or {}).get("special_id") or "").strip()
+        if not sid or sid in seen_special_ids:
+            continue
+        latest_docs.append(doc or {})
+        seen_special_ids.add(sid)
+
     docs = await _expand_grouped_special_class_docs(
-        sc_docs=docs,
+        sc_docs=latest_docs,
         faculty_id=faculty_id,
         require_faculty_state="ACCEPTED",
+        status_filter=None,
     )
 
     by_id = {str((d or {}).get("special_id") or "").strip(): (d or {}) for d in (docs or [])}
@@ -1921,7 +1951,7 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
     queued_by_student: Dict[str, Dict[str, Any]] = {}
     sent_special_ids: List[str] = []
 
-    for sid in sorted(by_id.keys()):
+    for sid in special_ids:
         d = by_id.get(sid) or {}
         if not d:
             skipped.append({"special_id": sid, "reason": "Special class not found or not approved"})
