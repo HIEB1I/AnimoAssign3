@@ -4,6 +4,7 @@ from ..main import db
 
 # In-app bell notifications (shared Notifications collection)
 from ..Notifications import create_notification
+from ..MESSAGING.store import open_dm_conversation, insert_message
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 import re
@@ -1544,6 +1545,208 @@ async def _fetch_reflected_special_classes_for_faculty(
     # Keep stable ordering: sort by course_code then section.
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
+
+
+async def _student_user_id_for_special(d: Dict[str, Any]) -> str:
+    return str(d.get("user_id") or d.get("student_user_id") or "").strip()
+
+
+def _special_class_schedule_summary_lines(sch: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+
+    def _one(idx: int, day: Any, begin: Any, end: Any, room: Any) -> None:
+        d = str(day or "").strip() or "TBA"
+        b = _hhmm_to_hm(begin)
+        e = _hhmm_to_hm(end)
+        room_label = str(room or "").strip() or "TBA"
+        if room_label.upper() == "ONLINE":
+            room_label = "TBA"
+        if d == "TBA" and not b and not e and room_label == "TBA":
+            return
+        band = f"{b}–{e}" if b and e else "TBA"
+        lines.append(f"Meeting {idx}: {d} | {band} | Room: {room_label}")
+
+    _one(1, sch.get("day1"), sch.get("begin1"), sch.get("end1"), sch.get("room1"))
+    _one(2, sch.get("day2"), sch.get("begin2"), sch.get("end2"), sch.get("room2"))
+    return lines
+
+
+@router.post("/special-class/bulk-message")
+async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)):
+    """Send one inbox message per selected Special Class student.
+
+    Each message is personalized with the student's reflected schedule, lands in Inbox,
+    and triggers in-app + Gmail notifications via the messaging store.
+    """
+    user_id = str(payload.get("user_id") or "").strip()
+    special_ids_raw = payload.get("special_ids") or []
+    custom_message = str(payload.get("message") or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not isinstance(special_ids_raw, list):
+        raise HTTPException(status_code=400, detail="special_ids must be an array")
+
+    special_ids = []
+    for x in special_ids_raw:
+        s = str(x or "").strip()
+        if s and s not in special_ids:
+            special_ids.append(s)
+    if not special_ids:
+        raise HTTPException(status_code=400, detail="Select at least one special class")
+
+    faculty = await db[COL_FACULTY].find_one({"user_id": user_id}, {"_id": 0, "faculty_id": 1})
+    if not faculty:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+    faculty_id = str(faculty.get("faculty_id") or "").strip()
+    if not faculty_id:
+        raise HTTPException(status_code=404, detail="Faculty profile is incomplete")
+
+    user_doc = await db[COL_USERS].find_one(
+        {"user_id": user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1, "name": 1},
+    ) or {}
+    faculty_name = (
+        f"{str(user_doc.get('first_name') or '').strip()} {str(user_doc.get('last_name') or '').strip()}".strip()
+        or str(user_doc.get("name") or "").strip()
+        or "Your faculty"
+    )
+
+    docs = await db[COL_SPECIAL_CLASS].find(
+        {"special_id": {"$in": special_ids}, "status": "Approved"},
+        {
+            "_id": 0,
+            "special_id": 1,
+            "term_id": 1,
+            "section_id": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "schedule_id1": 1,
+            "schedule_id2": 1,
+            "schedule_cleared": 1,
+            "course_id": 1,
+            "course_code": 1,
+            "course_title": 1,
+            "section_code": 1,
+            "section": 1,
+            "user_id": 1,
+            "student_user_id": 1,
+        },
+    ).to_list(max(200, len(special_ids) * 2))
+
+    by_id = {str((d or {}).get("special_id") or "").strip(): (d or {}) for d in (docs or [])}
+    sent: List[str] = []
+    skipped: List[Dict[str, str]] = []
+
+    for sid in special_ids:
+        d = by_id.get(sid) or {}
+        if not d:
+            skipped.append({"special_id": sid, "reason": "Special class not found or not approved"})
+            continue
+
+        assignment_id = str(d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
+        sec_id = str(d.get("section_id") or "").strip()
+
+        owning_faculty_id = ""
+        if assignment_id:
+            asg = await db[COL_ASSIGN].find_one(
+                {"assignment_id": assignment_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "faculty_id": 1},
+            ) or {}
+            owning_faculty_id = str(asg.get("faculty_id") or "").strip()
+        if not owning_faculty_id and sec_id:
+            owning_faculty_id = await _latest_faculty_id_for_section(sec_id)
+
+        if not owning_faculty_id or owning_faculty_id != faculty_id:
+            skipped.append({"special_id": sid, "reason": "Special class is not assigned to this faculty"})
+            continue
+
+        student_uid = await _student_user_id_for_special(d)
+        if not student_uid:
+            skipped.append({"special_id": sid, "reason": "Student account is missing"})
+            continue
+        if student_uid == user_id:
+            skipped.append({"special_id": sid, "reason": "Invalid student recipient"})
+            continue
+
+        course_code = str(d.get("course_code") or "").strip()
+        course_title = str(d.get("course_title") or "").strip()
+        if (not course_code or not course_title) and str(d.get("course_id") or "").strip():
+            cdoc = await db[COL_COURSES].find_one(
+                {"course_id": str(d.get("course_id") or "").strip()},
+                {"_id": 0, "course_code": 1, "course_title": 1},
+            ) or {}
+            if not course_code:
+                cc = cdoc.get("course_code")
+                course_code = (cc[0] if isinstance(cc, list) and cc else cc) or ""
+                course_code = str(course_code).strip()
+            if not course_title:
+                course_title = str(cdoc.get("course_title") or "").strip()
+
+        section_display = str(d.get("section_code") or d.get("section") or "").strip()
+        if sec_id and not section_display:
+            sdoc = await db[COL_SECTIONS].find_one(
+                {"section_id": sec_id},
+                {"_id": 0, "section_code": 1, "section": 1, "section_name": 1},
+            ) or {}
+            section_display = str(sdoc.get("section_code") or sdoc.get("section") or sdoc.get("section_name") or "").strip()
+
+        sch = await _special_class_schedule_two(
+            section_id=sec_id or None,
+            schedule_id1=str(d.get("schedule_id1") or "").strip() or None,
+            schedule_id2=str(d.get("schedule_id2") or "").strip() or None,
+            schedule_cleared=bool(d.get("schedule_cleared")),
+        )
+        schedule_lines = _special_class_schedule_summary_lines(sch)
+
+        body_lines = [
+            f"Hello! This is {faculty_name} regarding your special class request.",
+            "",
+            f"Course: {' '.join([x for x in [course_code, section_display] if x]).strip() or sid}",
+        ]
+        if course_title:
+            body_lines.append(f"Title: {course_title}")
+        if schedule_lines:
+            body_lines.extend(["", "Proposed schedule:", *schedule_lines])
+        body_lines.extend([
+            "",
+            "Please let me know here in Inbox if this schedule works for you.",
+            "If you approve it, no schedule changes are needed. If not, I can adjust it.",
+        ])
+        if custom_message:
+            body_lines.extend(["", custom_message])
+
+        conversation = open_dm_conversation(user_id, student_uid)
+
+        # Insert message
+        insert_message(
+            conversation_id=conversation["conversation_id"],
+            sender_id=user_id,
+            recipient_id=student_uid,
+            message="\n".join(body_lines),
+        )
+
+        # Create notification (in-app + Gmail)
+        await create_notification(
+            user_id=student_uid,
+            title="New message from faculty",
+            details=f"{faculty_name} sent you a message about your special class.",
+            meta={
+                "route": "/faculty/inbox",
+                "kind": "special_class_message",
+                "special_id": sid,
+            },
+            send_email=True,
+        )
+
+        sent.append(sid)
+
+    return {
+        "ok": True,
+        "sent_count": len(sent),
+        "sent_special_ids": sent,
+        "skipped": skipped,
+    }
 
 
 @router.post("/special-class/respond")

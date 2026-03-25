@@ -388,6 +388,46 @@ function scheduleTextFromRow(r: Partial<OMSpecialClassRow>) {
   return parts.join("; ");
 }
 
+type ScheduleSlotView = {
+  key: string;
+  day: string;
+  time: string;
+};
+
+function buildScheduleSlotViews(r: Partial<OMSpecialClassRow>) {
+  const slots: ScheduleSlotView[] = [];
+
+  const addSlot = (slot: 1 | 2) => {
+    const day = String(slot === 1 ? r.day1 || "" : r.day2 || "").trim();
+    const beginRaw = String(slot === 1 ? r.begin1 || "" : r.begin2 || "").trim();
+    const endRaw = String(slot === 1 ? r.end1 || "" : r.end2 || "").trim();
+    const begin = prettyHHMM(beginRaw);
+    const end = prettyHHMM(endRaw);
+    const hasAnyValue = day || beginRaw || endRaw;
+
+    if (!hasAnyValue) return;
+
+    slots.push({
+      key: `slot-${slot}`,
+      day: day || "—",
+      time: begin && end ? `${begin}–${end}` : "—",
+    });
+  };
+
+  addSlot(1);
+  addSlot(2);
+
+  if (slots.length) return slots;
+
+  return [
+    {
+      key: "slot-empty",
+      day: "—",
+      time: "—",
+    },
+  ];
+}
+
 function formatDate(dt?: string) {
   if (!dt) return "—";
   const d = new Date(dt);
@@ -1365,18 +1405,12 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
                 <th className="text-left px-4 py-2 whitespace-nowrap">Student</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Course</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Section</th>
+                <th className="text-center px-4 py-2 whitespace-nowrap">Section</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Faculty</th>
 
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room1</th>
-
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room2</th>
+<th className="text-center px-3 py-2 whitespace-nowrap min-w-[90px]">Day</th>
+<th className="text-center px-3 py-2 whitespace-nowrap min-w-[140px]">Time</th>
+<th className="text-center px-3 py-2 whitespace-nowrap min-w-[90px]">Room</th>
 
                 <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
@@ -1387,13 +1421,13 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
             <tbody className="divide-y">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={11}>
                     Loading…
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={11}>
                     No results
                   </td>
                 </tr>
@@ -1425,7 +1459,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                         <div className="text-xs text-gray-500">{r.course_title || ""}</div>
                       </td>
 
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3 text-center">
                         {editing ? (
                           canEditSectionFaculty ? (
                             <input
@@ -1493,9 +1527,8 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                       {/* Schedule columns */}
                       {editing ? (
                         <>
-                          {/* Editor cell occupies Day1/Begin1/End1 */}
-                          <td className="px-3 py-3 whitespace-nowrap" colSpan={3}>
-                            <div className="space-y-2 min-w-[520px]">
+                          <td className="px-3 py-3 align-top">
+                            <div className="space-y-2 min-w-[320px]">
                               <SelectBox
                                 value={
                                   presetChoice === "CUSTOM"
@@ -1511,18 +1544,15 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                                       })()
                                 }
                                 onChange={(label) => {
-                                  // Any manual change cancels a pending "clear all" state
                                   setDidClearAll(false);
 
                                   if (label === CLEAR_SCHEDULE_LABEL) {
-                                    // Clear schedule only (keeps current binding)
                                     setPresetChoice("CLEAR_SCHEDULE");
                                     setClearMode("schedule");
                                     clearScheduleOnlyDraft();
                                     return;
                                   }
 
-                                  // Any other selection cancels clear-schedule mode
                                   setClearMode("none");
 
                                   if (label === "Custom") {
@@ -1549,7 +1579,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                                     Custom Schedule (max 2 entries). Begin uses preset time slots and auto-fills End.
                                   </div>
 
-                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">
+                                  <div className="grid grid-cols-[minmax(140px,1fr)_minmax(140px,1fr)_minmax(80px,100px)] gap-2 items-center mb-2 min-w-0">
                                     <SelectBox
                                       value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : DAY_PLACEHOLDER}
                                       onChange={(lbl) =>
@@ -1590,7 +1620,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                                     />
                                   </div>
 
-                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
+                                  <div className="grid grid-cols-[minmax(140px,1fr)_minmax(140px,1fr)_minmax(80px,100px)] gap-2 items-center">
                                     <SelectBox
                                       value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : DAY_PLACEHOLDER}
                                       onChange={(lbl) =>
@@ -1640,42 +1670,48 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                             </div>
                           </td>
 
-                          {/* Room1 (display-only) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 1)} className="inline-block">
-                              {roomLabel(r, 1)}
-                            </span>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">
+                            <div className="space-y-1 text-center">
+                              {buildScheduleSlotViews(draft).map((slot) => (
+                                <div key={slot.key}>{slot.time}</div>
+                              ))}
+                            </div>
                           </td>
 
-                          {/* Day2/Begin2/End2 (read values) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{draft.day2 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.begin2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.end2 || "") || "—"}</td>
-
-                          {/* Room2 (display-only) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 2)} className="inline-block">
-                              {roomLabel(r, 2)}
-                            </span>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">
+                            <div className="space-y-1 text-center">
+                              {roomCellItems(r).map((item) => (
+                                <span key={item.key} title={item.title} className="block">
+                                  {item.label}
+                                </span>
+                              ))}
+                            </div>
                           </td>
                         </>
                       ) : (
                         <>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day1 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin1 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end1 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 1)} className="inline-block">
-                              {roomLabel(r, 1)}
-                            </span>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">
+                            <div className="space-y-1 text-center">
+                              {buildScheduleSlotViews(r).map((slot) => (
+                                <div key={slot.key}>{slot.day}</div>
+                              ))}
+                            </div>
                           </td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day2 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 2)} className="inline-block">
-                              {roomLabel(r, 2)}
-                            </span>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">
+                            <div className="space-y-1 text-center">
+                              {buildScheduleSlotViews(r).map((slot) => (
+                                <div key={slot.key}>{slot.time}</div>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="px-3 py-3 align-top whitespace-nowrap">
+                            <div className="space-y-1 text-center">
+                              {roomCellItems(r).map((item) => (
+                                <span key={item.key} title={item.title} className="block">
+                                  {item.label}
+                                </span>
+                              ))}
+                            </div>
                           </td>
                         </>
                       )}
