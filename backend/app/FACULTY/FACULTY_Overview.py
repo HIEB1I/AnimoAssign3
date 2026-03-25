@@ -1573,10 +1573,13 @@ def _special_class_schedule_summary_lines(sch: Dict[str, Any]) -> List[str]:
 
 @router.post("/special-class/bulk-message")
 async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)):
-    """Send one inbox message per selected Special Class student.
+    """Send special class confirmation messages to students.
 
-    Each message is personalized with the student's reflected schedule, lands in Inbox,
-    and triggers in-app + Gmail notifications via the messaging store.
+    Rules enforced here:
+    - Only faculty-accepted special class requests may be sent.
+    - Sending remains allowed even after a previous message was already sent.
+    - Multiple confirmations for the same student are combined into one clear message.
+    - Different students always receive separate messages.
     """
     user_id = str(payload.get("user_id") or "").strip()
     special_ids_raw = payload.get("special_ids") or []
@@ -1587,11 +1590,11 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
     if not isinstance(special_ids_raw, list):
         raise HTTPException(status_code=400, detail="special_ids must be an array")
 
-    special_ids = []
+    special_ids: List[str] = []
     for x in special_ids_raw:
-        s = str(x or "").strip()
-        if s and s not in special_ids:
-            special_ids.append(s)
+        sid = str(x or "").strip()
+        if sid and sid not in special_ids:
+            special_ids.append(sid)
     if not special_ids:
         raise HTTPException(status_code=400, detail="Select at least one special class")
 
@@ -1621,6 +1624,8 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
             "section_id": 1,
             "assignment_id": 1,
             "faculty_assignment_id": 1,
+            "faculty_response": 1,
+            "faculty_status": 1,
             "schedule_id1": 1,
             "schedule_id2": 1,
             "schedule_cleared": 1,
@@ -1635,13 +1640,19 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
     ).to_list(max(200, len(special_ids) * 2))
 
     by_id = {str((d or {}).get("special_id") or "").strip(): (d or {}) for d in (docs or [])}
-    sent: List[str] = []
     skipped: List[Dict[str, str]] = []
+    queued_by_student: Dict[str, Dict[str, Any]] = {}
+    sent_special_ids: List[str] = []
 
     for sid in special_ids:
         d = by_id.get(sid) or {}
         if not d:
             skipped.append({"special_id": sid, "reason": "Special class not found or not approved"})
+            continue
+
+        fac_state = str(d.get("faculty_response") or d.get("faculty_status") or "").strip().upper()
+        if fac_state != "ACCEPTED":
+            skipped.append({"special_id": sid, "reason": "Special class must be accepted before sending to the student"})
             continue
 
         assignment_id = str(d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
@@ -1699,55 +1710,104 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
         )
         schedule_lines = _special_class_schedule_summary_lines(sch)
 
-        body_lines = [
-            f"Hello! This is {faculty_name} regarding your special class request.",
+        queued = queued_by_student.setdefault(
+            student_uid,
+            {
+                "special_ids": [],
+                "items": [],
+            },
+        )
+        queued["special_ids"].append(sid)
+        queued["items"].append(
+            {
+                "special_id": sid,
+                "course_code": course_code,
+                "course_title": course_title,
+                "section": section_display,
+                "schedule_lines": schedule_lines,
+            }
+        )
+        sent_special_ids.append(sid)
+
+    sent_messages: List[Dict[str, Any]] = []
+
+    for student_uid, grouped in queued_by_student.items():
+        items = grouped.get("items") or []
+        if not items:
+            continue
+
+        body_lines: List[str] = [
+            "Hello! Your special class request has been confirmed.",
             "",
-            f"Course: {' '.join([x for x in [course_code, section_display] if x]).strip() or sid}",
         ]
-        if course_title:
-            body_lines.append(f"Title: {course_title}")
-        if schedule_lines:
-            body_lines.extend(["", "Proposed schedule:", *schedule_lines])
+
+        if len(items) == 1:
+            item = items[0]
+            course_line = " ".join(
+                [x for x in [item.get("course_code"), item.get("section")] if str(x or "").strip()]
+            ).strip() or str(item.get("special_id") or "")
+            body_lines.append(f"Confirmed special class: {course_line}")
+            if item.get("course_title"):
+                body_lines.append(f"Title: {item.get('course_title')}")
+            if item.get("schedule_lines"):
+                body_lines.extend(["", "Schedule:", *item.get("schedule_lines")])
+        else:
+            body_lines.append("The following special class schedules have been confirmed:")
+            for idx, item in enumerate(items, start=1):
+                course_line = " ".join(
+                    [x for x in [item.get("course_code"), item.get("section")] if str(x or "").strip()]
+                ).strip() or str(item.get("special_id") or "")
+                body_lines.append("")
+                body_lines.append(f"{idx}. {course_line}")
+                if item.get("course_title"):
+                    body_lines.append(f"   Title: {item.get('course_title')}")
+                sched_lines = item.get("schedule_lines") or []
+                if sched_lines:
+                    body_lines.append("   Schedule:")
+                    for line in sched_lines:
+                        body_lines.append(f"   - {line}")
+
         body_lines.extend([
             "",
-            "Please let me know here in Inbox if this schedule works for you.",
-            "If you approve it, no schedule changes are needed. If not, I can adjust it.",
+            "Please reply here in Inbox if you have any questions or concerns.",
         ])
         if custom_message:
             body_lines.extend(["", custom_message])
 
         conversation = open_dm_conversation(user_id, student_uid)
-
-        # Insert message
         insert_message(
             conversation_id=conversation["conversation_id"],
             sender_id=user_id,
-            recipient_id=student_uid,
-            message="\n".join(body_lines),
+            body="\n".join(body_lines),
         )
 
-        # Create notification (in-app + Gmail)
+        first_special_id = str((grouped.get("special_ids") or [""])[0] or "")
         await create_notification(
             user_id=student_uid,
             title="New message from faculty",
-            details=f"{faculty_name} sent you a message about your special class.",
+            details=f"{faculty_name} sent you a confirmation for special class schedule.",
             meta={
-                "route": "/faculty/inbox",
+                "route": "/student/inbox",
                 "kind": "special_class_message",
-                "special_id": sid,
+                "special_id": first_special_id,
             },
             send_email=True,
         )
 
-        sent.append(sid)
+        sent_messages.append(
+            {
+                "student_user_id": student_uid,
+                "special_ids": list(grouped.get("special_ids") or []),
+            }
+        )
 
     return {
         "ok": True,
-        "sent_count": len(sent),
-        "sent_special_ids": sent,
+        "sent_count": len(sent_messages),
+        "sent_special_ids": sent_special_ids,
+        "sent_messages": sent_messages,
         "skipped": skipped,
     }
-
 
 @router.post("/special-class/respond")
 async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
