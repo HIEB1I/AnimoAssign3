@@ -804,6 +804,37 @@ type SpecialClassResponse = {
   rows: SpecialClassRow[];
 };
 
+type DissolvedClassSlot = {
+  day?: string;
+  start_time?: string;
+  end_time?: string;
+  room_id?: string | null;
+  room_number?: string | null;
+};
+
+type DissolvedClassRow = {
+  section_id: string;
+  course_id?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  faculty_name?: string;
+  schedule_entries?: DissolvedClassSlot[];
+  slot1?: DissolvedClassSlot | null;
+  slot2?: DissolvedClassSlot | null;
+  schedule_text?: string;
+  enrolled_students?: number;
+  status?: string;
+  updated_at?: string;
+};
+
+type DissolvedClassesResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: DissolvedClassRow[];
+};
+
 type CurriculumItem = {
   program_id: string;
   program_code: string;
@@ -904,7 +935,7 @@ type ConflictState = {
   reason: string;
 };
 
-type ViewMode = "offerings" | "curriculum" | "specialclass";
+type ViewMode = "offerings" | "curriculum" | "specialclass" | "dissolved";
 
 /* ----------------------- SECTION CODE RULES (NEW) ----------------------- */
 
@@ -1196,6 +1227,10 @@ export default function CourseOfferingsPage() {
   const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
   const [scLoading, setScLoading] = useState(false);
   const [scErr, setScErr] = useState<string | null>(null);
+  const [dissolvedData, setDissolvedData] = useState<DissolvedClassesResponse | null>(null);
+  const [dissolvedRows, setDissolvedRows] = useState<DissolvedClassRow[]>([]);
+  const [dissolvedLoading, setDissolvedLoading] = useState(false);
+  const [dissolvedErr, setDissolvedErr] = useState<string | null>(null);
 
   const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
   const [scExporting, setScExporting] = useState(false);
@@ -1716,6 +1751,31 @@ const loadOfferings = async () => {
     }
   };
 
+
+  const loadDissolvedClasses = async () => {
+    setDissolvedLoading(true);
+    setDissolvedErr(null);
+    try {
+      const userId = user?.userId;
+      if (!userId) {
+        setDissolvedErr("User is not logged in");
+        return;
+      }
+
+      const resp = (await getApoCourseOfferings(userId, {
+        view: "dissolved",
+      })) as unknown as DissolvedClassesResponse;
+
+      setDissolvedData(resp);
+      setDissolvedRows(Array.isArray(resp?.rows) ? resp.rows : []);
+    } catch (e: any) {
+      setDissolvedErr(e?.message || "Failed to load dissolved classes.");
+      setDissolvedRows([]);
+    } finally {
+      setDissolvedLoading(false);
+    }
+  };
+
   /** ------------------ helpers for edit mode ------------------ */
   const _slotFromRow = (row: any, idx: 1 | 2) => {
     const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
@@ -1925,11 +1985,16 @@ const loadOfferings = async () => {
     }
   };
 
-  // View switching: specialclass + curriculum only
+  // View switching: specialclass + dissolved + curriculum
   useEffect(() => {
     if (view === "specialclass") {
       const tid = currentTermId || data?.term_id || curr?.term_id || undefined;
       loadSpecialClass(tid);
+      return;
+    }
+
+    if (view === "dissolved") {
+      loadDissolvedClasses();
       return;
     }
 
@@ -4031,6 +4096,35 @@ const promptSaveEdit = () => {
     await loadCurriculum();
   };
 
+  const dissolvedCellLines = (row: DissolvedClassRow) => {
+    const rawEntries = Array.isArray(row?.schedule_entries)
+      ? row.schedule_entries
+      : [row?.slot1, row?.slot2].filter(Boolean);
+    const entries = (rawEntries || []).slice(0, 2);
+
+    const timeLine = (slot?: DissolvedClassSlot | null) => {
+      if (!slot) return "—";
+      const st = fmtTime(slot.start_time || "");
+      const en = fmtTime(slot.end_time || "");
+      if (st === "—" && en === "—") return "—";
+      if (st !== "—" && en !== "—") return `${st}-${en}`;
+      return [st !== "—" ? st : "", en !== "—" ? en : ""].filter(Boolean).join("-") || "—";
+    };
+
+    const roomLine = (slot?: DissolvedClassSlot | null) => {
+      const room = String(slot?.room_number || slot?.room_id || "").trim();
+      if (!room) return "TBA";
+      if (room.toUpperCase() === "ONLINE") return "TBA";
+      return room;
+    };
+
+    return {
+      days: entries.length ? entries.map((slot) => String(slot?.day || "—").trim() || "—") : ["—"],
+      times: entries.length ? entries.map((slot) => timeLine(slot)) : ["—"],
+      rooms: entries.length ? entries.map((slot) => roomLine(slot)) : ["TBA"],
+    };
+  };
+
   /* ----------------------------------- UI ----------------------------------- */
 
   return (
@@ -4079,6 +4173,15 @@ const promptSaveEdit = () => {
             )}
           >
             Special Class
+          </button>
+          <button
+            onClick={() => setView("dissolved")}
+            className={cls(
+              "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
+              view === "dissolved" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+            )}
+          >
+            Dissolved Classes
           </button>
           </div>
 
@@ -4757,7 +4860,8 @@ ${msg}`,
             <div>
               <h2 className="text-lg font-bold">
                 {view === "curriculum" ? "List of Courses" :
-                view === "specialclass" ? "Special Class" : "Course Offerings"}
+                view === "specialclass" ? "Special Class" :
+                view === "dissolved" ? "Dissolved Classes" : "Course Offerings"}
               </h2>
               <p className="text-sm text-gray-500">{loading ? "Loading…" : data?.term_label || curr?.term_label || ""}</p>
               {err && <p className="text-sm text-red-600">{err}</p>}
@@ -5966,6 +6070,68 @@ ${msg}`,
               )}
             </div>
           )}
+          {/* ------------------------------ Dissolved Classes ------------------------------ */}
+          {view === "dissolved" && (
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+              <div className="bg-emerald-700 text-white px-4 py-3 flex items-center justify-between">
+                <div className="font-semibold">Dissolved Classes</div>
+              </div>
+
+              <div className="p-3">
+                {dissolvedErr && <div className="mb-2 text-sm text-red-600">{dissolvedErr}</div>}
+
+                {dissolvedLoading ? (
+                  <div className="text-sm text-neutral-500">Loading…</div>
+                ) : dissolvedErr ? (
+                  <div className="text-sm text-red-600">Failed to load dissolved classes: {dissolvedErr}</div>
+                ) : dissolvedRows.length === 0 ? (
+                  <div className="text-sm text-neutral-500">No dissolved classes found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead className="bg-gray-50 text-emerald-800">
+                        <tr className="text-[13px] font-semibold">
+                          <th className="px-3 py-2 text-left border border-gray-300">Course</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Section</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Day</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Time</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Room</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Enrolled Students</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dissolvedRows.map((row) => {
+                          const lines = dissolvedCellLines(row);
+                          return (
+                            <tr key={String(row.section_id || `${row.course_id}-${row.section_code}`)} className="hover:bg-neutral-50">
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="font-semibold text-emerald-700">{row.course_code || "—"}</div>
+                                <div className="text-xs text-gray-500">{row.course_title || "—"}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{row.section_code || "—"}</td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{row.faculty_name || "UNASSIGNED"}</td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.days.map((v, i) => <div key={`day-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.times.map((v, i) => <div key={`time-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.rooms.map((v, i) => <div key={`room-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{typeof row.enrolled_students === "number" ? row.enrolled_students : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ------------------------------ Special Class ------------------------------ */}
           {view === "specialclass" && (
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">

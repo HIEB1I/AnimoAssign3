@@ -45,6 +45,7 @@ COL_SPECIAL = "special_class"
 COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
 COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
 COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
+COL_CLASS_RETENTION = "class_retention"
 
 # Undo/Redo support:
 # - When a section is SOFT-deleted we can restore it by flipping status back to active.
@@ -4163,7 +4164,7 @@ async def get_course_offerings(
     department_id: Optional[str] = Query(None),
     batch_id: Optional[str] = Query(None),
     program_id: Optional[str] = Query(None),
-    view: Optional[Literal["curriculum", "offerings", "specialclass"]] = Query("offerings"),
+    view: Optional[Literal["curriculum", "offerings", "specialclass", "dissolved"]] = Query("offerings"),
     action: Optional[str] = Query(None),
 
     # room filtering params
@@ -5071,6 +5072,235 @@ async def get_course_offerings(
         return rows
 
 
+    async def _dissolved_rows(term_id: str, campus_id: str) -> List[Dict[str, Any]]:
+        term_id = (term_id or "").strip()
+        campus_id = (campus_id or "").strip()
+        if not term_id:
+            return []
+
+        def _s(x: Any) -> str:
+            return (str(x).strip() if x is not None else "")
+
+        def _course_code_str(cc: Any) -> str:
+            if isinstance(cc, list):
+                return _s(cc[0]) if cc else ""
+            return _s(cc)
+
+        def _hhmm(x: Any) -> str:
+            s = re.sub(r"[^\d]", "", _s(x))
+            return s.zfill(4) if s else ""
+
+        def _fmt_time(hhmm: str) -> str:
+            hhmm = _hhmm(hhmm)
+            return f"{hhmm[:2]}:{hhmm[2:]}" if len(hhmm) == 4 else ""
+
+        DAY_ORDER = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6}
+
+        ret_rows = await db[COL_CLASS_RETENTION].find(
+            {
+                "term_id": term_id,
+                "status": {"$regex": r"^dissolved$", "$options": "i"},
+            },
+            {"_id": 0, "term_id": 1, "course_id": 1, "section_id": 1, "status": 1, "enrolled": 1, "updated_at": 1},
+        ).to_list(None)
+        if not ret_rows:
+            return []
+
+        section_ids = sorted({_s(r.get("section_id")) for r in ret_rows if _s(r.get("section_id"))})
+        course_ids = sorted({_s(r.get("course_id")) for r in ret_rows if _s(r.get("course_id"))})
+
+        sec_map: Dict[str, Dict[str, Any]] = {}
+        if section_ids:
+            async for s in db[COL_SECTIONS].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "section_code": 1, "campus_id": 1, "enrolled": 1},
+            ):
+                sid = _s(s.get("section_id"))
+                if sid:
+                    sec_map[sid] = s
+            async for s in db[COL_SECTIONS_SUBMITTED].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "section_code": 1, "campus_id": 1, "enrolled": 1},
+            ):
+                sid = _s(s.get("section_id"))
+                if sid and sid not in sec_map:
+                    sec_map[sid] = s
+
+        filtered_rows = []
+        for r in ret_rows:
+            sid = _s(r.get("section_id"))
+            sec = sec_map.get(sid) or {}
+            row_campus = _s(sec.get("campus_id"))
+            if campus_id and row_campus and row_campus != campus_id:
+                continue
+            filtered_rows.append(r)
+
+        if not filtered_rows:
+            return []
+
+        section_ids = sorted({_s(r.get("section_id")) for r in filtered_rows if _s(r.get("section_id"))})
+        course_ids = sorted({_s(r.get("course_id")) for r in filtered_rows if _s(r.get("course_id"))})
+
+        course_map: Dict[str, Dict[str, str]] = {}
+        if course_ids:
+            async for c in db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ):
+                cid = _s(c.get("course_id"))
+                course_map[cid] = {
+                    "course_code": _course_code_str(c.get("course_code")),
+                    "course_title": _s(c.get("course_title")),
+                }
+
+        assign_map: Dict[str, Dict[str, str]] = {}
+        faculty_ids: set[str] = set()
+        user_ids: set[str] = set()
+        if section_ids:
+            async for a in db[COL_FAC_ASSIGN].find(
+                {"section_id": {"$in": section_ids}, "is_archived": {"$ne": True}},
+                {"_id": 0, "section_id": 1, "faculty_id": 1, "user_id": 1},
+            ):
+                sid = _s(a.get("section_id"))
+                if not sid or sid in assign_map:
+                    continue
+                assign_map[sid] = {"faculty_id": _s(a.get("faculty_id")), "user_id": _s(a.get("user_id"))}
+                if _s(a.get("faculty_id")):
+                    faculty_ids.add(_s(a.get("faculty_id")))
+                if _s(a.get("user_id")):
+                    user_ids.add(_s(a.get("user_id")))
+
+        fac_profile_map: Dict[str, Dict[str, Any]] = {}
+        if faculty_ids:
+            async for fp in db[COL_FAC_PROFILES].find(
+                {"faculty_id": {"$in": sorted(faculty_ids)}},
+                {"_id": 0, "faculty_id": 1, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+            ):
+                fid = _s(fp.get("faculty_id"))
+                fac_profile_map[fid] = fp
+                if _s(fp.get("user_id")):
+                    user_ids.add(_s(fp.get("user_id")))
+
+        user_map: Dict[str, Dict[str, Any]] = {}
+        if user_ids:
+            async for u in db[COL_USERS].find(
+                {"user_id": {"$in": sorted(user_ids)}},
+                {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+            ):
+                user_map[_s(u.get("user_id"))] = u
+
+        room_ids: set[str] = set()
+        sched_by_section: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        if section_ids:
+            async for sch in db[COL_SCHEDS].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
+            ):
+                sid = _s(sch.get("section_id"))
+                if not sid:
+                    continue
+                sched_by_section[sid].append(sch)
+                rid = _s(sch.get("room_id"))
+                if rid and rid.upper() != "ONLINE":
+                    room_ids.add(rid)
+
+        room_map: Dict[str, str] = {}
+        if room_ids:
+            async for rm in db[COL_ROOMS].find(
+                {"room_id": {"$in": sorted(room_ids)}},
+                {"_id": 0, "room_id": 1, "room_number": 1, "room_name": 1},
+            ):
+                rid = _s(rm.get("room_id"))
+                room_map[rid] = _s(rm.get("room_number")) or _s(rm.get("room_name")) or rid
+
+        def _caps_name(doc: Dict[str, Any]) -> str:
+            last = _s(doc.get("last_name"))
+            first = _s(doc.get("first_name"))
+            middle = _s(doc.get("middle_name"))
+            name = ", ".join([p for p in [last, first] if p]) if last or first else ""
+            if middle:
+                name = f"{name} {middle}".strip()
+            return name or "UNASSIGNED"
+
+        def _faculty_name_for_section(sid: str) -> str:
+            a = assign_map.get(sid) or {}
+            uid = _s(a.get("user_id"))
+            if uid and user_map.get(uid):
+                return _caps_name(user_map[uid])
+            fid = _s(a.get("faculty_id"))
+            fp = fac_profile_map.get(fid) if fid else None
+            if fp:
+                linked_uid = _s(fp.get("user_id"))
+                if linked_uid and user_map.get(linked_uid):
+                    return _caps_name(user_map[linked_uid])
+                return _caps_name(fp)
+            return "UNASSIGNED"
+
+        def _schedule_entries_for_section(sid: str) -> List[Dict[str, Any]]:
+            scheds = list(sched_by_section.get(sid) or [])
+            scheds.sort(key=lambda x: (DAY_ORDER.get(_s(x.get("day")), 99), _hhmm(x.get("start_time"))))
+            entries: List[Dict[str, Any]] = []
+            for sch in scheds[:2]:
+                rid = _s(sch.get("room_id"))
+                room_label = ""
+                if rid and rid.upper() != "ONLINE":
+                    room_label = room_map.get(rid, rid)
+                elif rid.upper() == "ONLINE":
+                    room_label = "TBA"
+                entries.append({
+                    "day": _s(sch.get("day")),
+                    "start_time": _hhmm(sch.get("start_time")),
+                    "end_time": _hhmm(sch.get("end_time")),
+                    "room_id": rid or None,
+                    "room_number": room_label or "TBA",
+                })
+            return entries
+
+        def _schedule_text_for_entries(entries: List[Dict[str, Any]]) -> str:
+            parts: List[str] = []
+            for sch in (entries or [])[:2]:
+                day = _s(sch.get("day"))
+                st = _fmt_time(_hhmm(sch.get("start_time")))
+                en = _fmt_time(_hhmm(sch.get("end_time")))
+                room_label = _s(sch.get("room_number"))
+                seg = " ".join([x for x in [day, f"{st}-{en}" if st and en else "", room_label if room_label and room_label != "TBA" else ""] if x])
+                if seg:
+                    parts.append(seg)
+            return " / ".join(parts)
+
+        out: List[Dict[str, Any]] = []
+        for r in filtered_rows:
+            sid = _s(r.get("section_id"))
+            cid = _s(r.get("course_id"))
+            sec = sec_map.get(sid) or {}
+            course = course_map.get(cid, {})
+            enrolled = r.get("enrolled")
+            if enrolled in (None, ""):
+                enrolled = sec.get("enrolled")
+            try:
+                enrolled = int(enrolled) if enrolled not in (None, "") else 0
+            except Exception:
+                enrolled = 0
+            schedule_entries = _schedule_entries_for_section(sid)
+            out.append({
+                "section_id": sid,
+                "course_id": cid,
+                "course_code": course.get("course_code", ""),
+                "course_title": course.get("course_title", ""),
+                "section_code": _s(sec.get("section_code")),
+                "faculty_name": _faculty_name_for_section(sid),
+                "schedule_entries": schedule_entries,
+                "slot1": schedule_entries[0] if len(schedule_entries) > 0 else None,
+                "slot2": schedule_entries[1] if len(schedule_entries) > 1 else None,
+                "schedule_text": _schedule_text_for_entries(schedule_entries),
+                "enrolled_students": enrolled,
+                "status": "Dissolved",
+                "updated_at": r.get("updated_at"),
+            })
+
+        out.sort(key=lambda x: (str(x.get("course_code") or ""), str(x.get("section_code") or "")))
+        return out
+
     if view == "specialclass":
         term = await _active_term_for_specialclass()
         term_id_sc = (term_id or "").strip() or (term or {}).get("term_id") or ""
@@ -5103,6 +5333,17 @@ async def get_course_offerings(
             "campus": campus,
             "term_id": term_id_sc,
             "term_label": term_label(term_for_label),
+            "rows": rows,
+        }
+
+    if view == "dissolved":
+        rows = await _dissolved_rows(term_id, campus_id)
+        return {
+            "ok": True,
+            "view": "dissolved",
+            "campus": campus,
+            "term_id": term_id,
+            "term_label": term_label(planning_term),
             "rows": rows,
         }
 

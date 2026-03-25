@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional, Tuple
+import base64
+import binascii
 import io
+from pathlib import Path
 import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from pymongo import ASCENDING
 
 from ..main import db
@@ -47,7 +50,7 @@ COL_PREEN_COUNT = "preenlistment_count"
 # conversation threads keyed by (term_id + section_id), where section_id == special_id.
 COL_LOAD_RFC = "faculty_rfc"
 
-OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected"]
+OM_ALLOWED_STATUSES = ["Forwarded To Department", "Approved", "Rejected", "Convert to Regular Class"]
 
 # ---------------- notifications (CHAIR) ----------------
 # These collections are intentionally named generically so they can be consumed by
@@ -62,6 +65,55 @@ def _now_utc() -> datetime:
 
 def _safe_str(x: Any) -> str:
     return str(x).strip() if x is not None else ""
+
+
+def _eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                return True
+        except Exception:
+            pass
+    return bool(_safe_str(doc.get("eaf_base64")))
+
+
+def _build_admin_eaf_view_url(router_prefix: str, special_id: str) -> str:
+    sid = _safe_str(special_id)
+    if not sid:
+        return ""
+    return f"/api/{router_prefix}/specialclass?action=eaf&specialId={sid}"
+
+
+def _inline_eaf_response(doc: Dict[str, Any]) -> Response:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                data = file_path.read_bytes()
+                return Response(
+                    content=data,
+                    media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or file_path.name}"'},
+                )
+        except Exception:
+            pass
+
+    b64 = _safe_str(doc.get("eaf_base64"))
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        return Response(
+            content=data,
+            media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or "eaf.pdf"}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
 
 
 def _scope_has_department(scope_val: Any, dept_id: str) -> bool:
@@ -1440,6 +1492,12 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         "units_remaining": r.get("units_remaining", ""),
         "graduating_after_term": bool(r.get("graduating_after_term", False)),
         "schedule_text": r.get("schedule_text", ""),
+        "has_eaf": _eaf_available(r),
+        "eaf_original_name": r.get("eaf_original_name") or "",
+        "eaf_content_type": r.get("eaf_content_type") or "",
+        "eaf_size": r.get("eaf_size") or 0,
+        "eaf_uploaded_at": r.get("eaf_uploaded_at"),
+        "eaf_view_url": _build_admin_eaf_view_url("om", r.get("special_id") or ""),
     }
 
 
@@ -2077,9 +2135,10 @@ def _build_pdf(rows: List[Dict[str, Any]], active_term: Dict[str, Any]) -> bytes
 # ---------------- routes (GET) ----------------
 @router.get("/specialclass")
 async def om_specialclass_get(
-    action: str = Query("options", description="options | schedulePresets"),
+    action: str = Query("options", description="options | schedulePresets | eaf"),
     term_id: Optional[str] = Query(None),
     course_id: Optional[str] = Query(None),
+    specialId: Optional[str] = Query(None),
 ):
     if action == "options":
         active = await _active_term()
@@ -2113,6 +2172,21 @@ async def om_specialclass_get(
             return {"ok": True, "presets": []}
         presets = await _schedule_presets(term_id, course_id)
         return {"ok": True, "presets": presets}
+
+    if action == "eaf":
+        sid = _safe_str(specialId)
+        if not sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+        match = {"special_id": sid}
+        if term_id:
+            match["term_id"] = term_id
+        doc = await db[COL_SPECIAL].find_one(
+            match,
+            {"_id": 0, "eaf_storage_path": 1, "eaf_original_name": 1, "eaf_content_type": 1, "eaf_base64": 1},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="EAF not found.")
+        return _inline_eaf_response(doc)
 
     raise HTTPException(status_code=400, detail="Unsupported action")
 

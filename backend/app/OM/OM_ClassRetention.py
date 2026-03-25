@@ -30,41 +30,67 @@ COL_PREEN_COUNT = "preenlistment_count"
 STATUS_OPTIONS = ["Approved", "Under Review", "Convert to Special Class", "Dissolved"]
 
 
-def _status_to_section_remarks_tag(status: str) -> str:
-    """Map Class Retention status → sections.remarks tag used by APO + OM screens.
+def _is_dissolved_status(status: str) -> bool:
+    return (status or "").strip().lower() == "dissolved"
 
-    We only tag Dissolved in sections.remarks so APO_CourseOfferings and OM_LoadAssignment can see it.
-    """
-    s = (status or "").strip().lower()
-    if s == "dissolved":
-        return "DISSOLVED"
-    return ""
+
+def _status_to_section_remarks_tag(status: str) -> str:
+    """Map Class Retention status → sections.remarks tag used by APO + OM screens."""
+    return "DISSOLVED" if _is_dissolved_status(status) else ""
+
+
+def _remove_section_remarks_tag(remarks: Any, tag: str) -> str:
+    raw = str(remarks or "").strip()
+    if not raw or not tag:
+        return raw
+    kept = [
+        part.strip()
+        for part in raw.split("|")
+        if part and part.strip() and part.strip().casefold() != tag.casefold()
+    ]
+    return " | ".join(kept)
 
 
 async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, now: datetime) -> None:
-    """Ensure sections.remarks contains a marker for Dissolved.
+    """Sync dissolved markers across both canonical and submitted section records.
 
-    Notes:
-    - APO_CourseOfferings reads section remarks from `sections.remarks` and exposes it as `section_remarks`.
-    - OM_LoadAssignment also preloads remarks from `sections.remarks` (not from `sections_submitted`).
+    OM Load Assignment reads primarily from ``sections_submitted`` while other screens
+    still consult ``sections``. To make Dissolved behave consistently for S / G / XC /
+    XX and any other section-code family, mirror the structured flags and remarks tag
+    into *both* collections keyed by section_id.
     """
     sid = (section_id or "").strip()
-    tag = _status_to_section_remarks_tag(status)
-    if not sid or not tag:
+    if not sid:
         return
 
-    sec = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "remarks": 1})
-    if not sec:
-        return
-    cur = str(sec.get("remarks") or "").strip()
-    if tag.lower() in cur.lower():
-        return
+    dissolved = _is_dissolved_status(status)
+    tag = "DISSOLVED"
+    normalized_status = str(status or "").strip()
 
-    new_remarks = tag if not cur else f"{cur} | {tag}"
-    await db[COL_SECTIONS].update_one(
-        {"section_id": sid},
-        {"$set": {"remarks": new_remarks, "updated_at": now}},
-    )
+    async def _sync_collection(col_name: str) -> None:
+        doc = await db[col_name].find_one(
+            {"section_id": sid},
+            {"_id": 0, "remarks": 1, "is_dissolved": 1, "class_retention_status": 1},
+        )
+        if not doc:
+            return
+
+        cur_remarks = str(doc.get("remarks") or "").strip()
+        cleaned = _remove_section_remarks_tag(cur_remarks, tag)
+        new_remarks = (f"{cleaned} | {tag}" if cleaned else tag) if dissolved else cleaned
+
+        set_doc = {
+            "updated_at": now,
+            "is_dissolved": dissolved,
+            "class_retention_status": normalized_status,
+        }
+        if new_remarks != cur_remarks:
+            set_doc["remarks"] = new_remarks
+
+        await db[col_name].update_one({"section_id": sid}, {"$set": set_doc})
+
+    await _sync_collection(COL_SECTIONS)
+    await _sync_collection(COL_SECTIONS_SUBMITTED)
 
 
 async def _broadcast_dissolved_to_students(*, term_id: str, course_id: str, section_id: str, enrolled: Any = None) -> None:
@@ -1237,7 +1263,16 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             {"$set": {"status": new_status, "updated_at": now}},
         )
 
-        # If status is Dissolved, write marker + broadcast to all students (best-effort).
+        # Always sync the canonical section state so dissolved rows can be hidden
+        # from Load Assignment for *any* section code (S/G/XX/XC/etc.) while the
+        # Class Retention record itself remains visible/restorable.
+        if prev_rows:
+            for r in prev_rows:
+                section_id = str((r or {}).get("section_id") or "").strip()
+                if section_id:
+                    await _ensure_section_remarks_tag(section_id, new_status, now)
+
+        # If status transitioned to Dissolved, broadcast notifications (best-effort).
         if str(new_status or "").strip().lower() == "dissolved" and prev_rows:
             for r in prev_rows:
                 prev_s = str((r or {}).get("status") or "").strip()
@@ -1247,7 +1282,6 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                 course_id = str((r or {}).get("course_id") or "").strip()
                 section_id = str((r or {}).get("section_id") or "").strip()
                 if section_id:
-                    await _ensure_section_remarks_tag(section_id, "Dissolved", now)
                     await _broadcast_dissolved_to_students(
                         term_id=term_id,
                         course_id=course_id,

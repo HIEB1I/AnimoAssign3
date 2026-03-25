@@ -86,6 +86,7 @@ COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
+COL_CLASS_RETENTION = "class_retention"
 
 # OM <-> Faculty proposal + RFC collections
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
@@ -1673,25 +1674,65 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
             # Best-effort only; keep existing behavior.
             docs = []
 
-    # Preload section remarks from the canonical `sections` collection.
-    # Remarks are stored in sections.remarks (not in sections_submitted).
+    # Preload remarks + dissolved flags from every relevant source.
+    # OM Load Assignment primarily renders from `sections_submitted`, while
+    # Class Retention updates the canonical `sections` row. For robustness,
+    # union dissolved state from:
+    #   1) sections
+    #   2) sections_submitted
+    #   3) class_retention rows with status=Dissolved
     section_ids_for_remarks = [
         (d.get("section_id") or "").strip() for d in docs if (d.get("section_id") or "").strip()
     ]
     remarks_by_section_id: dict[str, str] = {}
+    dissolved_section_ids: set[str] = set()
+
+    def _remarks_has_dissolved_tag(raw_remarks: Any) -> bool:
+        return any(
+            part.strip().casefold() == "dissolved"
+            for part in str(raw_remarks or "").split("|")
+            if part and part.strip()
+        )
+
+    def _doc_marks_dissolved(s: Dict[str, Any]) -> bool:
+        return bool(s.get("is_dissolved"))             or str(s.get("class_retention_status") or "").strip().lower() == "dissolved"             or _remarks_has_dissolved_tag(s.get("remarks"))
+
     if section_ids_for_remarks:
         try:
-            sec_docs = await db["sections"].find(
+            sec_docs = await db[COL_SECTIONS].find(
                 {"section_id": {"$in": section_ids_for_remarks}},
-                {"_id": 0, "section_id": 1, "remarks": 1},
+                {"_id": 0, "section_id": 1, "remarks": 1, "is_dissolved": 1, "class_retention_status": 1},
             ).to_list(None)
-            remarks_by_section_id = {
-                (s.get("section_id") or "").strip(): str(s.get("remarks") or "")
-                for s in (sec_docs or [])
-                if (s.get("section_id") or "").strip()
-            }
+            sub_docs = await db[COL_SECTIONS_SUBMITTED].find(
+                {"section_id": {"$in": section_ids_for_remarks}},
+                {"_id": 0, "section_id": 1, "remarks": 1, "is_dissolved": 1, "class_retention_status": 1},
+            ).to_list(None)
+            cr_docs = await db[COL_CLASS_RETENTION].find(
+                {
+                    "term_id": term_id,
+                    "section_id": {"$in": section_ids_for_remarks},
+                    "status": {"$regex": r"^dissolved$", "$options": "i"},
+                },
+                {"_id": 0, "section_id": 1},
+            ).to_list(None)
+
+            for source_docs in (sec_docs or [], sub_docs or []):
+                for s in source_docs:
+                    sid = (s.get("section_id") or "").strip()
+                    if not sid:
+                        continue
+                    if sid not in remarks_by_section_id or not remarks_by_section_id[sid].strip():
+                        remarks_by_section_id[sid] = str(s.get("remarks") or "")
+                    if _doc_marks_dissolved(s):
+                        dissolved_section_ids.add(sid)
+
+            for r in (cr_docs or []):
+                sid = (r.get("section_id") or "").strip()
+                if sid:
+                    dissolved_section_ids.add(sid)
         except Exception:
             remarks_by_section_id = {}
+            dissolved_section_ids = set()
 
     # --- Preload rooms into lookups (number + capacity) so OM table can reflect
     #     APO room/room-capacity changes without requiring manual edits. ---
@@ -1752,6 +1793,8 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
     for d in docs:
         sid = d.get("section_id") or ""
         if not sid:
+            continue
+        if sid in dissolved_section_ids:
             continue
 
         course_doc = (d.get("course") or {})
@@ -8977,9 +9020,14 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
         t = (ctx.courses.get(cid) or {}).get("type") or (ctx.courses.get(cid) or {}).get("type_of_course")
         return str(t).strip().upper() == "SHS"
 
-    # Build a dict from section_id -> (faculty_id, course_id) using the latest compute run
-    sugg = await compute_load_recommendations(term_id=term_id, db=db, department_id=department_id, protected_section_ids=locked_section_ids)
-    by_sid = {a["section_id"]: a for a in (sugg.get("assignments") or [])}
+    # Persist exactly what the OM grid submitted. Re-running auto-assign here can
+    # drift from the approved rows and also required variables that are not in
+    # scope inside this persister. Use the incoming rows as the source of truth.
+    by_sid = {
+        str(r.get("section_id") or r.get("id") or "").strip(): r
+        for r in rows
+        if str(r.get("section_id") or r.get("id") or "").strip()
+    }
 
     # --- NEW: preflight used slots to prevent duplicates across the batch ---
     used: dict[str, set[tuple[str,str,str]]] = {}
@@ -9003,7 +9051,7 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
 
         # Prefer the faculty manually chosen in the row; fall back to the latest compute suggestion.
         fid = r.get("faculty_id") or a.get("faculty_id")
-        cid = a.get("course_id") or section_to_course.get(sid)
+        cid = r.get("course_id") or a.get("course_id") or section_to_course.get(sid)
 
         # --- Allow SHS fallback: use the row faculty_id even if missing in compute output ---
         if not fid and _course_is_shs(cid):

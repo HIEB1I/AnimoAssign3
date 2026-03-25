@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info } from "lucide-react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import { getSessionUserId } from "../../lib/session";
@@ -511,6 +511,8 @@ const STATUS_PILL: Record<string, string> = {
   "Forwarded To Department": "bg-yellow-100 text-yellow-800",
   Approved: "bg-green-100 text-green-800",
   Rejected: "bg-red-100 text-red-800",
+  "Convert to Regular Class": "bg-blue-100 text-blue-800",
+  Mixed: "bg-slate-100 text-slate-700",
 };
 function pillClass(status?: string) {
   if (!status) return "bg-gray-100 text-gray-600";
@@ -533,6 +535,96 @@ function DetailRow({ label, value }: { label: string; value: any }) {
       <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">{shown}</div>
     </div>
   );
+}
+
+
+
+type SpecialClassGroupStudent = {
+  special_id: string;
+  student_name: string;
+  student_number?: string | number;
+  faculty_id?: string | null;
+  faculty_name?: string;
+  rfc_needs_chair?: boolean;
+  term_id: string;
+};
+
+type SpecialClassGroupRow = Partial<ChairSpecialClassRow> & {
+  group_key: string;
+  primary_special_id: string;
+  special_ids: string[];
+  count: number;
+  students: SpecialClassGroupStudent[];
+};
+
+function buildGroupedRows(input: ChairSpecialClassRow[]): SpecialClassGroupRow[] {
+  const groups = new Map<string, ChairSpecialClassRow[]>();
+  input.forEach((row) => {
+    const key = String(row.course_id || `${row.course_code || ''}|${row.course_title || ''}`).trim();
+    if (!key) return;
+    const arr = groups.get(key) || [];
+    arr.push(row);
+    groups.set(key, arr);
+  });
+
+  const uniq = (vals: Array<any>) => Array.from(new Set(vals.map((v) => String(v ?? '').trim())));
+  const consensusText = (rows: ChairSpecialClassRow[], pick: (r: ChairSpecialClassRow) => any, mixedLabel = 'Multiple') => {
+    const vals = uniq(rows.map(pick));
+    if (vals.length <= 1) return vals[0] || '';
+    return mixedLabel;
+  };
+  const consensusNullable = (rows: ChairSpecialClassRow[], pick: (r: ChairSpecialClassRow) => any) => {
+    const vals = uniq(rows.map(pick));
+    return vals.length <= 1 ? (vals[0] || null) : null;
+  };
+  const consensusSchedule = (rows: ChairSpecialClassRow[], key: keyof ChairSpecialClassRow) => {
+    const vals = uniq(rows.map((r) => (r as any)[key]));
+    return vals.length <= 1 ? (vals[0] || '') : '';
+  };
+
+  return Array.from(groups.entries())
+    .map(([groupKey, items]) => {
+      const rows = [...items].sort((a, b) => String(a.student_name || '').localeCompare(String(b.student_name || '')));
+      const first = rows[0];
+      const statuses = uniq(rows.map((r) => r.status));
+      const status = statuses.length <= 1 ? (statuses[0] || '') : 'Mixed';
+      const remarks = consensusText(rows, (r) => r.remarks, '');
+      const facultyId = consensusNullable(rows, (r) => r.faculty_id) as string | null;
+      return {
+        ...first,
+        group_key: groupKey,
+        primary_special_id: String(first.special_id || ''),
+        special_ids: rows.map((r) => String(r.special_id || '')).filter(Boolean),
+        count: rows.length,
+        students: rows.map((r) => ({
+          special_id: String(r.special_id || ''),
+          student_name: String(r.student_name || ''),
+          student_number: r.student_number,
+          faculty_id: r.faculty_id ?? null,
+          faculty_name: r.faculty_name,
+          rfc_needs_chair: Boolean((r as any).rfc_needs_chair),
+          term_id: String(r.term_id || ''),
+        })),
+        status,
+        remarks,
+        faculty_id: facultyId,
+        faculty_name: facultyId ? consensusText(rows, (r) => r.faculty_name, 'Multiple') : (consensusText(rows, (r) => r.faculty_name, '') || 'UNASSIGNED'),
+        section_id: consensusNullable(rows, (r) => r.section_id) as string | null,
+        section_code: consensusText(rows, (r) => r.section_code, 'Multiple'),
+        day1: consensusSchedule(rows, 'day1') as any,
+        begin1: consensusSchedule(rows, 'begin1'),
+        end1: consensusSchedule(rows, 'end1'),
+        day2: consensusSchedule(rows, 'day2') as any,
+        begin2: consensusSchedule(rows, 'begin2'),
+        end2: consensusSchedule(rows, 'end2'),
+        room_id1: consensusNullable(rows, (r) => r.room_id1),
+        room1: consensusText(rows, (r) => r.room1, 'Multiple'),
+        room_id2: consensusNullable(rows, (r) => r.room_id2),
+        room2: consensusText(rows, (r) => r.room2, 'Multiple'),
+        rfc_needs_chair: rows.some((r) => Boolean((r as any).rfc_needs_chair)),
+      } as SpecialClassGroupRow;
+    })
+    .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
 }
 
 export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
@@ -569,6 +661,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
   // edit
   const [editId, setEditId] = useState<string | null>(null);
+  const [editTargetIds, setEditTargetIds] = useState<string[]>([]);
   const [draft, setDraft] = useState<Partial<ChairSpecialClassRow>>({});
   const [facultyInput, setFacultyInput] = useState<string>("");
 
@@ -744,15 +837,6 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
       setRows(incoming);
-
-      setSelectedIds((prev) => {
-        const allowed = new Set(incoming.map((r) => r.special_id));
-        const next: Record<string, boolean> = {};
-        Object.entries(prev).forEach(([id, v]) => {
-          if (allowed.has(id) && v) next[id] = true;
-        });
-        return next;
-      });
     } catch (e: any) {
       setRows([]);
       setErrKind("error");
@@ -767,17 +851,19 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, q]);
 
+  const groupedRows = useMemo(() => buildGroupedRows(rows), [rows]);
+
   const selectedList = useMemo(
-    () => rows.filter((r) => !!selectedIds[r.special_id]).map((r) => r.special_id),
-    [rows, selectedIds]
+    () => groupedRows.filter((r) => !!selectedIds[r.group_key]).flatMap((r) => r.special_ids),
+    [groupedRows, selectedIds]
   );
 
   const toggleAllVisible = (checked: boolean) => {
     setSelectedIds((prev) => {
       const next = { ...prev };
-      rows.forEach((r) => {
-        if (checked) next[r.special_id] = true;
-        else delete next[r.special_id];
+      groupedRows.forEach((r) => {
+        if (checked) next[r.group_key] = true;
+        else delete next[r.group_key];
       });
       return next;
     });
@@ -1028,17 +1114,18 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     setFacultyInput(p.faculty_name && p.faculty_name !== "UNASSIGNED" ? p.faculty_name : "");
   };
 
-  const beginEdit = async (row: ChairSpecialClassRow) => {
-    setEditId(row.special_id);
+  const beginEdit = async (row: SpecialClassGroupRow) => {
+    setEditId(row.group_key);
+    setEditTargetIds(row.special_ids || []);
     setDidClearAll(false);
 
     setDraft({
       course_id: row.course_id,
-      status: row.status,
+      status: row.status === "Mixed" ? "" : row.status,
       remarks: row.remarks || "",
       faculty_id: row.faculty_id || null,
       section_id: row.section_id || null,
-      section_code: row.section_code || "",
+      section_code: row.section_code === "Multiple" ? "" : row.section_code || "",
 
       day1: (row.day1 || "") as any,
       begin1: row.begin1 || "",
@@ -1049,10 +1136,10 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     });
 
     const facName = (row.faculty_name || "").toString().trim();
-    setFacultyInput(facName === "UNASSIGNED" ? "" : facName);
+    setFacultyInput(facName === "UNASSIGNED" || facName === "Multiple" ? "" : facName);
 
     try {
-      const res = await getChairSC_SchedulePresets(row.course_id);
+      const res = await getChairSC_SchedulePresets(row.course_id || "");
       setPresets(res.presets || []);
       const match = (res.presets || []).find((p) => p.section_id === row.section_id);
 
@@ -1061,7 +1148,6 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
       if (rowHasNoSchedule) {
         setPresetChoice("CLEAR_SCHEDULE");
-        // Preserve cleared schedule if user saves remarks/status only
         setClearMode("schedule");
       } else {
         setPresetChoice(match ? match.schedule_id : "CUSTOM");
@@ -1108,6 +1194,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
   const cancelEdit = () => {
     setEditId(null);
+    setEditTargetIds([]);
     setDraft({});
     setPresets([]);
     setPresetChoice("CUSTOM");
@@ -1117,7 +1204,7 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
   };
 
   const saveEdit = async () => {
-    if (!editId) return;
+    if (!editId || editTargetIds.length === 0) return;
 
     try {
       setLoading(true);
@@ -1173,7 +1260,9 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
         }
       }
 
-      await updateChairSC(editId, payload, getSessionUserId());
+      for (const specialId of editTargetIds) {
+        await updateChairSC(specialId, payload, getSessionUserId());
+      }
 
       setEditId(null);
       setDraft({});
@@ -1190,14 +1279,14 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     }
   };
 
-  const openView = async (row: ChairSpecialClassRow) => {
+  const openView = async (specialId: string) => {
     setViewOpen(true);
     setViewLoading(true);
     setViewErr("");
     setViewData(null);
 
     try {
-      const res = await getChairSC_Detail(row.special_id);
+      const res = await getChairSC_Detail(specialId);
       if (!res.ok) throw new Error("Failed to load application detail.");
       setViewData(res.row);
     } catch (e: any) {
@@ -1214,7 +1303,12 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
     setViewLoading(false);
   };
 
-  const allVisibleSelected = rows.length > 0 && rows.every((r) => !!selectedIds[r.special_id]);
+  const openEaf = (url?: string) => {
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const allVisibleSelected = groupedRows.length > 0 && groupedRows.every((r) => !!selectedIds[r.group_key]);
 
   return (
     <main className="w-full px-8 py-8">
@@ -1323,8 +1417,9 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
                   />
                 </th>
 
-                <th className="text-left px-4 py-2 whitespace-nowrap">Student</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Course</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Course Code &amp; Title</th>
+                <th className="text-center px-4 py-2 whitespace-nowrap">Count</th>
+                <th className="text-left px-4 py-2 whitespace-nowrap">Students</th>
                 <th className="text-center px-4 py-2 whitespace-nowrap">Section</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Faculty</th>
 
@@ -1334,26 +1429,27 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
 
                 <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
                 <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-                <th className="w-20 px-4 py-2 text-center whitespace-nowrap"> </th>
+                <th className="w-12 px-2 py-2 text-center whitespace-nowrap"></th>
+                <th className="w-12 px-2 py-2 text-center whitespace-nowrap"></th>
               </tr>
             </thead>
 
             <tbody className="divide-y">
               {loading ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={11}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     Loading…
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={11}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     No results
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => {
-                  const editing = editId === r.special_id;
+                groupedRows.map((r) => {
+                  const editing = editId === r.group_key;
                   const isCustom = presetChoice === "CUSTOM";
                   const canEditSectionFaculty = isCustom || presetChoice === "CLEAR_SCHEDULE";
 
@@ -1362,21 +1458,38 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
                       <td className="px-3 py-3">
                         <input
                           type="checkbox"
-                          checked={!!selectedIds[r.special_id]}
-                          onChange={(e) => toggleOne(r.special_id, e.target.checked)}
+                          checked={!!selectedIds[r.group_key]}
+                          onChange={(e) => toggleOne(r.group_key, e.target.checked)}
                           className="h-4 w-4 accent-emerald-600"
                           disabled={loading}
                         />
                       </td>
 
                       <td className="px-4 py-3 whitespace-nowrap">
-                        <div className="font-semibold">{r.student_name || "—"}</div>
-                        <div className="text-xs text-gray-500">{r.student_number || "—"}</div>
-                      </td>
-
-                      <td className="px-4 py-3 whitespace-nowrap">
                         <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
                         <div className="text-xs text-gray-500">{r.course_title || ""}</div>
+                      </td>
+
+                      <td className="px-4 py-3 text-center align-top">
+                        <span className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                          {r.count}
+                        </span>
+                      </td>
+
+                      <td className="px-4 py-3 align-top">
+                        <div className="space-y-1.5 min-w-[220px]">
+                          {r.students.map((student) => (
+                            <button
+                              key={student.special_id}
+                              type="button"
+                              onClick={() => openView(student.special_id)}
+                              className="block text-left text-sm font-medium text-emerald-700 hover:text-emerald-800 hover:underline"
+                              title="View application"
+                            >
+                              {student.student_name || "—"}
+                            </button>
+                          ))}
+                        </div>
                       </td>
 
                       <td className="px-4 py-3">
@@ -1667,85 +1780,77 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
                         )}
                       </td>
 
-                      <td className="px-2 py-3 whitespace-nowrap">
-  <div className="flex items-center justify-center gap-1">
-    {editing ? (
-      <>
-        <button
-          onClick={saveEdit}
-          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-          title="Save"
-          aria-label="Save"
-        >
-          <Check className="h-4 w-4" />
-        </button>
+                      <td className="px-2 py-3 whitespace-nowrap text-center">
+                        {!hideMessageIcon ? (() => {
+                          const messageTarget = r.students.find((student) => !!student.faculty_id) || null;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!messageTarget) return;
+                                setConv({
+                                  open: true,
+                                  termId: String(messageTarget.term_id || r.term_id || ""),
+                                  facultyId: messageTarget.faculty_id ?? r.faculty_id ?? null,
+                                  facultyName: messageTarget.faculty_name || r.faculty_name || "UNASSIGNED",
+                                  sectionId: messageTarget.special_id,
+                                });
+                              }}
+                              disabled={!messageTarget || editing}
+                              className={cls(
+                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+                                (!messageTarget || editing) && "opacity-50 cursor-not-allowed hover:bg-transparent"
+                              )}
+                              title={messageTarget ? "Message" : "Assign a faculty first to open conversation"}
+                              aria-label="Message"
+                            >
+                              <MessageSquareText className="h-4 w-4" />
+                              {Boolean((r as any)?.rfc_needs_chair) && (
+                                <span
+                                  className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
+                                  aria-label="New message"
+                                  title="New message"
+                                />
+                              )}
+                            </button>
+                          );
+                        })() : null}
+                      </td>
 
-        <button
-          type="button"
-          onClick={cancelEdit}
-          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-          title="Cancel"
-          aria-label="Cancel"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </>
-    ) : (
-      <>
-        {!hideMessageIcon && (
-        <button
-          type="button"
-          onClick={() => {
-            setConv({
-              open: true,
-              termId: r.term_id,
-              facultyId: r.faculty_id ?? null,
-              facultyName: r.faculty_name || "UNASSIGNED",
-              sectionId: r.special_id,
-            });
-          }}
-          disabled={!r.faculty_id}
-          className={cls(
-            "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
-            !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
-          )}
-          title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
-          aria-label="Message"
-        >
-          <MessageSquareText className="h-4 w-4" />
-          {Boolean((r as any)?.rfc_needs_om) && (
-            <span
-              className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
-              aria-label="New message"
-              title="New message"
-            />
-          )}
-        </button>
-        )}
+                      <td className="px-2 py-3 whitespace-nowrap text-center">
+                        {editing ? (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              onClick={saveEdit}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+                              title="Save"
+                              aria-label="Save"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
 
-        <button
-          type="button"
-          onClick={() => openView(r)}
-          className="inline-flex items-center justify-center p-1 rounded-md text-gray-700 hover:bg-gray-100"
-          title="View Application"
-          aria-label="View Application"
-        >
-          <Eye className="h-4 w-4" />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => beginEdit(r)}
-          className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
-          title="Edit"
-          aria-label="Edit"
-        >
-          <Edit className="h-4 w-4" />
-        </button>
-      </>
-    )}
-  </div>
-</td>
+                            <button
+                              type="button"
+                              onClick={cancelEdit}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                              title="Cancel"
+                              aria-label="Cancel"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => beginEdit(r)}
+                            className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
+                            title="Edit"
+                            aria-label="Edit"
+                          >
+                            <Edit className="h-4 w-4" />
+                          </button>
+                        )}
+                      </td>
                     </tr>
                   );
                 })
@@ -1791,26 +1896,12 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
                 <div className="space-y-5">
                   <div className="rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Student</div>
+                      <div className="text-sm font-semibold text-gray-900">Student Details</div>
                     </div>
                     <div className="px-4">
-                      <DetailRow label="Student Name" value={viewData.student_name} />
-                      <DetailRow label="Student Number" value={viewData.student_number} />
+                      <DetailRow label="Name" value={viewData.student_name} />
+                      <DetailRow label="ID Number" value={viewData.student_number} />
                       <DetailRow label="Program" value={viewData.program_code} />
-                      <DetailRow label="Department" value={viewData.department_name || viewData.course_department} />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Course</div>
-                    </div>
-                    <div className="px-4">
-                      <DetailRow label="Course Code" value={viewData.course_code} />
-                      <DetailRow label="Course Title" value={viewData.course_title} />
-                      <DetailRow label="Course Units" value={viewData.course_units} />
-                      <DetailRow label="Units Remaining" value={viewData.units_remaining} />
-                      <DetailRow label="Graduating After Term" value={viewData.graduating_after_term} />
                     </div>
                   </div>
 
@@ -1819,52 +1910,42 @@ export default function CHAIR_SpecialClass({ hideMessageIcon = false }: { hideMe
                       <div className="text-sm font-semibold text-gray-900">Request</div>
                     </div>
                     <div className="px-4">
-                      <DetailRow label="Reason" value={viewData.reason} />
-                      <DetailRow label="Reason (Other)" value={viewData.reason_other} />
+                      <DetailRow label="Graduating After Term" value={viewData.graduating_after_term} />
+                      <DetailRow
+                        label="Reason"
+                        value={viewData.reason_other ? `${viewData.reason}${viewData.reason ? " — " : ""}${viewData.reason_other}` : viewData.reason}
+                      />
                     </div>
                   </div>
 
                   <div className="rounded-xl border border-gray-200 overflow-hidden">
                     <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Schedule</div>
+                      <div className="text-sm font-semibold text-gray-900">EAF Submission</div>
                     </div>
-                    <div className="px-4">
-                      <DetailRow label="Section" value={viewData.section_code || "—"} />
-
-                      <DetailRow
-                        label="Schedule 1"
-                        value={
-                          viewData.day1 && viewData.begin1 && viewData.end1
-                            ? `${viewData.day1} ${prettyHHMM(viewData.begin1)}–${prettyHHMM(viewData.end1)}`
-                            : "—"
-                        }
-                      />
-                      <DetailRow label="Room 1" value={roomLabel(viewData, 1)} />
-
-                      <DetailRow
-                        label="Schedule 2"
-                        value={
-                          viewData.day2 && viewData.begin2 && viewData.end2
-                            ? `${viewData.day2} ${prettyHHMM(viewData.begin2)}–${prettyHHMM(viewData.end2)}`
-                            : "—"
-                        }
-                      />
-                      <DetailRow label="Room 2" value={roomLabel(viewData, 2)} />
-
-                      <DetailRow label="Section ID" value={viewData.section_id} />
-                      <DetailRow label="Faculty" value={viewData.faculty_name || "UNASSIGNED"} />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Status</div>
-                    </div>
-                    <div className="px-4">
-                      <DetailRow label="Status" value={viewData.status} />
-                      <DetailRow label="Remarks" value={viewData.remarks} />
-                      <DetailRow label="Submitted At" value={formatDate(viewData.submitted_at)} />
-                      <DetailRow label="Updated At" value={formatDate(viewData.updated_at)} />
+                    <div className="px-4 py-4 space-y-3">
+                      {viewData.has_eaf && viewData.eaf_view_url ? (
+                        <>
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+                            <div className="text-sm font-medium text-gray-900">{viewData.eaf_original_name || "Uploaded EAF"}</div>
+                            <div className="mt-1 text-xs text-gray-500">
+                              Uploaded: {formatDate(viewData.eaf_uploaded_at)}
+                            </div>
+                          </div>
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => openEaf(viewData.eaf_view_url)}
+                              className="inline-flex items-center rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800"
+                            >
+                              Open PDF
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-500">
+                          No EAF submission found.
+                        </div>
+                      )}
                     </div>
                   </div>
                 </div>

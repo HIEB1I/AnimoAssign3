@@ -785,7 +785,7 @@ export type ApiConflict = {
 type GateError = { code?: "NEEDS_IMPORT" | "APPROVAL_REQUIRED"; message?: string };
 
 export type OfferingsQuery = {
-  view?: "offerings" | "curriculum" | "specialclass"; 
+  view?: "offerings" | "curriculum" | "specialclass" | "dissolved"; 
   campus?: "MANILA" | "LAGUNA";
   level?: string;
   department_id?: string;
@@ -1593,6 +1593,46 @@ export async function updateApoSpecialClassRow(
   return post(url, payload as any);
 }
 
+
+
+export type DissolvedClassRow = {
+  section_id: string;
+  section_code?: string;
+  course_id?: string;
+  course_code?: string;
+  course_title?: string;
+  units?: string | number;
+  enrollment_cap?: number | null;
+  remarks?: string | null;
+  campus_id?: string;
+  faculty_id?: string;
+  faculty_name?: string;
+  schedule_entries?: SpecialClassSlot[];
+  slot1?: SpecialClassSlot | null;
+  slot2?: SpecialClassSlot | null;
+  [k: string]: any;
+};
+
+export type DissolvedClassResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: DissolvedClassRow[];
+};
+
+export async function getApoDissolvedClasses(
+  userId: string,
+  opts: { term_id?: string; term_mode?: "active" | "planning" } = {}
+): Promise<DissolvedClassResponse> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    view: "dissolved",
+    term_id: opts.term_id,
+    term_mode: opts.term_mode ?? "active",
+  })}`;
+
+  return get<any>(url);
+}
 
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
@@ -2710,6 +2750,12 @@ export type OMSpecialClassRow = {
 export type OMSpecialClassDetail = OMSpecialClassRow & {
   department_id?: string;
   department_name?: string;
+  has_eaf?: boolean;
+  eaf_original_name?: string;
+  eaf_content_type?: string;
+  eaf_size?: number;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
 
   course_units?: number | string;
   units_remaining?: number | string;

@@ -5242,13 +5242,13 @@ const inferOmCampusId = useCallback((): string => {
     // They must NOT appear in the OM Load Assignment table.
     // Backend also filters these out, but we keep a frontend safeguard so legacy data
     // (or future schema changes) won't accidentally surface them here.
-    const isSpecialClassRow = (r: any) => {
+    const isExcludedRow = (r: any) => {
       const remarks = String(r?.remarks ?? "").trim();
-      return /^SPECIAL\s*CLASS$/i.test(remarks);
+      return /^(SPECIAL\s*CLASS|DISSOLVED)$/i.test(remarks);
     };
 
     const filteredServerRows: Row[] = serverRows.filter(
-      (r: any) => !isSpecialClassRow(r)
+      (r: any) => !isExcludedRow(r)
     );
 
     const normalizedRows: Row[] = filteredServerRows.map((r: any) => ({
@@ -5971,7 +5971,7 @@ const chairRecommendationPlantillaRows = useMemo<ChairPlantillaRow[]>(() => {
     const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
     if (!facultyName) return false;
     if (/^(tba|unassigned|-|—)$/i.test(facultyName)) return false;
-    if (/^SPECIAL\s*CLASS$/i.test(remarks)) return false;
+    if (/^(SPECIAL\s*CLASS|DISSOLVED)$/i.test(remarks)) return false;
     return isRowAssigned(r);
   });
 
