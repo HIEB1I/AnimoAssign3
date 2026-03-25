@@ -987,7 +987,8 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           room: (() => {
             const base = (room && String(room).trim()) ? String(room).trim() : "TBA";
             const isSpecial = Boolean((it as any)?.is_special_class);
-            if (isSpecial && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
+            const isConvertedFromSpecial = Boolean((it as any)?.converted_from_special);
+            if ((isSpecial || isConvertedFromSpecial) && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
             return base;
           })(),
           time: time,
@@ -1136,6 +1137,10 @@ const LIST_HEADERS = [
 
 // Special Class tab columns: keep details but group schedule fields so rows fit without horizontal scrolling.
 const SPECIAL_TABLE_HEADERS = ["Student", "Reason", "Course Code & Title", "Section", "Day", "Time", "Room", "Mode", "Syllabus", "Action"];
+
+const TABLE_HEADER_BASE = "h-12 px-4 text-sm font-semibold align-middle";
+const TABLE_HEADER_CENTER = `${TABLE_HEADER_BASE} text-center`;
+const TABLE_HEADER_LEFT = `${TABLE_HEADER_BASE} text-left`;
 
 function splitBeginEnd(time?: string): { begin: string; end: string } {
   const raw = (time || "").trim();
@@ -2226,14 +2231,14 @@ const scheduleFinalLabel = (() => {
           <div className="overflow-x-auto">
             <div className="min-w-[860px] rounded-xl border border-neutral-300">
               <div className="grid grid-cols-[140px_repeat(6,1fr)] bg-emerald-800 text-white">
-                <div className="flex items-center justify-center px-3 py-2 text-sm font-semibold">
+                <div className={cls(TABLE_HEADER_CENTER, "flex items-center justify-center")}>
                   Time
                 </div>
                 {/* --- MODIFIED: Do not render "TBA" column header --- */}
                 {DAY_ORDER.filter(d => d !== "TBA").map((d) => (
                   <div
                     key={d}
-                    className="flex items-center justify-center px-3 py-2 text-sm font-semibold"
+                    className={cls(TABLE_HEADER_CENTER, "flex items-center justify-center")}
                   >
                     {d}
                   </div>
@@ -2322,9 +2327,9 @@ const scheduleFinalLabel = (() => {
             <col className="w-[9%]" />
             <col className="w-[9%]" />
           </colgroup>
-          <thead className="bg-emerald-50 text-emerald-900">
+          <thead className="bg-emerald-800 text-white">
             <tr className="[&>th]:border-b [&>th]:border-gray-200">
-              <th className="px-3 py-2 text-center">
+              <th className={TABLE_HEADER_CENTER}>
                 <input
                   type="checkbox"
                   className="h-4 w-4 rounded border-gray-300 accent-emerald-600"
@@ -2349,8 +2354,8 @@ const scheduleFinalLabel = (() => {
                 <th
                   key={h}
                   className={cls(
-                    "px-3 py-2 text-xs font-semibold whitespace-normal break-words",
-                    (h === "Course Code & Title" || h === "Student" || h === "Reason") ? "text-left" : "text-center"
+                    (h === "Course Code & Title" || h === "Student" || h === "Reason") ? TABLE_HEADER_LEFT : TABLE_HEADER_CENTER,
+                    "whitespace-normal break-words"
                   )}
                 >
                   {h}
@@ -2644,7 +2649,7 @@ const scheduleFinalLabel = (() => {
     {/* New List View */}
           <div className="space-y-6">
             <div className="overflow-x-auto">
-              <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
+              <div className=" border border-gray-200 overflow-hidden bg-white">
                 <table className="w-full table-fixed text-[13px]">
                 <colgroup>
                   <col className="w-[34%]" />
@@ -2658,7 +2663,7 @@ const scheduleFinalLabel = (() => {
                   <thead className="bg-emerald-800 text-white">
                     <tr className="[&>th]:border-b [&>th]:border-emerald-700">
                       {LIST_HEADERS.map((h) => (
-                        <th key={h} className={cls("px-4 py-3 font-semibold", h === "Course Code & Title" ? "text-left" : "text-center")}>
+                        <th key={h} className={h === "Course Code & Title" ? TABLE_HEADER_LEFT : TABLE_HEADER_CENTER}>
                           {h}
                         </th>
                       ))}
@@ -2676,19 +2681,20 @@ const scheduleFinalLabel = (() => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
                         const isSpecial = Boolean((it as any)?.is_special_class);
+                        const isConvertedFromSpecial = Boolean((it as any)?.converted_from_special);
                         const isServiced = !isSpecial && Boolean((it as any)?.is_serviced);
 
-                        // Days: for special classes show initial-only (M/T/W/H/F/S/U) to match regular.
+                        // Days: converted Special Classes should also use initials in List view.
                         const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
                         const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
-                        const d1 = d1Raw ? ((isSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
-                        const d2 = d2Raw ? ((isSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
+                        const d1 = d1Raw ? ((isSpecial || isConvertedFromSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
+                        const d2 = d2Raw ? ((isSpecial || isConvertedFromSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
 
-                        // Rooms: for special classes show TBA instead of ONLINE.
-                        const room1Display = isSpecial
+                        // Rooms: converted Special Classes should also keep TBA instead of ONLINE.
+                        const room1Display = (isSpecial || isConvertedFromSpecial)
                           ? normalizeRoomDisplayForSpecial((it as any).room1)
                           : (isServiced ? ((it as any).room1 || "TBA") : ((it as any).room1 || "—"));
-                        const room2Display = isSpecial
+                        const room2Display = (isSpecial || isConvertedFromSpecial)
                           ? normalizeRoomDisplayForSpecial((it as any).room2)
                           : (isServiced ? ((it as any).room2 || "TBA") : ((it as any).room2 || "—"));
 
@@ -2723,8 +2729,8 @@ const scheduleFinalLabel = (() => {
                             <td className="px-4 py-3 align-middle text-center">{it.section || "—"}</td>
                             <td className="px-4 py-3 align-top text-center">
                               <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight">
-                                <div className="font-semibold">{d1 || "—"}</div>
-                                {hasSecondMeeting && <div className="font-semibold">{d2 || "—"}</div>}
+                                <div className="font-normal">{d1 || "—"}</div>
+                                {hasSecondMeeting && <div className="font-normal">{d2 || "—"}</div>}
                               </div>
                             </td>
                             <td className="px-4 py-3 align-top text-center">

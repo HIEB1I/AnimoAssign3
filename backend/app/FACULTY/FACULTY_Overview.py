@@ -1489,6 +1489,15 @@ async def _fetch_reflected_special_classes_for_faculty(
             continue
         seen_special.add(special_id)
 
+        # Only ACTIVE reflected special classes belong in the Faculty Special tab.
+        # Once OM converts a row to a regular class, that row must disappear from
+        # the Special tab entirely and be handled only through the regular schedule
+        # flow (Calendar/List). Without this guard, converted rows fall through to
+        # the default PENDING state below, which incorrectly re-shows Accept/Reject.
+        current_status = str(d.get("status") or "").strip()
+        if current_status != "Approved":
+            continue
+
         course_id = (d.get("course_id") or d.get("courseId") or "").strip()
         adopted_binding = approved_binding_by_course.get(course_id) if course_id else None
 
@@ -2564,6 +2573,132 @@ async def _fetch_reflected_faculty_service_rows_for_faculty(
     out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
     return out
 
+
+
+async def _fetch_converted_special_regular_rows_for_faculty(
+    *,
+    term_id: str,
+    faculty_id: str,
+    exclude_section_ids: Optional[set[str]] = None,
+    limit: int = 500,
+) -> List[Dict[str, Any]]:
+    """Fetch Special Class rows already converted to regular classes.
+
+    These rows should disappear from the Special tab and behave like regular class
+    schedules in Calendar/List views, even for planning terms where no OM proposal
+    overlay exists yet.
+    """
+
+    term_id = (term_id or "").strip()
+    faculty_id = (faculty_id or "").strip()
+    blocked = {str(s or "").strip() for s in (exclude_section_ids or set()) if str(s or "").strip()}
+    if not term_id or not faculty_id:
+        return []
+
+    docs = await db[COL_SPECIAL_CLASS].find(
+        {"term_id": term_id, "status": "Convert to Regular Class"},
+        {
+            "_id": 0,
+            "special_id": 1,
+            "course_id": 1,
+            "courseId": 1,
+            "section_id": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "updated_at": 1,
+            "submitted_at": 1,
+        },
+    ).sort([("updated_at", -1), ("submitted_at", -1)]).limit(max(limit * 4, 2000)).to_list(max(limit * 4, 2000))
+
+    section_ids: List[str] = []
+    seen: set[str] = set()
+    for d in docs or []:
+        sec_id = str(d.get("section_id") or "").strip()
+        if not sec_id or sec_id in seen or sec_id in blocked:
+            continue
+
+        fac_id = ""
+        assignment_id = str(d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
+        if assignment_id:
+            asg = await db[COL_ASSIGN].find_one(
+                {"assignment_id": assignment_id, "is_archived": {"$ne": True}},
+                {"_id": 0, "faculty_id": 1},
+            ) or {}
+            fac_id = str(asg.get("faculty_id") or "").strip()
+        if not fac_id:
+            fac_id = await _latest_faculty_id_for_section(sec_id)
+        if fac_id != faculty_id:
+            continue
+
+        seen.add(sec_id)
+        section_ids.append(sec_id)
+        if len(section_ids) >= limit:
+            break
+
+    if not section_ids:
+        return []
+
+    sec_docs = await db[COL_SECTIONS].find(
+        {"section_id": {"$in": section_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
+        {"_id": 0, "section_id": 1, "section_code": 1, "section": 1, "section_name": 1, "course_id": 1},
+    ).to_list(None)
+    sec_by_id = {str(s.get("section_id") or "").strip(): (s or {}) for s in (sec_docs or []) if s and s.get("section_id")}
+    valid_ids = [sid for sid in section_ids if sid in sec_by_id]
+    if not valid_ids:
+        return []
+
+    course_ids = [str(sec_by_id[sid].get("course_id") or "").strip() for sid in valid_ids]
+    course_ids = [c for c in course_ids if c]
+    course_by_id: Dict[str, Dict[str, Any]] = {}
+    if course_ids:
+        course_docs = await db[COL_COURSES].find(
+            {"course_id": {"$in": course_ids}},
+            {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1, "units": 1, "syllabus": 1},
+        ).to_list(None)
+        course_by_id = {
+            str(c.get("course_id") or "").strip(): (c or {})
+            for c in (course_docs or [])
+            if c and c.get("course_id")
+        }
+
+    out: List[Dict[str, Any]] = []
+    for sid in valid_ids:
+        sec = sec_by_id.get(sid, {})
+        course = course_by_id.get(str(sec.get("course_id") or "").strip(), {})
+        cc = course.get("course_code")
+        if isinstance(cc, list):
+            cc = cc[0] if cc else ""
+        row: Dict[str, Any] = {
+            "course_code": _as_code_str(cc or "") or "—",
+            "course_title": _as_code_str(course.get("course_title") or "") or "—",
+            "section": _as_code_str(sec.get("section_code") or sec.get("section") or sec.get("section_name") or "—") or "—",
+            "section_id": sid,
+            "special_id": "",
+            "is_special_class": False,
+            "converted_from_special": True,
+            "is_serviced": False,
+            "units": course.get("units") or 0,
+            "mode": "FOL",
+            "day1": "TBA",
+            "day2": None,
+            "room1": "TBA",
+            "room2": None,
+            "time1": "TBA",
+            "time2": None,
+            "syllabus": course.get("syllabus") or "",
+            "finalized": False,
+        }
+        await _apply_section_schedule_to_row(row, sid)
+        # Converted Special Classes should keep unassigned rooms as TBA in Faculty Calendar/List,
+        # even if the underlying schedule row still carries room_type=Online.
+        if str(row.get("room1") or "").strip().upper() == "ONLINE":
+            row["room1"] = "TBA"
+        if str(row.get("room2") or "").strip().upper() == "ONLINE":
+            row["room2"] = "TBA"
+        out.append(row)
+
+    out.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
+    return out
 
 
 def _calc_units_and_preps(teaching_load: List[Dict[str, Any]]) -> Tuple[float, int]:
@@ -3929,6 +4064,22 @@ async def overview_handler(
                 proposal_status_l = ""
                 schedule_final = False
 
+        try:
+            existing_regular_section_ids = {
+                str(r.get("section_id") or r.get("sectionId") or "").strip()
+                for r in (final_teaching_load or [])
+                if str(r.get("section_id") or r.get("sectionId") or "").strip()
+            }
+            converted_regular_rows = await _fetch_converted_special_regular_rows_for_faculty(
+                term_id=term_id,
+                faculty_id=faculty_id,
+                exclude_section_ids=existing_regular_section_ids,
+            )
+            if converted_regular_rows:
+                final_teaching_load.extend(converted_regular_rows)
+        except Exception:
+            pass
+
         # Merge reflected Special Classes (Approved in OM_SpecialClass) as separate purple entries.
         special_rows = await _fetch_reflected_special_classes_for_faculty(
             term_id=term.get("term_id"),
@@ -4246,6 +4397,22 @@ async def get_faculty_overview(userId: str = Query(...)):
         if not proposal:
             final_teaching_load = []
             summary["load_status"] = (summary.get("load_status") or "Pending")
+
+    try:
+        existing_regular_section_ids = {
+            str(r.get("section_id") or r.get("sectionId") or "").strip()
+            for r in (final_teaching_load or [])
+            if str(r.get("section_id") or r.get("sectionId") or "").strip()
+        }
+        converted_regular_rows = await _fetch_converted_special_regular_rows_for_faculty(
+            term_id=term_id,
+            faculty_id=faculty_id,
+            exclude_section_ids=existing_regular_section_ids,
+        )
+        if converted_regular_rows:
+            final_teaching_load.extend(converted_regular_rows)
+    except Exception:
+        pass
 
     # Merge reflected Special Classes and compute summary against what will be displayed.
     special_rows = await _fetch_reflected_special_classes_for_faculty(

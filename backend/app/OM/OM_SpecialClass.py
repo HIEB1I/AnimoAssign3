@@ -1510,6 +1510,52 @@ async def _update_existing_special_section_bundle(
     }
 
 
+async def _regularize_special_section_bundle(*, section_id: str, term_id: str, course_id: str) -> None:
+    """Make a reflected Special Class section behave like a regular class section.
+
+    We keep the existing section/schedule/faculty assignment bindings intact and only
+    remove the Special Class remark so downstream schedule views stop treating the
+    reflected section as a special-class-specific artifact.
+    """
+    section_id = _safe_str(section_id)
+    term_id = _safe_str(term_id)
+    course_id = _safe_str(course_id)
+    if not section_id:
+        return
+
+    now = datetime.utcnow()
+
+    await db[COL_SECTIONS].update_one(
+        {"section_id": section_id},
+        {"$set": {
+            "term_id": term_id or None,
+            "course_id": course_id or None,
+            "updated_at": now,
+            "status": "active",
+            "remarks": "REGULAR CLASS",
+        }},
+    )
+
+    await db[COL_SECTIONS_SUBMITTED].update_one(
+        {"section_id": section_id},
+        {"$set": {
+            "term_id": term_id or None,
+            "course_id": course_id or None,
+            "submitted_for_scheduling": True,
+            "updated_at": now,
+            "remarks": "REGULAR CLASS",
+        }},
+        upsert=True,
+    )
+
+
+def _special_class_conversion_notification(summary: str) -> tuple[str, str]:
+    summary = _safe_str(summary) or "This special class"
+    title = "Special Class converted to Regular Class"
+    details = f"{summary} has been converted to a regular class."
+    return title, details
+
+
 async def _section_schedule_two(section_id: str) -> Dict[str, Any]:
     rows = await db[COL_SECTION_SCHEDULES].find(
         {"section_id": section_id},
@@ -2988,11 +3034,38 @@ async def om_specialclass_post(
             {"$set": updates_set, "$unset": updates_unset},
         )
 
+        converted_docs: List[Dict[str, Any]] = []
+        try:
+            if res.modified_count and prev_status == "Approved" and target_status_for_update == "Convert to Regular Class":
+                converted_docs = await db[COL_SPECIAL].find(
+                    {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
+                    {
+                        "_id": 0,
+                        "special_id": 1,
+                        "course_id": 1,
+                        "courseId": 1,
+                        "section_id": 1,
+                        "section_code": 1,
+                        "assignment_id": 1,
+                        "faculty_assignment_id": 1,
+                        "user_id": 1,
+                        "student_user_id": 1,
+                    },
+                ).to_list(5000)
+
+                for cd in converted_docs:
+                    sec_id = _safe_str(cd.get("section_id"))
+                    course_id = _safe_str(cd.get("course_id") or cd.get("courseId") or course_id_base)
+                    if sec_id:
+                        await _regularize_special_section_bundle(section_id=sec_id, term_id=current_term_id, course_id=course_id)
+        except Exception:
+            converted_docs = []
+
         # ---------------- STUDENT notifications ----------------
         # Notify every affected student in the grouped Special Class request.
         # Best-effort only; never block the update endpoint due to notification failures.
         try:
-            if res.modified_count:
+            if res.modified_count and target_status_for_update != "Convert to Regular Class":
                 updated_doc = await db[COL_SPECIAL].find_one(
                     {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
                     {
@@ -3096,6 +3169,85 @@ async def om_specialclass_post(
                     )
         except Exception:
             pass
+
+        # ---------------- CONVERSION notifications ----------------
+        try:
+            if converted_docs:
+                course_ids = list({
+                    _safe_str(d.get("course_id") or d.get("courseId") or course_id_base)
+                    for d in converted_docs
+                    if _safe_str(d.get("course_id") or d.get("courseId") or course_id_base)
+                })
+                code_map: Dict[str, str] = {}
+                if course_ids:
+                    cdocs = await db[COL_COURSES].find(
+                        {"course_id": {"$in": course_ids}},
+                        {"_id": 0, "course_id": 1, "course_code": 1},
+                    ).to_list(5000)
+                    for c in cdocs or []:
+                        cid = _safe_str(c.get("course_id"))
+                        cc = c.get("course_code")
+                        code_map[cid] = _safe_str(cc[0]) if isinstance(cc, list) and cc else _safe_str(cc)
+
+                student_uids = sorted({
+                    _safe_str((d or {}).get("user_id") or (d or {}).get("student_user_id"))
+                    for d in converted_docs
+                    if _safe_str((d or {}).get("user_id") or (d or {}).get("student_user_id"))
+                })
+
+                faculty_uids: set[str] = set()
+                labels: List[str] = []
+                for d in converted_docs:
+                    fac_uid, _ = await _resolve_faculty_user_for_special_row(d)
+                    if fac_uid:
+                        faculty_uids.add(fac_uid)
+                    cid = _safe_str(d.get("course_id") or d.get("courseId") or course_id_base)
+                    sid = _safe_str(d.get("special_id"))
+                    sec_code = _safe_str(d.get("section_code"))
+                    label_parts = [p for p in [code_map.get(cid, cid), sec_code] if p]
+                    label = " ".join(label_parts).strip() or (f"Special ID: {sid}" if sid else "Special Class")
+                    if label not in labels:
+                        labels.append(label)
+
+                summary = labels[0] if len(labels) == 1 else f"{len(labels)} special class request{'s' if len(labels) != 1 else ''}"
+                title, details = _special_class_conversion_notification(summary)
+
+                for uid in sorted(faculty_uids):
+                    await create_notification(
+                        user_id=uid,
+                        title=title,
+                        details=details,
+                        meta={
+                            "route": "/faculty/overview",
+                            "kind": "special_class_converted_regular",
+                            "term_id": current_term_id,
+                            "special_ids": [
+                                _safe_str(d.get("special_id")) for d in converted_docs if _safe_str(d.get("special_id"))
+                            ],
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+
+                for uid in student_uids:
+                    await create_notification(
+                        user_id=uid,
+                        title=title,
+                        details=details,
+                        meta={
+                            "route": "/student/specialclass",
+                            "kind": "special_class_converted_regular",
+                            "term_id": current_term_id,
+                            "special_ids": [
+                                _safe_str(d.get("special_id")) for d in converted_docs if _safe_str(d.get("special_id"))
+                            ],
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+        except Exception:
+            pass
+
         # ---------------- CHAIR notifications ----------------
         # Notify when:
         # - status transitions to Approved (new reflection)
@@ -3283,6 +3435,18 @@ async def om_specialclass_post(
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
 
+        converted_docs: List[Dict[str, Any]] = []
+        try:
+            if res.modified_count and target_status == "Convert to Regular Class" and prev_docs:
+                converted_docs = [d for d in (prev_docs or []) if _safe_str(d.get("status")) == "Approved"]
+                for d in converted_docs:
+                    sec_id = _safe_str(d.get("section_id"))
+                    course_id = _safe_str(d.get("course_id") or d.get("courseId"))
+                    if sec_id:
+                        await _regularize_special_section_bundle(section_id=sec_id, term_id=current_term_id, course_id=course_id)
+        except Exception:
+            converted_docs = []
+
         joined_group_special_ids: List[str] = []
         if target_status == "Approved" and prev_docs:
             for d in (prev_docs or []):
@@ -3386,6 +3550,79 @@ async def om_specialclass_post(
             pass
         
 
+        # ---------------- CONVERSION notifications (bulkUpdate) ----------------
+        try:
+            if converted_docs:
+                course_ids = list({
+                    _safe_str(d.get("course_id") or d.get("courseId"))
+                    for d in converted_docs
+                    if _safe_str(d.get("course_id") or d.get("courseId"))
+                })
+                code_map: Dict[str, str] = {}
+                if course_ids:
+                    cdocs = await db[COL_COURSES].find(
+                        {"course_id": {"$in": course_ids}},
+                        {"_id": 0, "course_id": 1, "course_code": 1},
+                    ).to_list(10000)
+                    for c in cdocs or []:
+                        cid = _safe_str(c.get("course_id"))
+                        cc = c.get("course_code")
+                        code_map[cid] = _safe_str(cc[0]) if isinstance(cc, list) and cc else _safe_str(cc)
+
+                special_ids_for_meta = [
+                    _safe_str(d.get("special_id")) for d in converted_docs if _safe_str(d.get("special_id"))
+                ]
+                labels: List[str] = []
+                faculty_uids: set[str] = set()
+                student_uids: set[str] = set()
+                for d in converted_docs:
+                    fac_uid, _ = await _resolve_faculty_user_for_special_row(d)
+                    if fac_uid:
+                        faculty_uids.add(fac_uid)
+                    stu_uid = _safe_str(d.get("user_id") or d.get("student_user_id"))
+                    if stu_uid:
+                        student_uids.add(stu_uid)
+                    cid = _safe_str(d.get("course_id") or d.get("courseId"))
+                    sec_code = _safe_str(d.get("section_code"))
+                    label_parts = [p for p in [code_map.get(cid, cid), sec_code] if p]
+                    label = " ".join(label_parts).strip() or (f"Special ID: {_safe_str(d.get('special_id'))}" if _safe_str(d.get("special_id")) else "Special Class")
+                    if label and label not in labels:
+                        labels.append(label)
+
+                summary = labels[0] if len(labels) == 1 else f"{len(labels)} special class request{'s' if len(labels) != 1 else ''}"
+                title, details = _special_class_conversion_notification(summary)
+
+                for uid in sorted(faculty_uids):
+                    await create_notification(
+                        user_id=uid,
+                        title=title,
+                        details=details,
+                        meta={
+                            "route": "/faculty/overview",
+                            "kind": "special_class_converted_regular",
+                            "term_id": current_term_id,
+                            "special_ids": special_ids_for_meta,
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+                for uid in sorted(student_uids):
+                    await create_notification(
+                        user_id=uid,
+                        title=title,
+                        details=details,
+                        meta={
+                            "route": "/student/specialclass",
+                            "kind": "special_class_converted_regular",
+                            "term_id": current_term_id,
+                            "special_ids": special_ids_for_meta,
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+        except Exception:
+            pass
+
         # ---------------- GROUP JOIN notifications (bulkUpdate) ----------------
         try:
             if joined_group_special_ids:
@@ -3425,7 +3662,7 @@ async def om_specialclass_post(
         # ---------------- STUDENT notifications (bulkUpdate) ----------------
         # Notify each affected student when OM bulk-updates Special Class statuses.
         try:
-            if res.modified_count and prev_docs:
+            if res.modified_count and prev_docs and target_status != "Convert to Regular Class":
                 # Build a small course_code map to avoid per-row lookups.
                 course_ids = []
                 for d in prev_docs:
