@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+import re
 from uuid import uuid4
 
 from pymongo import ASCENDING, DESCENDING, ReturnDocument
@@ -81,6 +82,133 @@ def ensure_messaging_indexes() -> None:
     # Optional (helps if you later want to sort/filter by unread)
     st.create_index([("user_id", ASCENDING), ("unread", DESCENDING), ("updated_at", DESCENDING)], name="state_user_unread_updated")
 
+
+
+
+# ----------------------------
+# Notification + email helpers
+# ----------------------------
+def users_col():
+    return get_collection("users")
+
+
+def notifications_col():
+    return get_collection("notifications")
+
+
+def email_queue_col():
+    return get_collection("email_queue")
+
+
+def _safe_str(v: Any) -> str:
+    return str(v).strip() if v is not None else ""
+
+
+def _sender_display_name(user_id: str) -> str:
+    try:
+        user = users_col().find_one(
+            {"$or": [{"user_id": user_id}, {"userId": user_id}]},
+            {"_id": 0, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1, "full_name": 1, "fullName": 1, "name": 1, "email": 1},
+        ) or {}
+    except Exception:
+        return "Someone"
+
+    parts = [
+        _safe_str(user.get("full_name")),
+        _safe_str(user.get("fullName")),
+        " ".join([x for x in [_safe_str(user.get("first_name") or user.get("firstName")), _safe_str(user.get("last_name") or user.get("lastName"))] if x]).strip(),
+        _safe_str(user.get("name")),
+        _safe_str(user.get("email")),
+    ]
+    for part in parts:
+        if part:
+            return part
+    return "Someone"
+
+
+def _user_email_and_route(user_id: str) -> tuple[str, str]:
+    try:
+        user = users_col().find_one(
+            {"$or": [{"user_id": user_id}, {"userId": user_id}]},
+            {"_id": 0, "email": 1, "role": 1, "roles": 1},
+        ) or {}
+    except Exception:
+        return "", "/inbox"
+
+    role_bits: list[str] = []
+    raw_role = user.get("role")
+    if raw_role is not None:
+        role_bits.append(str(raw_role))
+    raw_roles = user.get("roles")
+    if isinstance(raw_roles, list):
+        role_bits.extend([str(x) for x in raw_roles])
+    joined = " ".join(role_bits).lower()
+    route = "/inbox"
+    if re.search(r"\bstudent\b", joined):
+        route = "/student/inbox"
+    elif re.search(r"\bfaculty\b", joined):
+        route = "/faculty/inbox"
+    elif re.search(r"office\s*manager|\bom\b", joined):
+        route = "/om/inbox"
+    return _safe_str(user.get("email")), route
+
+
+def _enqueue_message_notifications(conversation_id: str, sender_id: str, body: str) -> None:
+    conversation_id = _safe_str(conversation_id)
+    sender_id = _safe_str(sender_id)
+    body = (body or "").strip()
+    if not conversation_id or not sender_id or not body:
+        return
+
+    try:
+        conv = conversations_col().find_one({"conversation_id": conversation_id}, {"_id": 0, "participants": 1}) or {}
+        participants = [str(x).strip() for x in (conv.get("participants") or []) if str(x).strip()]
+    except Exception:
+        participants = []
+
+    if not participants:
+        return
+
+    sender_name = _sender_display_name(sender_id)
+    preview = _preview(body, 180)
+    now = utcnow()
+
+    for uid in participants:
+        if uid == sender_id:
+            continue
+        try:
+            to_email, route = _user_email_and_route(uid)
+
+            notifications_col().insert_one({
+                "notification_id": str(uuid4()),
+                "user_id": uid,
+                "title": f"New inbox message from {sender_name}",
+                "message": preview,
+                "data": {
+                    "route": route,
+                    "kind": "inbox_message",
+                    "conversation_id": conversation_id,
+                    "sender_user_id": sender_id,
+                },
+                "is_read": False,
+                "created_at": now,
+                "updated_at": now,
+                "channel": "in_app",
+            })
+
+            if to_email:
+                email_queue_col().insert_one({
+                    "email_id": f"email_{uuid4().hex}",
+                    "to": to_email,
+                    "subject": f"New inbox message from {sender_name}",
+                    "text": f"{sender_name} sent you a new inbox message.\n\n{preview}\n\nPlease log in to AnimoAssign to reply in your inbox.",
+                    "created_at": now,
+                    "updated_at": now,
+                    "status": "pending",
+                    "provider": "gmail",
+                })
+        except Exception:
+            continue
 
 # ----------------------------
 # State helpers
@@ -322,6 +450,10 @@ def insert_message(conversation_id: str, sender_id: str, body: str) -> Dict[str,
 
     # Phase 9: persist unread updates (others +1, sender = 0)
     bump_unread_on_send(conversation_id, sender_id)
+
+    # Also notify recipients through the shared in-app notifications feed + Gmail queue.
+    # This keeps Inbox conversations visible to users even when they are not actively viewing the thread.
+    _enqueue_message_notifications(conversation_id, sender_id, body)
 
     msg_doc.pop("_id", None)
     return msg_doc

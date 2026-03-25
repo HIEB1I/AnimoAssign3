@@ -265,6 +265,105 @@ function ConfirmDialog({
 }
 
 
+function BulkSpecialMessageDialog({
+  open,
+  selectedCount,
+  message,
+  sending,
+  onChangeMessage,
+  onClose,
+  onSend,
+}: {
+  open: boolean;
+  selectedCount: number;
+  message: string;
+  sending: boolean;
+  onChangeMessage: (value: string) => void;
+  onClose: () => void;
+  onSend: () => void;
+}) {
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => textRef.current?.focus(), 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/40"
+        aria-label="Close dialog"
+        onClick={onClose}
+      />
+
+      <div className="relative w-full max-w-2xl overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-2xl">
+        <div className="border-b border-neutral-100 px-5 py-4">
+          <div className="text-base font-semibold text-neutral-900">Send message to students</div>
+          <div className="mt-1 text-sm text-neutral-600">
+            One inbox message will be sent for each of the {selectedCount} selected special class{selectedCount === 1 ? "" : "es"}.
+            Students will also receive in-app and Gmail notifications and can reply in Inbox.
+          </div>
+        </div>
+
+        <div className="px-5 py-4">
+          <label className="mb-2 block text-sm font-medium text-neutral-800">Additional note (optional)</label>
+          <textarea
+            ref={textRef}
+            rows={5}
+            value={message}
+            onChange={(e) => onChangeMessage(e.target.value)}
+            placeholder="Add an optional note to include in every message…"
+            className="w-full resize-none rounded-xl border border-neutral-300 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+          />
+          <div className="mt-2 text-xs text-neutral-500">
+            The system will automatically include the course, section, and reflected schedule in each message.
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2.5 border-t border-neutral-100 px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-white px-4 text-sm font-medium text-neutral-800 shadow-sm hover:bg-neutral-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={sending || selectedCount === 0}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-semibold text-white shadow-sm",
+              sending || selectedCount === 0
+                ? "cursor-not-allowed bg-neutral-300 text-neutral-600"
+                : "bg-emerald-700 hover:bg-emerald-800"
+            )}
+          >
+            {sending ? "Sending…" : `Send to ${selectedCount} student${selectedCount === 1 ? "" : "s"}`}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+
 /* =========================================
    0) Page
    ========================================= */
@@ -1032,6 +1131,10 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
     original: any;
   }>(null);
   const [specialEditBusy, setSpecialEditBusy] = useState(false);
+  const [selectedSpecialIds, setSelectedSpecialIds] = useState<Record<string, boolean>>({});
+  const [bulkSpecialOpen, setBulkSpecialOpen] = useState(false);
+  const [bulkSpecialSending, setBulkSpecialSending] = useState(false);
+  const [bulkSpecialMessage, setBulkSpecialMessage] = useState("");
   const [specialRooms1, setSpecialRooms1] = useState<any[]>([]);
   const [specialRooms2, setSpecialRooms2] = useState<any[]>([]);
   const [specialRoomsLoading, setSpecialRoomsLoading] = useState(false);
@@ -1554,6 +1657,11 @@ const scheduleFinalLabel = (() => {
     () => (teachingLoad || []).filter((it) => Boolean((it as any)?.is_special_class)),
     [teachingLoad]
   );
+  const selectedSpecialList = useMemo(
+    () => specialTeachingLoad.filter((it) => Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])),
+    [specialTeachingLoad, selectedSpecialIds]
+  );
+  const allSpecialSelected = specialTeachingLoad.length > 0 && selectedSpecialList.length === specialTeachingLoad.length;
 
 
 
@@ -1705,64 +1813,145 @@ const scheduleFinalLabel = (() => {
 	                </label>
 	              </div>
 	            ) : (
-	              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-	                <button
-	                  type="button"
-	                  onClick={async () => {
-	                    try {
-	                      if (isSyncingSpecial) return;
-	                      setIsSyncingSpecial(true);
+              <div className="flex items-center gap-2 flex-wrap justify-end">
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!selectedSpecialList.length) {
+                      onToast?.("warning", "Select at least one special class.", "Nothing selected");
+                      return;
+                    }
+                    setBulkSpecialOpen(true);
+                  }}
+                  disabled={bulkSpecialSending || selectedSpecialList.length === 0}
+                  className={cls(
+                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
+                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+                    bulkSpecialSending || selectedSpecialList.length === 0
+                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                      : "bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50"
+                  )}
+                  title="Send one inbox message per selected student"
+                >
+                  Send to Student ({selectedSpecialList.length})
+                </button>
 
-	                      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-	                      const userId = raw.userId || raw.user_id || raw.id || "";
-	                      const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+                <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        if (isSyncingSpecial) return;
+                        setIsSyncingSpecial(true);
 
-	                      const resp: any = await acceptFacultyLoadAssignment(
-                        userId,
-                        ({
-                          ...(termId ? { term_id: termId } : {}),
-                          send_to_gcal: true,
-                          sync_special_only: true,
-                          overwrite_gcal: true,
-                        } as any)
-                      );
+                        const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                        const userId = raw.userId || raw.user_id || raw.id || "";
+                        const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                      if (resp?.calendar_ok === false) {
-	                        onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
-	                      } else {
-	                        onToast?.(
-	                          "success",
-	                          resp?.calendar_events_created
-	                            ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
-	                            : "No special classes to sync.",
-	                          "Synced"
-	                        );
-	                      }
-	                    } catch (e: any) {
-	                      const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
-	                      onToast?.("error", msg, "Action failed");
-	                      console.error(e);
-	                    } finally {
-	                      setIsSyncingSpecial(false);
-	                    }
-	                  }}
-	                  disabled={isSyncingSpecial}
-	                  className={cls(
-	                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
-	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    isSyncingSpecial
-	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-	                  )}
-	                  title="Sync Special Classes to Google Calendar"
-	                >
-	                  {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
-	                </button>
-	              </div>
-	            )}
+                        const resp: any = await acceptFacultyLoadAssignment(
+                          userId,
+                          ({
+                            ...(termId ? { term_id: termId } : {}),
+                            send_to_gcal: true,
+                            sync_special_only: true,
+                            overwrite_gcal: true,
+                          } as any)
+                        );
+
+                        if (resp?.calendar_ok === false) {
+                          onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
+                        } else {
+                          onToast?.(
+                            "success",
+                            resp?.calendar_events_created
+                              ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
+                              : "No special classes to sync.",
+                            "Synced"
+                          );
+                        }
+                      } catch (e: any) {
+                        const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
+                        onToast?.("error", msg, "Action failed");
+                        console.error(e);
+                      } finally {
+                        setIsSyncingSpecial(false);
+                      }
+                    }}
+                    disabled={isSyncingSpecial}
+                    className={cls(
+                      "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
+                      "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
+                      isSyncingSpecial
+                        ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                        : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
+                    )}
+                    title="Sync Special Classes to Google Calendar"
+                  >
+                    {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
+                  </button>
+                </div>
+              </div>
+            )}
         </div>
         </div>
       </div>
+
+      <BulkSpecialMessageDialog
+        open={bulkSpecialOpen}
+        selectedCount={selectedSpecialList.length}
+        message={bulkSpecialMessage}
+        sending={bulkSpecialSending}
+        onChangeMessage={setBulkSpecialMessage}
+        onClose={() => {
+          if (bulkSpecialSending) return;
+          setBulkSpecialOpen(false);
+        }}
+        onSend={async () => {
+          try {
+            if (bulkSpecialSending) return;
+            const ids = selectedSpecialList
+              .map((it) => String((it as any)?.special_id || "").trim())
+              .filter(Boolean);
+            if (ids.length === 0) {
+              onToast?.("warning", "Select at least one special class.", "Nothing selected");
+              return;
+            }
+
+            setBulkSpecialSending(true);
+            const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+            const userId = raw.userId || raw.user_id || raw.id || "";
+            if (!userId) throw new Error("User is not logged in");
+
+            const resp = await apiPost("/api/faculty/special-class/bulk-message", {
+              user_id: userId,
+              special_ids: ids,
+              message: bulkSpecialMessage.trim(),
+            });
+
+            const sentCount = Number(resp?.sent_count || 0);
+            const skippedCount = Array.isArray(resp?.skipped) ? resp.skipped.length : 0;
+            if (sentCount > 0) {
+              onToast?.(
+                "success",
+                skippedCount > 0
+                  ? `Sent ${sentCount} message(s). ${skippedCount} item(s) were skipped.`
+                  : `Sent ${sentCount} message(s) to selected students.`,
+                "Messages sent"
+              );
+            } else {
+              onToast?.("warning", "No messages were sent.", "Nothing sent");
+            }
+
+            setSelectedSpecialIds({});
+            setBulkSpecialMessage("");
+            setBulkSpecialOpen(false);
+          } catch (e: any) {
+            onToast?.("error", e?.message || "Failed to send bulk messages.", "Action failed");
+          } finally {
+            setBulkSpecialSending(false);
+          }
+        }}
+      />
 
       {/* Custom reject confirmation (Special Class tab) */}
       <ConfirmDialog
@@ -1932,7 +2121,7 @@ const scheduleFinalLabel = (() => {
   <>
     {/* Special Class Tab (List-style) */}
   <div className="overflow-x-auto">
-    <div className="min-w-[1100px] rounded-xl border border-neutral-300 bg-white">
+    <div className="min-w-[1160px] rounded-xl border border-neutral-300 bg-white">
 
 
       <div className="w-full">
@@ -1940,6 +2129,7 @@ const scheduleFinalLabel = (() => {
         <table className="w-full table-fixed border-separate border-spacing-0 text-sm">
           
           <colgroup>
+            <col className="w-[4%]" />
             <col className="w-[12%]" />
             <col className="w-[16%]" />
             {/* Evenly distribute the remaining columns (do not adjust Student/Reason) */}
@@ -1954,6 +2144,26 @@ const scheduleFinalLabel = (() => {
           </colgroup>
           <thead className="bg-emerald-50 text-emerald-900">
             <tr className="[&>th]:border-b [&>th]:border-gray-200">
+              <th className="px-3 py-2 text-center">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300 accent-emerald-600"
+                  checked={allSpecialSelected}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setSelectedSpecialIds(() => {
+                      if (!checked) return {};
+                      const next: Record<string, boolean> = {};
+                      specialTeachingLoad.forEach((row) => {
+                        const sid = String((row as any)?.special_id || "").trim();
+                        if (sid) next[sid] = true;
+                      });
+                      return next;
+                    });
+                  }}
+                  aria-label="Select all special classes"
+                />
+              </th>
               {SPECIAL_TABLE_HEADERS.map((h) => (
                 <th
                   key={h}
@@ -1970,7 +2180,7 @@ const scheduleFinalLabel = (() => {
           <tbody className="text-gray-900">
             {specialTeachingLoad.length === 0 ? (
               <tr>
-                <td colSpan={SPECIAL_TABLE_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
+                <td colSpan={SPECIAL_TABLE_HEADERS.length + 1} className="px-4 py-6 text-center text-sm text-neutral-500">
                   No special classes.
                 </td>
               </tr>
@@ -2062,7 +2272,29 @@ const scheduleFinalLabel = (() => {
                     }}
                     title="Open Proposed Schedule"
                   >
-                                        <td className="px-3 py-3 align-top">
+                    <td
+                      className="px-3 py-3 align-top text-center"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4 rounded border-gray-300 accent-emerald-600"
+                        checked={Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])}
+                        onChange={(e) => {
+                          const sid = String((it as any)?.special_id || "").trim();
+                          if (!sid) return;
+                          const checked = e.target.checked;
+                          setSelectedSpecialIds((prev) => {
+                            const next = { ...prev };
+                            if (checked) next[sid] = true;
+                            else delete next[sid];
+                            return next;
+                          });
+                        }}
+                        aria-label={`Select special class ${it.course_code || ""} ${it.section || ""}`}
+                      />
+                    </td>
+                    <td className="px-3 py-3 align-top">
                       <div className="leading-tight">
                         <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">{(it as any)?.student || "—"}</div>
                       
