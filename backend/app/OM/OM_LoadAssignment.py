@@ -2963,63 +2963,7 @@ async def loadassignment_handler(
                     "updated_at": ts,
                 })
 
-            try:
-                details = (
-                    f"A new SHS section was imported and may need room review.\n\n"
-                    f"Course: {course_code} — {course_title.strip()}\n"
-                    f"Section: {section_code}\n"
-                    f"Mode: {mode}\n"
-                    f"Capacity: {cap}"
-                ).strip()
-
-                meta = {
-                    "route": "/apo/courseofferings",
-                    "kind": "shs_import_added_section",
-                    "term_id": term_id,
-                    "section_id": section_id,
-                    "campus_id": campus_id,
-                    "course_id": course_id,
-                    "course_code": course_code,
-                    "section_code": section_code,
-                }
-
-                apo_uids: list[str] = []
-                try:
-                    if campus_id:
-                        apo_uids = await _apo_user_ids_for_campus(campus_id, db)
-                except Exception:
-                    apo_uids = []
-
-                # Fallback: if campus routing fails, notify all APO users (same as new-line)
-                if not apo_uids:
-                    try:
-                        apo_uids = await _all_apo_user_ids(db)
-                    except Exception:
-                        apo_uids = []
-
-                # De-duplicate and never notify the actor
-                apo_uids = sorted({uid for uid in (apo_uids or []) if uid and uid != userId})
-
-                for uid in apo_uids:
-                    try:
-                        try:
-                            await _ensure_user_gmail_address(uid, db)
-                        except Exception:
-                            pass
-
-                        await create_notification(
-                            user_id=uid,
-                            title="New SHS section imported",
-                            details=details,
-                            meta=meta,
-                            send_email=True,          # set False if you only want in-app
-                            email_from_user_id=userId,
-                        )
-                    except Exception:
-                        continue
-            except Exception:
-                # Never fail import due to notification issues
-                pass
+            # Per request: importing an SHS file should not notify APO.
 
             imported += 1
 
