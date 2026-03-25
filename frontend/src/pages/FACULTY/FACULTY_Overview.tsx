@@ -5,7 +5,7 @@ import {
   Send as SendIcon,
   X,
   Check,
-  Inbox,
+  MessageSquareText,
   BookOpen as SyllabusIcon,
   Edit,
   AlertTriangle,
@@ -315,7 +315,7 @@ function BulkSpecialMessageDialog({
         <div className="border-b border-neutral-100 px-5 py-4">
           <div className="text-base font-semibold text-neutral-900">Send message to students</div>
           <div className="mt-1 text-sm text-neutral-600">
-            One inbox message will be sent for each of the {selectedCount} selected special class{selectedCount === 1 ? "" : "es"}.
+            Accepted special class confirmations will be grouped into one inbox message per student whenever possible.
             Students will also receive in-app and Gmail notifications and can reply in Inbox.
           </div>
         </div>
@@ -331,7 +331,7 @@ function BulkSpecialMessageDialog({
             className="w-full resize-none rounded-xl border border-neutral-300 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
           />
           <div className="mt-2 text-xs text-neutral-500">
-            The system will automatically include the course, section, and reflected schedule in each message.
+            The system will automatically include each confirmed course, section, and reflected schedule in a clear grouped message for every student.
           </div>
         </div>
 
@@ -998,9 +998,9 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
 const CAMPUS_COLORS = {
-  manila: "#444f24",
-  laguna: "#b6bbd9",
-  serviced: "#ad8820",
+  manila: "#4F7A5A",
+  laguna: "#819171",
+  serviced: "#CBD5C0",
 } as const;
 
 const getScheduleVisual = (it: TLItemForCalendar): {
@@ -1019,7 +1019,7 @@ const getScheduleVisual = (it: TLItemForCalendar): {
   if (it.is_serviced) {
     return {
       backgroundColor: CAMPUS_COLORS.serviced,
-      textColor: "#ffffff",
+      textColor: "#000000",
       borderClass: "border-transparent",
       hoverClass: "hover:brightness-[1.05]",
     };
@@ -1029,7 +1029,7 @@ const getScheduleVisual = (it: TLItemForCalendar): {
   if (s.startsWith("XX") || s.startsWith("XC")) {
     return {
       backgroundColor: CAMPUS_COLORS.laguna,
-      textColor: "#111827",
+      textColor: "#ffffff",
       borderClass: "border-transparent",
       hoverClass: "hover:brightness-[1.03]",
     };
@@ -1657,11 +1657,22 @@ const scheduleFinalLabel = (() => {
     () => (teachingLoad || []).filter((it) => Boolean((it as any)?.is_special_class)),
     [teachingLoad]
   );
-  const selectedSpecialList = useMemo(
-    () => specialTeachingLoad.filter((it) => Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])),
-    [specialTeachingLoad, selectedSpecialIds]
+  const acceptedSpecialTeachingLoad = useMemo(
+    () =>
+      specialTeachingLoad.filter(
+        (it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() === "ACCEPTED"
+      ),
+    [specialTeachingLoad]
   );
-  const allSpecialSelected = specialTeachingLoad.length > 0 && selectedSpecialList.length === specialTeachingLoad.length;
+  const selectedSpecialList = useMemo(
+    () =>
+      acceptedSpecialTeachingLoad.filter(
+        (it) => Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])
+      ),
+    [acceptedSpecialTeachingLoad, selectedSpecialIds]
+  );
+  const allSpecialSelected =
+    acceptedSpecialTeachingLoad.length > 0 && selectedSpecialList.length === acceptedSpecialTeachingLoad.length;
 
 
 
@@ -1694,36 +1705,35 @@ const scheduleFinalLabel = (() => {
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
 	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
-	        <div className="mb-4 flex flex-col gap-3 xl:grid xl:grid-cols-[minmax(220px,1fr)_auto_minmax(320px,1fr)] xl:items-start">
-          <div className="min-w-0">
-            <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
-            <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
-          </div>
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="flex w-full flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 xl:justify-start">
+              <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
+              <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
+            </div>
 
-          {/* Legend / spacer column */}
-          <div className="hidden xl:flex xl:justify-center xl:justify-self-center">
-            {view !== "Special" ? (
-              <div className="flex flex-wrap items-center justify-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm">
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
-                  <span>Manila</span>
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
-                  <span>Laguna</span>
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
-                  <span>Serviced</span>
-                </span>
+            {view === "Calendar" ? (
+              <div className="flex w-full justify-start">
+                <div className="inline-flex max-w-full flex-wrap items-center gap-4 rounded-xl border border-neutral-200 bg-white px-4 py-2 text-xs text-neutral-700 shadow-sm">
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
+                    <span>Manila</span>
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
+                    <span>Laguna</span>
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
+                    <span>Serviced</span>
+                  </span>
+                </div>
               </div>
-            ) : (
-              <div className="h-8" aria-hidden="true" />
-            )}
+            ) : null}
           </div>
 
-          <div className="flex items-start gap-2 flex-wrap xl:flex-nowrap xl:justify-self-end xl:justify-end xl:ml-auto">
-            <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+          <div className="flex w-full flex-col gap-3 xl:max-w-[620px] xl:items-end">
+            <div className="inline-flex w-full rounded-xl border border-neutral-200 bg-neutral-50 p-1 xl:w-auto xl:self-end">
               {["Calendar", "List", "Special"].map((v) => (
                 <button
                   key={v}
@@ -1731,7 +1741,7 @@ const scheduleFinalLabel = (() => {
                   onClick={() => setView(v as any)}
                   aria-pressed={view === v}
                   className={cls(
-                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold transition",
+                    "inline-flex flex-1 h-9 items-center justify-center rounded-lg px-4 text-sm font-semibold transition xl:flex-none",
                     view === v
                       ? "bg-emerald-700 text-white shadow-sm"
                       : "text-neutral-700 hover:bg-white"
@@ -1742,157 +1752,181 @@ const scheduleFinalLabel = (() => {
                 </button>
               ))}
             </div>
-	            {view !== "Special" ? (
-	              <div className="flex flex-col items-start">
-	                <button
-	                  type="button"
-	                  onClick={async () => {
-              try {
-                if (isAccepting) return;
-                setIsAccepting(true);
 
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+            {view !== "Special" ? (
+              
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="min-w-0">
+                    
+                  </div>
 
-                const resp: any = await acceptFacultyLoadAssignment(
-                  userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
-                );
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-stretch sm:justify-end lg:w-auto">
 
-                console.log("ACCEPT resp:", resp);
 
-                if (sendToGcal) {
-                  if (resp?.calendar_ok === false) {
-                    onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
-                  } else if (resp?.calendar_ok === true) {
-                    onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
-                  } else {
-                    onToast?.("success", "Schedule accepted.", "Success");
-                  }
-                } else {
-                  onToast?.("success", "Schedule accepted.", "Success");
-                }
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          if (isAccepting) return;
+                          setIsAccepting(true);
 
-                await onRefresh?.();
-              } catch (e: any) {
-                const msg = e?.response?.data?.detail || e?.message || "Failed to accept schedule.";
-                onToast?.("error", msg, "Action failed");
-                console.error(e);
-              } finally {
-                setIsAccepting(false);
-              }
-	                  }}
-	                  disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
-	                  className={cls(
-	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
-	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || scheduleFinalEffective || isAlreadyApproved)
-	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-	                  )}
-	                >
-	                  {scheduleFinalEffective
-	                    ? "Finalized"
-	                    : isAlreadyApproved
-	                    ? "Approved"
-	                    : isAccepting
-	                    ? "Accepting…"
-	                    : "Accept Schedule"}
-	                </button>
+                          const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                          const userId = raw.userId || raw.user_id || raw.id || "";
+                          const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
-	                  <input
-	                    type="checkbox"
-	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 accent-emerald-600 focus:ring-emerald-600/40"
-	                    checked={sendToGcal}
-	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
-	                  />
-	                  <span>Sync to GCalendar</span>
-	                </label>
-	              </div>
-	            ) : (
-              <div className="flex items-center gap-2 flex-wrap justify-end">
-                <button
-                  type="button"
-                  onClick={() => {
-                    if (!selectedSpecialList.length) {
-                      onToast?.("warning", "Select at least one special class.", "Nothing selected");
-                      return;
-                    }
-                    setBulkSpecialOpen(true);
-                  }}
-                  disabled={bulkSpecialSending || selectedSpecialList.length === 0}
-                  className={cls(
-                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
-                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-                    bulkSpecialSending || selectedSpecialList.length === 0
-                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-                      : "bg-white text-emerald-800 border border-emerald-200 hover:bg-emerald-50"
-                  )}
-                  title="Send one inbox message per selected student"
-                >
-                  Send to Student ({selectedSpecialList.length})
-                </button>
-
-                <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        if (isSyncingSpecial) return;
-                        setIsSyncingSpecial(true);
-
-                        const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                        const userId = raw.userId || raw.user_id || raw.id || "";
-                        const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
-
-                        const resp: any = await acceptFacultyLoadAssignment(
-                          userId,
-                          ({
-                            ...(termId ? { term_id: termId } : {}),
-                            send_to_gcal: true,
-                            sync_special_only: true,
-                            overwrite_gcal: true,
-                          } as any)
-                        );
-
-                        if (resp?.calendar_ok === false) {
-                          onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
-                        } else {
-                          onToast?.(
-                            "success",
-                            resp?.calendar_events_created
-                              ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
-                              : "No special classes to sync.",
-                            "Synced"
+                          const resp: any = await acceptFacultyLoadAssignment(
+                            userId,
+                            { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
                           );
+
+                          console.log("ACCEPT resp:", resp);
+
+                          if (sendToGcal) {
+                            if (resp?.calendar_ok === false) {
+                              onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
+                            } else if (resp?.calendar_ok === true) {
+                              onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                            } else {
+                              onToast?.("success", "Schedule accepted.", "Success");
+                            }
+                          } else {
+                            onToast?.("success", "Schedule accepted.", "Success");
+                          }
+
+                          await onRefresh?.();
+                        } catch (e: any) {
+                          const msg = e?.response?.data?.detail || e?.message || "Failed to accept schedule.";
+                          onToast?.("error", msg, "Action failed");
+                          console.error(e);
+                        } finally {
+                          setIsAccepting(false);
                         }
-                      } catch (e: any) {
-                        const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
-                        onToast?.("error", msg, "Action failed");
-                        console.error(e);
-                      } finally {
-                        setIsSyncingSpecial(false);
-                      }
-                    }}
-                    disabled={isSyncingSpecial}
-                    className={cls(
-                      "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
-                      "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-                      isSyncingSpecial
-                        ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-                        : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-                    )}
-                    title="Sync Special Classes to Google Calendar"
-                  >
-                    {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
-                  </button>
+                      }}
+                      disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-normal shadow-sm sm:min-w-[172px] sm:flex-none",
+                        "focus:outline-none focus:ring-2 focus:ring-blue-600/30",
+                        (isAccepting || scheduleFinalEffective || isAlreadyApproved)
+                          ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                          : "bg-blue-600 text-white hover:bg-blue-700 active:translate-y-[0.5px]"
+                      )}
+                    >
+                      {scheduleFinalEffective
+                        ? "Finalized"
+                        : isAlreadyApproved
+                        ? "Approved"
+                        : isAccepting
+                        ? "Accepting…"
+                        : "Accept Schedule"}
+                    </button>
+
+                     <label
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center gap-2 rounded-xl border bg-white px-3 text-sm font-medium shadow-sm sm:min-w-[172px] sm:flex-none",
+                        isAccepting || scheduleFinalEffective || isAlreadyApproved
+                          ? "border-neutral-200 text-neutral-400 opacity-70"
+                          : "border-[#e17100] text-[#e17100]"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-orange-300 accent-orange-500 focus:ring-orange-500/30"
+                        checked={sendToGcal}
+                        onChange={(e) => setSendToGcal(e.target.checked)}
+                        disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
+                      />
+                      <span className="whitespace-nowrap">Sync to GCalendar</span>
+                    </label>
+                  </div>
                 </div>
-              </div>
+              
+            ) : (
+              
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="min-w-0">
+                    
+                  </div>
+
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-stretch sm:justify-end lg:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!selectedSpecialList.length) {
+                          onToast?.("warning", "Select at least one special class.", "Nothing selected");
+                          return;
+                        }
+                        setBulkSpecialOpen(true);
+                      }}
+                      disabled={bulkSpecialSending || selectedSpecialList.length === 0}
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-normal shadow-sm whitespace-nowrap sm:min-w-[172px] sm:flex-none",
+                        "focus:outline-none focus:ring-2 focus:ring-blue-600/30",
+                        bulkSpecialSending || selectedSpecialList.length === 0
+                          ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                          : "bg-blue-600 text-white hover:bg-blue-700 active:translate-y-[0.5px]"
+                      )}
+                      title="Send one grouped inbox message per accepted student"
+                    >
+                      Send to ({selectedSpecialList.length}) Student
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          if (isSyncingSpecial) return;
+                          setIsSyncingSpecial(true);
+
+                          const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                          const userId = raw.userId || raw.user_id || raw.id || "";
+                          const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+                          const resp: any = await acceptFacultyLoadAssignment(
+                            userId,
+                            ({
+                              ...(termId ? { term_id: termId } : {}),
+                              send_to_gcal: true,
+                              sync_special_only: true,
+                              overwrite_gcal: true,
+                            } as any)
+                          );
+
+                          if (resp?.calendar_ok === false) {
+                            onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
+                          } else {
+                            onToast?.(
+                              "success",
+                              resp?.calendar_events_created
+                                ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
+                                : "No special classes to sync.",
+                              "Synced"
+                            );
+                          }
+                        } catch (e: any) {
+                          const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
+                          onToast?.("error", msg, "Action failed");
+                          console.error(e);
+                        } finally {
+                          setIsSyncingSpecial(false);
+                        }
+                      }}
+                      disabled={isSyncingSpecial}
+                      className={cls(
+                        "inline-flex h-11 w-full items-center justify-center rounded-xl border bg-white px-4 text-sm font-medium shadow-sm whitespace-nowrap",
+                        "focus:outline-none focus:ring-2 focus:ring-orange-500/30",
+                        isSyncingSpecial
+                          ? "border-neutral-200 text-neutral-400 opacity-70 cursor-not-allowed"
+                          : "border-[#e17100] text-[#e17100] hover:bg-orange-50 active:translate-y-[0.5px]"
+                      )}
+                      title="Sync Special Classes to Google Calendar"
+                    >
+                      {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
+                  </button>
+                  </div>
+                </div>
+              
             )}
-        </div>
+          </div>
         </div>
       </div>
 
@@ -2009,27 +2043,6 @@ const scheduleFinalLabel = (() => {
           }
         }}
       />
-
-	      {/* Legend (mobile): centered above the calendar/list table */}
-	      {view !== "Special" && (
-        <div className="mb-3 flex justify-center xl:hidden">
-          <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
-            <span className="font-semibold text-neutral-800">Legend:</span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
-              <span>Manila</span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
-              <span>Laguna</span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
-              <span>Serviced</span>
-            </span>
-          </div>
-        </div>
-      )}
 
       {/*
         IMPORTANT:
@@ -2149,19 +2162,20 @@ const scheduleFinalLabel = (() => {
                   type="checkbox"
                   className="h-4 w-4 rounded border-gray-300 accent-emerald-600"
                   checked={allSpecialSelected}
+                  disabled={acceptedSpecialTeachingLoad.length === 0}
                   onChange={(e) => {
                     const checked = e.target.checked;
                     setSelectedSpecialIds(() => {
                       if (!checked) return {};
                       const next: Record<string, boolean> = {};
-                      specialTeachingLoad.forEach((row) => {
+                      acceptedSpecialTeachingLoad.forEach((row) => {
                         const sid = String((row as any)?.special_id || "").trim();
                         if (sid) next[sid] = true;
                       });
                       return next;
                     });
                   }}
-                  aria-label="Select all special classes"
+                  aria-label="Select all accepted special classes"
                 />
               </th>
               {SPECIAL_TABLE_HEADERS.map((h) => (
@@ -2279,10 +2293,11 @@ const scheduleFinalLabel = (() => {
                       <input
                         type="checkbox"
                         className="mt-1 h-4 w-4 rounded border-gray-300 accent-emerald-600"
+                        disabled={isPending}
                         checked={Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])}
                         onChange={(e) => {
                           const sid = String((it as any)?.special_id || "").trim();
-                          if (!sid) return;
+                          if (!sid || isPending) return;
                           const checked = e.target.checked;
                           setSelectedSpecialIds((prev) => {
                             const next = { ...prev };
@@ -2291,7 +2306,7 @@ const scheduleFinalLabel = (() => {
                             return next;
                           });
                         }}
-                        aria-label={`Select special class ${it.course_code || ""} ${it.section || ""}`}
+                        aria-label={`Select accepted special class ${it.course_code || ""} ${it.section || ""}`}
                       />
                     </td>
                     <td className="px-3 py-3 align-top">
@@ -2403,25 +2418,28 @@ const scheduleFinalLabel = (() => {
                             title="Message OM/Chair"
                             aria-label="Message OM/Chair"
                           >
-                            <Inbox className="h-4 w-4 text-slate-700" />
+                            <MessageSquareText className="h-4 w-4 text-slate-700" />
                           </button>
                         </div>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openEditSpecial(it);
-                          }}
-                          className={cls(
-                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
-                          )}
-                          title="Edit Special Class Schedule"
-                          aria-label="Edit Special Class Schedule"
-                        >
-                          <Edit className="h-4 w-4" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditSpecial(it);
+                            }}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-lg border",
+                              "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
+                            )}
+                            title="Edit Special Class Schedule"
+                            aria-label="Edit Special Class Schedule"
+                          >
+                            <Edit className="h-4 w-4" />
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -2441,17 +2459,17 @@ const scheduleFinalLabel = (() => {
             <div className="overflow-x-auto">
               <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
                 <table className="w-full table-fixed text-[13px]">
-                  <colgroup>
-                    <col className="w-[320px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[90px]" />
-                    <col className="w-[150px]" />
-                    <col className="w-[180px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[76px]" />
-                  </colgroup>
-                  <thead className="bg-emerald-50 text-emerald-900">
-                    <tr className="[&>th]:border-b [&>th]:border-gray-200">
+                <colgroup>
+                  <col className="w-[34%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                </colgroup>
+                  <thead className="bg-emerald-800 text-white">
+                    <tr className="[&>th]:border-b [&>th]:border-emerald-700">
                       {LIST_HEADERS.map((h) => (
                         <th key={h} className={cls("px-4 py-3 font-semibold", h === "Course Code & Title" ? "text-left" : "text-center")}>
                           {h}
@@ -2505,7 +2523,7 @@ const scheduleFinalLabel = (() => {
                           <tr
                             key={idx}
                             className={cls(
-                              isSpecial ? "bg-emerald-50" : (isServiced ? "bg-emerald-50/60" : "bg-white"),
+                              //isSpecial ? "bg-emerald-50" : (isServiced ? "bg-[#CBD5C0]" : "bg-white"),
                               "[&>td]:border-t [&>td]:border-gray-100"
                             )}
                           >
@@ -3802,8 +3820,7 @@ function RfcThreadView({
             type="button"
             disabled={sending || !reply.trim() || !sectionId}
             onClick={async () => {
-              if (!reply.trim()) return;
-              if (!sectionId) return;
+              if (!reply.trim() || !sectionId) return;
               try {
                 setSending(true);
                 const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
@@ -3814,7 +3831,6 @@ function RfcThreadView({
                   message: reply.trim(),
                 });
                 setReply("");
-                // Refresh thread so the new message appears immediately.
                 const refreshed = await getFacultyLoadAssignmentRfc(userId, {
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   section_id: sectionId,
@@ -3829,7 +3845,7 @@ function RfcThreadView({
             className={cls(
               "inline-flex h-9 w-10 items-center justify-center rounded-xl text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px]",
-              (sending || !reply.trim()) && "opacity-60 cursor-not-allowed"
+              (sending || !reply.trim() || !sectionId) && "opacity-60 cursor-not-allowed"
             )}
           >
             <SendIcon className={cls("h-4 w-4", sending && "animate-pulse")} />
