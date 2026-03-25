@@ -20,6 +20,7 @@ COL_CLASS_RETENTION = "class_retention"
 COL_TERMS = "terms"
 COL_COURSES = "courses"
 COL_SECTIONS = "sections"
+COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_CAMPUSES = "campuses"
 COL_USERS = "users"
 COL_FAC_PROFILES = "faculty_profiles"
@@ -794,6 +795,21 @@ async def _course_units_for_course(course_id: Optional[str]) -> Dict[str, Option
     return {"student_units": student_units, "faculty_units": faculty_units}
 
 
+async def _offered_sections_source(term_id: str) -> str:
+    """Prefer submitted offerings for the working term, fall back to legacy sections."""
+    tid = str(term_id or "").strip()
+    if not tid:
+        return COL_SECTIONS
+    try:
+        submitted_exists = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {"term_id": tid, "submitted_for_scheduling": True},
+            {"_id": 1},
+        )
+        return COL_SECTIONS_SUBMITTED if submitted_exists else COL_SECTIONS
+    except Exception:
+        return COL_SECTIONS
+
+
 @router.get("/classretention")
 async def cr_get(
     action: str = Query(...),
@@ -854,22 +870,34 @@ async def cr_get(
         if not t:
             return {"ok": True, "options": []}
 
+        source_col = await _offered_sections_source(t)
+        match_stage = {"term_id": t}
+        if source_col == COL_SECTIONS_SUBMITTED:
+            match_stage["submitted_for_scheduling"] = True
+
         pipeline = [
-            {"$match": {"term_id": t}},
+            {"$match": match_stage},
             {"$group": {"_id": "$course_id"}},
             {"$lookup": {"from": COL_COURSES, "localField": "_id", "foreignField": "course_id", "as": "c"}},
             {"$unwind": {"path": "$c", "preserveNullAndEmptyArrays": True}},
             {"$project": {
                 "_id": 0,
                 "course_id": {"$ifNull": ["$c.course_id", "$_id"]},
-                "course_code": {"$ifNull": ["$c.course_code", ""]},
+                "course_code": {
+                    "$cond": [
+                        {"$isArray": "$c.course_code"},
+                        {"$ifNull": [{"$arrayElemAt": ["$c.course_code", 0]}, ""]},
+                        {"$ifNull": ["$c.course_code", ""]},
+                    ]
+                },
                 "course_title": {"$ifNull": ["$c.course_title", ""]},
                 "units": {"$ifNull": ["$c.units", None]},
                 "faculty_units": {"$ifNull": ["$c.faculty_units", 3]},
+                "type_of_course": {"$ifNull": ["$c.type_of_course", ""]},
             }},
             {"$sort": {"course_code": 1}},
         ]
-        opts = await db[COL_SECTIONS].aggregate(pipeline).to_list(length=5000)
+        opts = await db[source_col].aggregate(pipeline).to_list(length=5000)
         return {"ok": True, "options": opts}
 
     # --- dropdown helpers: section options by course for active term (includes faculty) ---
@@ -881,8 +909,13 @@ async def cr_get(
         if not t or not course_id:
             return {"ok": True, "options": []}
 
+        source_col = await _offered_sections_source(t)
+        match_stage = {"term_id": t, "course_id": course_id}
+        if source_col == COL_SECTIONS_SUBMITTED:
+            match_stage["submitted_for_scheduling"] = True
+
         pipeline = [
-            {"$match": {"term_id": t, "course_id": course_id}},
+            {"$match": match_stage},
 
             # latest non-archived faculty assignment per section
             {
@@ -974,7 +1007,7 @@ async def cr_get(
 
             {"$sort": {"section_code": 1}},
         ]
-        opts = await db[COL_SECTIONS].aggregate(pipeline).to_list(length=5000)
+        opts = await db[source_col].aggregate(pipeline).to_list(length=5000)
         return {"ok": True, "options": opts}
 
     # --- fallback ---

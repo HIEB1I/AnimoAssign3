@@ -26,6 +26,7 @@ function Pill({ text }: { text?: string }) {
   const map: Record<string, string> = {
     Approved: "bg-green-100 text-green-700",
     "Under Review": "bg-yellow-100 text-yellow-700",
+    "Convert to Special Class": "bg-blue-100 text-blue-700",
     Dissolved: "bg-red-100 text-red-700",
   };
   return (
@@ -35,7 +36,14 @@ function Pill({ text }: { text?: string }) {
   );
 }
 
-const toNumOrNull = (v: string) => (v.trim() === "" ? null : Number(v));
+const toNonNegativeNumOrNull = (v: string) => {
+  if (v.trim() === "") return null;
+  const n = Number(v);
+  if (!Number.isFinite(n)) return null;
+  return n < 0 ? 0 : n;
+};
+const isInvalidEnrolled = (v: unknown) =>
+  v !== null && v !== undefined && (!Number.isInteger(Number(v)) || Number(v) < 0);
 
 export default function OM_ClassRetention(
   { renderExtraActions }: { renderExtraActions?: ExtraActionsRender } = {}
@@ -157,6 +165,10 @@ export default function OM_ClassRetention(
 
   const saveDraft = async () => {
     try {
+      if (isInvalidEnrolled(draft.enrolled)) {
+        setErr("Enrolled must be a whole number that is 0 or higher.");
+        return;
+      }
       setLoading(true);
       setErr("");
       const payload: Partial<OMCRRow> = {
@@ -204,7 +216,7 @@ export default function OM_ClassRetention(
   };
 
   // CHAIR Plantilla-style Excel export (HTML -> .xls), formatted like the Office of the Provost template.
-  // NOTE: "Name of Faculty" is intentionally left blank per the template requirement.
+  // Faculty name is included from the resolved retention rows.
   const exportTableExcel = () => {
     if (!rows || rows.length === 0) {
       alert("No retention rows to export.");
@@ -276,7 +288,7 @@ export default function OM_ClassRetention(
           r.student_units ?? "",
           r.faculty_units ?? "",
           r.enrolled ?? "",
-          "", // blank faculty
+          r.faculty_name || "",
           "", // blank approval
         ].map((c) => esc(normalizeForExcel(String(c ?? ""))));
 
@@ -288,8 +300,8 @@ export default function OM_ClassRetention(
             <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[3]}</td>
             <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[4]}</td>
             <td style="border:1px solid #000;padding:6px;text-align:center;">${cells[5]}</td>
-            <td style="border:1px solid #000;padding:6px;"></td>
-            <td style="border:1px solid #000;padding:6px;"></td>
+            <td style="border:1px solid #000;padding:6px;">${cells[6]}</td>
+            <td style="border:1px solid #000;padding:6px;">${cells[7]}</td>
           </tr>
         `;
       })
@@ -466,7 +478,9 @@ export default function OM_ClassRetention(
                   <input
                     type="number"
                     value={draft.enrolled ?? ""}
-                    onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNumOrNull(e.target.value) }))}
+                    min={0}
+                    step={1}
+                    onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNonNegativeNumOrNull(e.target.value) }))}
                     className={cls(SOFT_INPUT, "w-24 text-center")}
                   />
                 </td>
@@ -596,7 +610,9 @@ export default function OM_ClassRetention(
                         <input
                           type="number"
                           value={draft.enrolled ?? r.enrolled ?? 0}
-                          onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNumOrNull(e.target.value) }))}
+                          min={0}
+                          step={1}
+                          onChange={(e) => setDraft((d) => ({ ...d, enrolled: toNonNegativeNumOrNull(e.target.value) }))}
                           className={cls(SOFT_INPUT, "w-24 text-center")}
                         />
                       ) : (
