@@ -702,6 +702,171 @@ def _mins(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[2:])
 
 
+def _normalize_day_short(value: Any) -> str:
+    raw = _safe_str(value).upper()
+    if not raw:
+        return ""
+    if raw.startswith("TH") or raw == "H":
+        return "H"
+    c = raw[:1]
+    return c if c in {"M", "T", "W", "H", "F", "S"} else ""
+
+
+def _time_to_minutes(value: Any) -> Optional[int]:
+    hhmm = _to_hhmm(value)
+    if not hhmm or not _is_valid_hhmm(hhmm):
+        return None
+    return _mins(hhmm)
+
+
+def _ranges_overlap(begin_a: int, end_a: int, begin_b: int, end_b: int) -> bool:
+    return begin_a < end_b and begin_b < end_a
+
+
+def _meeting_slots_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for suffix in ("1", "2"):
+        day = _normalize_day_short(payload.get(f"day{suffix}"))
+        begin = _to_hhmm(payload.get(f"begin{suffix}"))
+        end = _to_hhmm(payload.get(f"end{suffix}"))
+        b = _time_to_minutes(begin)
+        e = _time_to_minutes(end)
+        if day and b is not None and e is not None and e > b:
+            out.append({"day": day, "begin": begin, "end": end, "begin_minutes": b, "end_minutes": e})
+    return out
+
+
+async def _faculty_busy_slots(term_id: str, faculty_ids: List[str]) -> Dict[str, List[Dict[str, str]]]:
+    term_id = _safe_str(term_id)
+    faculty_ids = [_safe_str(fid) for fid in (faculty_ids or []) if _safe_str(fid)]
+    if not term_id or not faculty_ids:
+        return {}
+
+    result: Dict[str, List[Dict[str, str]]] = {fid: [] for fid in faculty_ids}
+
+    assignments = await db[COL_FAC_ASSIGN].find(
+        {
+            "faculty_id": {"$in": faculty_ids},
+            "is_archived": {"$ne": True},
+        },
+        {"_id": 0, "faculty_id": 1, "section_id": 1, "term_id": 1},
+    ).to_list(20000)
+    if not assignments:
+        return result
+
+    section_ids = sorted({ _safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id")) })
+    if not section_ids:
+        return result
+
+    valid_section_ids: set[str] = set()
+    for a in assignments:
+        sid = _safe_str(a.get("section_id"))
+        if sid and _safe_str(a.get("term_id")) == term_id:
+            valid_section_ids.add(sid)
+
+    try:
+        sub_docs = await db[COL_SECTIONS_SUBMITTED].find(
+            {"term_id": term_id, "section_id": {"$in": section_ids}},
+            {"_id": 0, "section_id": 1},
+        ).to_list(20000)
+        for sec in sub_docs or []:
+            sid = _safe_str(sec.get("section_id"))
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    try:
+        sec_docs = await db[COL_SECTIONS].find(
+            {"term_id": term_id, "section_id": {"$in": section_ids}},
+            {"_id": 0, "section_id": 1},
+        ).to_list(20000)
+        for sec in sec_docs or []:
+            sid = _safe_str(sec.get("section_id"))
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    try:
+        sched_docs = await db[COL_SECTION_SCHEDULES].find(
+            {"term_id": term_id, "section_id": {"$in": section_ids}},
+            {"_id": 0, "section_id": 1},
+        ).to_list(20000)
+        for sched in sched_docs or []:
+            sid = _safe_str(sched.get("section_id"))
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    assignments = [a for a in assignments if _safe_str(a.get("section_id")) in valid_section_ids]
+    scoped_section_ids = sorted({ _safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id")) })
+    if not scoped_section_ids:
+        return result
+
+    schedules_by_section: Dict[str, List[Dict[str, Any]]] = {}
+    sched_cur = db[COL_SECTION_SCHEDULES].find(
+        {"section_id": {"$in": scoped_section_ids}},
+        {"_id": 0, "section_id": 1, "day": 1, "day_of_week": 1, "start_time": 1, "end_time": 1, "begin": 1, "end": 1},
+    )
+    async for sched in sched_cur:
+        sid = _safe_str(sched.get("section_id"))
+        if sid:
+            schedules_by_section.setdefault(sid, []).append(sched)
+
+    for asg in assignments:
+        fid = _safe_str(asg.get("faculty_id"))
+        sid = _safe_str(asg.get("section_id"))
+        if not fid or not sid:
+            continue
+        for sched in schedules_by_section.get(sid, []):
+            day = _normalize_day_short(sched.get("day") or sched.get("day_of_week"))
+            begin = _to_hhmm(sched.get("start_time") or sched.get("begin"))
+            end = _to_hhmm(sched.get("end_time") or sched.get("end"))
+            if not day or not begin or not end:
+                continue
+            result.setdefault(fid, []).append({
+                "section_id": sid,
+                "day": day,
+                "begin": begin,
+                "end": end,
+            })
+    return result
+
+
+async def _find_faculty_schedule_conflicts(*, term_id: str, faculty_id: str, payload: Dict[str, Any], exclude_section_id: Optional[str] = None, exclude_section_ids: Optional[List[str]] = None) -> List[str]:
+    meetings = _meeting_slots_from_payload(payload)
+    fid = _safe_str(faculty_id)
+    if not term_id or not fid or not meetings:
+        return []
+
+    busy_map = await _faculty_busy_slots(term_id, [fid])
+    conflicts: List[str] = []
+    excluded_ids = { _safe_str(exclude_section_id) } if _safe_str(exclude_section_id) else set()
+    for raw in (exclude_section_ids or []):
+        sid = _safe_str(raw)
+        if sid:
+            excluded_ids.add(sid)
+
+    for meeting in meetings:
+        for busy in busy_map.get(fid, []):
+            sid = _safe_str(busy.get("section_id"))
+            if sid and sid in excluded_ids:
+                continue
+            if _normalize_day_short(busy.get("day")) != meeting["day"]:
+                continue
+            b = _time_to_minutes(busy.get("begin"))
+            e = _time_to_minutes(busy.get("end"))
+            if b is None or e is None or e <= b:
+                continue
+            if _ranges_overlap(meeting["begin_minutes"], meeting["end_minutes"], b, e):
+                label = f"{meeting['day']} {_to_hhmm(meeting['begin'])}-{_to_hhmm(meeting['end'])}"
+                if label not in conflicts:
+                    conflicts.append(label)
+    return conflicts
+
+
 def _validate_day_fields(payload: Dict[str, Any]) -> Dict[str, str]:
     day1 = _normalize_day(payload.get("day1"))
     begin1 = _to_hhmm(payload.get("begin1"))
@@ -874,6 +1039,65 @@ async def _latest_faculty_assignment_for_section(section_id: str) -> Dict[str, O
         "faculty_id": r.get("faculty_id") or None,
         "assignment_id": r.get("assignment_id") or None,
     }
+
+
+async def _matching_special_group_docs(term_id: str, course_id: str, *, exclude_special_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
+    term_id = _safe_str(term_id)
+    course_id = _safe_str(course_id)
+    excludes = {_safe_str(x) for x in (exclude_special_ids or []) if _safe_str(x)}
+    if not term_id or not course_id:
+        return []
+
+    docs = await db[COL_SPECIAL].find(
+        {"term_id": term_id, "course_id": course_id, "special_id": {"$exists": True}},
+        {
+            "_id": 0,
+            "special_id": 1,
+            "status": 1,
+            "section_id": 1,
+            "schedule_id1": 1,
+            "schedule_id2": 1,
+            "assignment_id": 1,
+            "schedule_cleared": 1,
+            "faculty_response": 1,
+            "faculty_status": 1,
+            "faculty_accepted_at": 1,
+            "faculty_rejected_at": 1,
+            "updated_at": 1,
+        },
+    ).sort([('updated_at', -1), ('submitted_at', -1)]).to_list(5000)
+
+    out: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for d in docs or []:
+        sid = _safe_str((d or {}).get('special_id'))
+        if not sid or sid in seen or sid in excludes:
+            continue
+        seen.add(sid)
+        out.append(d or {})
+    return out
+
+
+async def _find_existing_approved_group_binding(term_id: str, course_id: str, *, exclude_special_ids: Optional[List[str]] = None) -> Optional[Dict[str, Any]]:
+    docs = await _matching_special_group_docs(term_id, course_id, exclude_special_ids=exclude_special_ids)
+    for d in docs:
+        if _safe_str(d.get('status')) != 'Approved':
+            continue
+        section_id = _safe_str(d.get('section_id'))
+        assignment_id = _safe_str(d.get('assignment_id'))
+        if not section_id and not assignment_id:
+            continue
+        return {
+            'section_id': section_id or None,
+            'schedule_id1': _safe_str(d.get('schedule_id1')) or None,
+            'schedule_id2': _safe_str(d.get('schedule_id2')) or None,
+            'assignment_id': assignment_id or None,
+            'schedule_cleared': bool(d.get('schedule_cleared', False)),
+            'faculty_response': _safe_str(d.get('faculty_response') or d.get('faculty_status')) or None,
+            'faculty_accepted_at': d.get('faculty_accepted_at'),
+            'faculty_rejected_at': d.get('faculty_rejected_at'),
+        }
+    return None
 
 
 async def _schedule_ids_for_section(section_id: str) -> Tuple[Optional[str], Optional[str]]:
@@ -1160,6 +1384,132 @@ async def _create_custom_section_bundle(
     }
 
 
+async def _update_existing_special_section_bundle(
+    *,
+    section_id: str,
+    term_id: str,
+    course_id: str,
+    section_code: str,
+    sched: Dict[str, str],
+    faculty_id: str,
+) -> Dict[str, Optional[str]]:
+    section_id = _safe_str(section_id)
+    section_code = _safe_str(section_code).upper()
+    faculty_id = _safe_str(faculty_id)
+    if not section_id:
+        raise HTTPException(status_code=400, detail="section_id is required.")
+    if not section_code:
+        raise HTTPException(status_code=400, detail="section_code is required for special class schedule.")
+    if not faculty_id:
+        raise HTTPException(status_code=400, detail="faculty_id is required for special class schedule.")
+    if not (sched.get("day1") and sched.get("begin1") and sched.get("end1")):
+        raise HTTPException(status_code=400, detail="Meeting 1 is required.")
+
+    now = datetime.utcnow()
+
+    await db[COL_SECTIONS].update_one(
+        {"section_id": section_id},
+        {"$set": {
+            "section_code": section_code,
+            "term_id": term_id,
+            "course_id": course_id,
+            "remarks": "SPECIAL CLASS",
+            "updated_at": now,
+        }},
+    )
+
+    await db[COL_SECTIONS_SUBMITTED].update_one(
+        {"section_id": section_id},
+        {"$set": {
+            "section_code": section_code,
+            "term_id": term_id,
+            "course_id": course_id,
+            "submitted_for_scheduling": True,
+            "updated_at": now,
+        }},
+        upsert=True,
+    )
+
+    def _hhmm_to_db(hhmm: str) -> str:
+        s = _to_hhmm(hhmm)
+        if not s:
+            return ""
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+
+    try:
+        sec_num = int(section_id.replace("SEC", ""))
+    except Exception:
+        sec_num = 0
+    sch_base = f"SCH{sec_num:04d}"
+    schedule_id1 = f"{sch_base}-01"
+    schedule_id2 = f"{sch_base}-02"
+
+    await db[COL_SECTION_SCHEDULES].update_one(
+        {"section_id": section_id, "schedule_id": schedule_id1},
+        {"$set": {
+            "schedule_id": schedule_id1,
+            "section_id": section_id,
+            "term_id": term_id,
+            "day": sched["day1"],
+            "start_time": _hhmm_to_db(sched["begin1"]),
+            "end_time": _hhmm_to_db(sched["end1"]),
+            "room_id": None,
+            "room_type": "Online",
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    if sched.get("day2") and sched.get("begin2") and sched.get("end2"):
+        await db[COL_SECTION_SCHEDULES].update_one(
+            {"section_id": section_id, "schedule_id": schedule_id2},
+            {"$set": {
+                "schedule_id": schedule_id2,
+                "section_id": section_id,
+                "term_id": term_id,
+                "day": sched["day2"],
+                "start_time": _hhmm_to_db(sched["begin2"]),
+                "end_time": _hhmm_to_db(sched["end2"]),
+                "room_id": None,
+                "room_type": "Online",
+                "updated_at": now,
+            }, "$setOnInsert": {"created_at": now}},
+            upsert=True,
+        )
+    else:
+        await db[COL_SECTION_SCHEDULES].delete_many({"section_id": section_id, "schedule_id": schedule_id2})
+        schedule_id2 = None
+
+    existing_asg = await db[COL_FAC_ASSIGN].find_one(
+        {"section_id": section_id, "is_archived": {"$ne": True}},
+        {"_id": 0, "assignment_id": 1},
+    ) or {}
+    assignment_id = _safe_str(existing_asg.get("assignment_id")) or await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
+    load_id = await _maybe_load_id_for_faculty(term_id, faculty_id)
+    await db[COL_FAC_ASSIGN].update_one(
+        {"assignment_id": assignment_id},
+        {"$set": {
+            "assignment_id": assignment_id,
+            "load_id": load_id,
+            "section_id": section_id,
+            "faculty_id": faculty_id,
+            "is_archived": False,
+            "updated_at": now,
+        }, "$setOnInsert": {"created_at": now}},
+        upsert=True,
+    )
+
+    return {
+        "section_id": section_id,
+        "schedule_id1": schedule_id1,
+        "schedule_id2": schedule_id2,
+        "assignment_id": assignment_id,
+    }
+
+
 async def _section_schedule_two(section_id: str) -> Dict[str, Any]:
     rows = await db[COL_SECTION_SCHEDULES].find(
         {"section_id": section_id},
@@ -1312,6 +1662,7 @@ async def _bulk_maps_for_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     dids = sorted({(r.get("department_id") or r.get("departmentId") or "").strip() for r in rows if (r.get("department_id") or r.get("departmentId"))})
     cids = sorted({(r.get("course_id") or r.get("courseId") or "").strip() for r in rows if (r.get("course_id") or r.get("courseId"))})
     sids = sorted({(r.get("section_id") or "").strip() for r in rows if r.get("section_id")})
+    term_ids = sorted({(r.get("term_id") or "").strip() for r in rows if r.get("term_id")})
 
     users = await db[COL_USERS].find(
         {"$or": [{"user_id": {"$in": uids}}, {"userId": {"$in": uids}}]},
@@ -1338,6 +1689,40 @@ async def _bulk_maps_for_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         {"_id": 0, "section_id": 1, "section_code": 1},
     ).to_list(20000)
 
+    approved_group_bindings: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    if term_ids and cids:
+        approved_docs = await db[COL_SPECIAL].find(
+            {"term_id": {"$in": term_ids}, "course_id": {"$in": cids}, "status": "Approved"},
+            {"_id": 0, "term_id": 1, "course_id": 1, "section_id": 1, "schedule_id1": 1, "schedule_id2": 1, "assignment_id": 1, "schedule_cleared": 1, "faculty_response": 1, "faculty_status": 1, "faculty_accepted_at": 1, "faculty_rejected_at": 1, "updated_at": 1},
+        ).sort([("updated_at", -1), ("submitted_at", -1)]).to_list(20000)
+        for doc in approved_docs or []:
+            term_id = _safe_str(doc.get("term_id"))
+            course_id = _safe_str(doc.get("course_id"))
+            if not term_id or not course_id:
+                continue
+            key = (term_id, course_id)
+            if key in approved_group_bindings:
+                continue
+            approved_group_bindings[key] = {
+                "section_id": _safe_str(doc.get("section_id")) or None,
+                "schedule_id1": _safe_str(doc.get("schedule_id1")) or None,
+                "schedule_id2": _safe_str(doc.get("schedule_id2")) or None,
+                "assignment_id": _safe_str(doc.get("assignment_id")) or None,
+                "schedule_cleared": bool(doc.get("schedule_cleared", False)),
+                "faculty_response": _safe_str(doc.get("faculty_response") or doc.get("faculty_status")),
+                "faculty_accepted_at": doc.get("faculty_accepted_at"),
+                "faculty_rejected_at": doc.get("faculty_rejected_at"),
+            }
+            sid = _safe_str(doc.get("section_id"))
+            if sid and sid not in sids:
+                sids.append(sid)
+
+    if sids:
+        sections = await db[COL_SECTIONS].find(
+            {"section_id": {"$in": sorted(set(sids))}},
+            {"_id": 0, "section_id": 1, "section_code": 1},
+        ).to_list(20000)
+
     umap: Dict[str, Dict[str, Any]] = {}
     for u in users:
         key = u.get("user_id") or u.get("userId")
@@ -1350,7 +1735,7 @@ async def _bulk_maps_for_rows(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
     smap = {s["section_id"]: s for s in sections if s.get("section_id")}
 
     # roommap is a per-request lazy cache (filled on-demand by _room_lookup_cached)
-    return {"umap": umap, "pmap": pmap, "dmap": dmap, "cmap": cmap, "smap": smap, "roommap": {}}
+    return {"umap": umap, "pmap": pmap, "dmap": dmap, "cmap": cmap, "smap": smap, "roommap": {}, "approved_group_bindings": approved_group_bindings}
 
 
 async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
@@ -1361,6 +1746,20 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     sid = (r.get("section_id") or "").strip() or None
 
     status = (r.get("status") or "").strip()
+    binding = (maps.get("approved_group_bindings") or {}).get((_safe_str(r.get("term_id")), cid)) if cid else None
+    if binding and (_safe_str(status) != "Approved"):
+        if not sid:
+            sid = _safe_str(binding.get("section_id")) or None
+        if not _safe_str(r.get("assignment_id") or r.get("faculty_assignment_id")) and binding.get("assignment_id"):
+            r = {**r, "assignment_id": binding.get("assignment_id")}
+        if not _safe_str(r.get("schedule_id1")) and binding.get("schedule_id1"):
+            r = {**r, "schedule_id1": binding.get("schedule_id1")}
+        if not _safe_str(r.get("schedule_id2")) and binding.get("schedule_id2"):
+            r = {**r, "schedule_id2": binding.get("schedule_id2")}
+        if not bool(r.get("schedule_cleared", False)) and bool(binding.get("schedule_cleared", False)):
+            r = {**r, "schedule_cleared": True}
+        status = "Approved"
+
     status_norm = status.upper()
 
     u = (maps["umap"].get(uid) or {}) if uid else {}
@@ -2145,6 +2544,10 @@ async def om_specialclass_get(
         statuses = await _get_allowed_statuses()
         faculty = await _build_faculty_options()
         rooms = await _build_room_options()
+        faculty_availability = await _faculty_busy_slots(
+            _safe_str((active or {}).get("term_id")),
+            [_safe_str(f.get("faculty_id")) for f in (faculty or []) if _safe_str(f.get("faculty_id"))],
+        )
         window = await _special_window_override_for_term(active or {})
         return {
             "ok": True,
@@ -2155,6 +2558,7 @@ async def om_specialclass_get(
                 "term_number": active.get("term_number"),
             },
             "facultyOptions": faculty,
+            "facultyAvailability": faculty_availability,
             # note: rooms are returned but UI does NOT need to edit rooms; display comes from list rows
             "roomOptions": rooms,
             "submission_window": {
@@ -2367,13 +2771,28 @@ async def om_specialclass_post(
         if payload is None:
             raise HTTPException(status_code=400, detail="payload is required.")
 
-        # Load the existing row for change detection + notifications.
-        existing_doc_full = await db[COL_SPECIAL].find_one(
-            {"term_id": current_term_id, "special_id": specialId},
+        requested_ids: List[str] = []
+        if isinstance(payload.get("special_ids"), list):
+            for raw_sid in payload.get("special_ids") or []:
+                sid = _safe_str(raw_sid)
+                if sid and sid not in requested_ids:
+                    requested_ids.append(sid)
+        if specialId not in requested_ids:
+            requested_ids.insert(0, specialId)
+
+        existing_docs = await db[COL_SPECIAL].find(
+            {"term_id": current_term_id, "special_id": {"$in": requested_ids}},
             {"_id": 0},
-        )
-        if not existing_doc_full:
+        ).to_list(max(5000, len(requested_ids) * 2))
+        if not existing_docs:
             raise HTTPException(status_code=404, detail="Application not found.")
+
+        existing_by_id = { _safe_str(d.get("special_id")): d for d in existing_docs if _safe_str(d.get("special_id")) }
+        target_special_ids = [sid for sid in requested_ids if sid in existing_by_id]
+        if not target_special_ids:
+            raise HTTPException(status_code=404, detail="Application not found.")
+
+        existing_doc_full = existing_by_id.get(specialId) or existing_docs[0]
         prev_status = _safe_str(existing_doc_full.get("status"))
         dept_id_for_notify = _safe_str(
             existing_doc_full.get("department_id")
@@ -2450,17 +2869,50 @@ async def om_specialclass_post(
             updates_set["schedule_cleared"] = True
 
         elif "section_id" in payload and req_section_id:
-            # ✅ EXISTING SECTION path
+            # Existing reflected section: if schedule/faculty fields are provided, update the linked bundle in-place.
             sid = req_section_id
+            has_custom_schedule_fields = any(
+                (payload.get(k) not in (None, "", [], {}))
+                for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
+            )
 
-            # store only IDs
-            sid1, sid2 = await _schedule_ids_for_section(sid)
-            fa = await _latest_faculty_assignment_for_section(sid)
+            if has_custom_schedule_fields:
+                sched_valid = _validate_day_fields(payload)
+                faculty_id_for_update = _safe_str(payload.get("faculty_id"))
+                section_code_for_update = _safe_str(payload.get("section_code"))
+                group_section_ids = sorted({
+                    _safe_str((d or {}).get("section_id")) for d in (existing_docs or []) if _safe_str((d or {}).get("section_id"))
+                })
+                conflicts = await _find_faculty_schedule_conflicts(
+                    term_id=current_term_id,
+                    faculty_id=faculty_id_for_update,
+                    payload=sched_valid,
+                    exclude_section_id=sid,
+                    exclude_section_ids=group_section_ids,
+                )
+                if conflicts:
+                    raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
 
-            updates_set["section_id"] = sid
-            updates_set["schedule_id1"] = sid1
-            updates_set["schedule_id2"] = sid2
-            updates_set["assignment_id"] = fa.get("assignment_id")
+                updated = await _update_existing_special_section_bundle(
+                    section_id=sid,
+                    term_id=current_term_id,
+                    course_id=course_id_base,
+                    section_code=section_code_for_update,
+                    sched=sched_valid,
+                    faculty_id=faculty_id_for_update,
+                )
+
+                updates_set["section_id"] = updated.get("section_id")
+                updates_set["schedule_id1"] = updated.get("schedule_id1")
+                updates_set["schedule_id2"] = updated.get("schedule_id2")
+                updates_set["assignment_id"] = updated.get("assignment_id")
+            else:
+                sid1, sid2 = await _schedule_ids_for_section(sid)
+                fa = await _latest_faculty_assignment_for_section(sid)
+                updates_set["section_id"] = sid
+                updates_set["schedule_id1"] = sid1
+                updates_set["schedule_id2"] = sid2
+                updates_set["assignment_id"] = fa.get("assignment_id")
 
             updates_set["schedule_cleared"] = False
 
@@ -2469,6 +2921,17 @@ async def om_specialclass_post(
             section_code = (payload.get("section_code") or "").strip()
             fid = (payload.get("faculty_id") or "").strip()
             sched_valid = _validate_day_fields(payload)
+            group_section_ids = sorted({
+                _safe_str((d or {}).get("section_id")) for d in (existing_docs or []) if _safe_str((d or {}).get("section_id"))
+            })
+            conflicts = await _find_faculty_schedule_conflicts(
+                term_id=current_term_id,
+                faculty_id=fid,
+                payload=sched_valid,
+                exclude_section_ids=group_section_ids,
+            )
+            if conflicts:
+                raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
 
             created = await _create_custom_section_bundle(
                 term_id=current_term_id,
@@ -2493,24 +2956,45 @@ async def om_specialclass_post(
             updates_set["assignment_id"] = None
             updates_set["schedule_cleared"] = False
 
+        target_status_for_update = _safe_str(updates_set.get("status") or payload.get("status") or prev_status)
+        joined_existing_group = False
+        if target_status_for_update == "Approved":
+            binding = await _find_existing_approved_group_binding(
+                current_term_id,
+                course_id_base,
+                exclude_special_ids=target_special_ids,
+            )
+            if binding:
+                joined_existing_group = True
+                updates_set["section_id"] = binding.get("section_id")
+                updates_set["schedule_id1"] = binding.get("schedule_id1")
+                updates_set["schedule_id2"] = binding.get("schedule_id2")
+                updates_set["assignment_id"] = binding.get("assignment_id")
+                updates_set["schedule_cleared"] = bool(binding.get("schedule_cleared", False))
+                if binding.get("faculty_response"):
+                    updates_set["faculty_response"] = binding.get("faculty_response")
+                if binding.get("faculty_accepted_at"):
+                    updates_set["faculty_accepted_at"] = binding.get("faculty_accepted_at")
+                if binding.get("faculty_rejected_at"):
+                    updates_set["faculty_rejected_at"] = None
+
         if not updates_set and not updates_unset:
             return {"ok": False, "message": "Nothing to update."}
 
         updates_set["updated_at"] = datetime.utcnow()
 
-        res = await db[COL_SPECIAL].update_one(
-            {"term_id": current_term_id, "special_id": specialId},
+        res = await db[COL_SPECIAL].update_many(
+            {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
             {"$set": updates_set, "$unset": updates_unset},
         )
 
         # ---------------- STUDENT notifications ----------------
-        # Notify the student who submitted this Special Class when OM updates the record.
+        # Notify every affected student in the grouped Special Class request.
         # Best-effort only; never block the update endpoint due to notification failures.
         try:
-            student_uid = _safe_str(existing_doc_full.get("user_id") or existing_doc_full.get("student_user_id"))
-            if student_uid and res.modified_count:
+            if res.modified_count:
                 updated_doc = await db[COL_SPECIAL].find_one(
-                    {"term_id": current_term_id, "special_id": specialId},
+                    {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
                     {
                         "_id": 0,
                         "status": 1,
@@ -2519,7 +3003,6 @@ async def om_specialclass_post(
                         "courseId": 1,
                         "section_id": 1,
                         "section_code": 1,
-                        # schedule display
                         "schedule_cleared": 1,
                         "schedule_id1": 1,
                         "schedule_id2": 1,
@@ -2534,17 +3017,13 @@ async def om_specialclass_post(
 
                 new_status = _safe_str(updated_doc.get("status"))
                 new_remarks = _safe_str(updated_doc.get("remarks"))
-
                 course_id = _safe_str(updated_doc.get("course_id") or updated_doc.get("courseId") or course_id_base)
                 course_code = ""
                 course_title = ""
                 if course_id:
                     c = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "course_code": 1, "course_title": 1}) or {}
                     cc = c.get("course_code")
-                    if isinstance(cc, list) and cc:
-                        course_code = _safe_str(cc[0])
-                    else:
-                        course_code = _safe_str(cc)
+                    course_code = _safe_str(cc[0]) if isinstance(cc, list) and cc else _safe_str(cc)
                     course_title = _safe_str(c.get("course_title"))
 
                 section_code = _safe_str(updated_doc.get("section_code"))
@@ -2554,7 +3033,6 @@ async def om_specialclass_post(
                         sdoc = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "section_code": 1}) or {}
                         section_code = _safe_str(sdoc.get("section_code"))
 
-                # Schedule line for student email (best-effort)
                 schedule_line = ""
                 try:
                     schedule_cleared = bool(updated_doc.get("schedule_cleared", False))
@@ -2567,7 +3045,6 @@ async def om_specialclass_post(
                         elif sid:
                             df = await _section_schedule_two(sid)
                         else:
-                            # backward-compat only
                             df = {
                                 "day1": _normalize_day(updated_doc.get("day1")),
                                 "begin1": _to_hhmm(updated_doc.get("begin1")),
@@ -2582,7 +3059,7 @@ async def om_specialclass_post(
                 except Exception:
                     schedule_line = ""
 
-                title = "Special Class updated"
+                title = "Special Class approved" if new_status == "Approved" else "Special Class updated"
                 parts = []
                 if course_code or course_title:
                     parts.append(f"Course: {course_code} — {course_title}".strip(" —"))
@@ -2596,23 +3073,29 @@ async def om_specialclass_post(
                     parts.append(f"Remarks: {new_remarks}")
                 details = "\n".join(parts) if parts else "Your Special Class request was updated."
 
-                await create_notification(
-                    user_id=student_uid,
-                    title=title,
-                    details=details,
-                    meta={
-                        "route": "/student/specialclass",
-                        "kind": "student_specialclass_updated",
-                        "term_id": current_term_id,
-                        "special_id": specialId,
-                        "course_id": course_id,
-                    },
-                    send_email=True,
-                    email_from_user_id=(userId or None),
-                )
+                student_uids = sorted({
+                    _safe_str((d or {}).get("user_id") or (d or {}).get("student_user_id"))
+                    for d in (existing_docs or [])
+                    if _safe_str((d or {}).get("user_id") or (d or {}).get("student_user_id"))
+                })
+                for student_uid in student_uids:
+                    await create_notification(
+                        user_id=student_uid,
+                        title=title,
+                        details=details,
+                        meta={
+                            "route": "/student/specialclass",
+                            "kind": "student_specialclass_updated",
+                            "term_id": current_term_id,
+                            "special_id": specialId,
+                            "special_ids": target_special_ids,
+                            "course_id": course_id,
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
         except Exception:
             pass
-
         # ---------------- CHAIR notifications ----------------
         # Notify when:
         # - status transitions to Approved (new reflection)
@@ -2621,7 +3104,7 @@ async def om_specialclass_post(
             # Only attempt notifications if we can resolve a department.
             if dept_id_for_notify and res.modified_count:
                 updated_doc = await db[COL_SPECIAL].find_one(
-                    {"term_id": current_term_id, "special_id": specialId},
+                    {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
                     {"_id": 0, "status": 1, "course_id": 1, "courseId": 1, "section_id": 1, "section_code": 1},
                 )
                 new_status = _safe_str((updated_doc or {}).get("status"))
@@ -2700,6 +3183,38 @@ async def om_specialclass_post(
             pass
 
 
+        # ---------------- GROUP JOIN notifications ----------------
+        try:
+            if joined_existing_group and res.modified_count:
+                joined_count = len(target_special_ids)
+                join_summary = f"{joined_count} student request{'s' if joined_count != 1 else ''} joined an already approved Special Class group."
+                fac_uid, _fac_id = await _resolve_faculty_user_for_special_row(existing_doc_full)
+                if fac_uid:
+                    await _notify_faculty_for_specialclass(
+                        faculty_user_id=fac_uid,
+                        kind="update",
+                        special_id=specialId,
+                        summary=join_summary,
+                        term_id=current_term_id,
+                    )
+                for om_uid in await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"]):
+                    await create_notification(
+                        user_id=om_uid,
+                        title="Special Class group updated",
+                        details=join_summary,
+                        meta={
+                            "route": "/om/special-class",
+                            "kind": "special_class_group_join",
+                            "term_id": current_term_id,
+                            "special_id": specialId,
+                            "special_ids": target_special_ids,
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+        except Exception:
+            pass
+
         # ---------------- APO notifications ----------------
         # Notify APO in-app + Gmail whenever OM updates a Special Class record.
         try:
@@ -2767,6 +3282,38 @@ async def om_specialclass_post(
             {"term_id": current_term_id, "special_id": {"$in": special_ids}},
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
+
+        joined_group_special_ids: List[str] = []
+        if target_status == "Approved" and prev_docs:
+            for d in (prev_docs or []):
+                sid = _safe_str(d.get("special_id"))
+                if not sid or _safe_str(d.get("status")) == "Approved":
+                    continue
+                course_id = _safe_str(d.get("course_id") or d.get("courseId"))
+                if not course_id:
+                    continue
+                binding = await _find_existing_approved_group_binding(
+                    current_term_id,
+                    course_id,
+                    exclude_special_ids=[sid],
+                )
+                if not binding:
+                    continue
+                await db[COL_SPECIAL].update_one(
+                    {"term_id": current_term_id, "special_id": sid},
+                    {"$set": {
+                        "section_id": binding.get("section_id"),
+                        "schedule_id1": binding.get("schedule_id1"),
+                        "schedule_id2": binding.get("schedule_id2"),
+                        "assignment_id": binding.get("assignment_id"),
+                        "schedule_cleared": bool(binding.get("schedule_cleared", False)),
+                        **({"faculty_response": binding.get("faculty_response")} if binding.get("faculty_response") else {}),
+                        **({"faculty_accepted_at": binding.get("faculty_accepted_at")} if binding.get("faculty_accepted_at") else {}),
+                        "faculty_rejected_at": None,
+                        "updated_at": datetime.utcnow(),
+                    }},
+                )
+                joined_group_special_ids.append(sid)
 
         # Notify chairs for approvals / updates (best-effort; never blocks).
         try:
@@ -2839,6 +3386,42 @@ async def om_specialclass_post(
             pass
         
 
+        # ---------------- GROUP JOIN notifications (bulkUpdate) ----------------
+        try:
+            if joined_group_special_ids:
+                joined_summary = f"{len(joined_group_special_ids)} student request{'s' if len(joined_group_special_ids) != 1 else ''} joined an already approved Special Class group."
+                om_uids = await _role_user_ids_by_name_patterns([r"office\s*manager", r"\bom\b"])
+                for om_uid in om_uids:
+                    await create_notification(
+                        user_id=om_uid,
+                        title="Special Class group updated",
+                        details=joined_summary,
+                        meta={
+                            "route": "/om/special-class",
+                            "kind": "special_class_group_join",
+                            "term_id": current_term_id,
+                            "special_ids": joined_group_special_ids,
+                        },
+                        send_email=True,
+                        email_from_user_id=(userId or None),
+                    )
+                for sid in joined_group_special_ids:
+                    updated_joined = await db[COL_SPECIAL].find_one(
+                        {"term_id": current_term_id, "special_id": sid},
+                        {"_id": 0, "assignment_id": 1, "faculty_assignment_id": 1, "section_id": 1},
+                    ) or {}
+                    fac_uid, _ = await _resolve_faculty_user_for_special_row(updated_joined)
+                    if fac_uid:
+                        await _notify_faculty_for_specialclass(
+                            faculty_user_id=fac_uid,
+                            kind="update",
+                            special_id=sid,
+                            summary=joined_summary,
+                            term_id=current_term_id,
+                        )
+        except Exception:
+            pass
+
         # ---------------- STUDENT notifications (bulkUpdate) ----------------
         # Notify each affected student when OM bulk-updates Special Class statuses.
         try:
@@ -2876,7 +3459,7 @@ async def om_specialclass_post(
                     by_user.setdefault(uid, []).append(label or sid or 'Special Class')
 
                 for uid, items in by_user.items():
-                    title = "Special Class updated"
+                    title = "Special Class approved" if target_status == "Approved" else "Special Class updated"
                     lines = [f"Status: {target_status}"]
                     if items:
                         lines.append("Updated request(s):")

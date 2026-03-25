@@ -816,14 +816,27 @@ function normalizeDay(raw?: string): DayLong | null {
 }
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
+type TLItemStudentReasonPair = {
+  special_id?: string;
+  student: string;
+  reason: string;
+};
+
 type TLItem = {
   section_id: string;
+  course_id?: string;
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
-  special_faculty_status?: "PENDING" | "ACCEPTED" | string;
+  special_ids?: string[];
+  special_group_key?: string;
+  special_faculty_status?: "PENDING" | "ACCEPTED" | "REJECTED" | string;
   student?: string;
+  students?: string[];
   reason?: string;
+  reasons?: string[];
+  student_reason_pairs?: TLItemStudentReasonPair[];
+  student_count?: number;
   is_serviced?: boolean;
   serviced_department?: string;
   course_code: string;
@@ -853,6 +866,7 @@ type TLItemForCalendar = {
   syllabus?: string;
   is_special_class?: boolean;
   special_id?: string;
+  special_ids?: string[];
   is_serviced?: boolean;
   serviced_department?: string;
   // Store original item for modal
@@ -1127,11 +1141,13 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [specialEdit, setSpecialEdit] = useState<null | {
     special_id: string;
+    special_ids: string[];
     section_id: string;
     original: any;
   }>(null);
   const [specialEditBusy, setSpecialEditBusy] = useState(false);
   const [selectedSpecialIds, setSelectedSpecialIds] = useState<Record<string, boolean>>({});
+  const [specialActionOverrides, setSpecialActionOverrides] = useState<Record<string, "ACCEPTED" | "REJECTED">>({});
   const [bulkSpecialOpen, setBulkSpecialOpen] = useState(false);
   const [bulkSpecialSending, setBulkSpecialSending] = useState(false);
   const [bulkSpecialMessage, setBulkSpecialMessage] = useState("");
@@ -1336,6 +1352,10 @@ const [isAccepting, setIsAccepting] = useState(false);
   const [isSyncingSpecial, setIsSyncingSpecial] = useState(false);
   const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
 
+  useEffect(() => {
+    setSpecialActionOverrides({});
+  }, [teachingLoad]);
+
   const TIME_POINTS = useMemo(
     () =>
       Array.from(
@@ -1425,6 +1445,14 @@ const [isAccepting, setIsAccepting] = useState(false);
       const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
       const userId = raw.userId || raw.user_id || raw.id;
       const special_id = String(it?.special_id || it?.originalItem?.special_id || "").trim();
+      const special_ids = Array.from(
+        new Set(
+          ((it?.special_ids || it?.originalItem?.special_ids || []) as any[])
+            .map((v) => String(v || "").trim())
+            .filter(Boolean)
+        )
+      );
+      if (special_id && !special_ids.includes(special_id)) special_ids.unshift(special_id);
       const section_id = String(it?.section_id || it?.originalItem?.section_id || "").trim();
       if (!userId || !special_id || !section_id) {
         onToast?.("error", "Missing special class identifiers.");
@@ -1440,7 +1468,7 @@ const [isAccepting, setIsAccepting] = useState(false);
       const room1Label = String((oi as any)?.room1 || "").trim();
       const room2Label = String((oi as any)?.room2 || "").trim();
 
-      setSpecialEdit({ special_id, section_id, original: oi });
+      setSpecialEdit({ special_id, special_ids, section_id, original: oi });
 
       const day1Val = d1 && d1 !== "TBA" ? d1 : "Monday";
       const begin1Val = t1.begin && t1.begin !== "—" ? t1.begin : "";
@@ -1522,6 +1550,7 @@ const [isAccepting, setIsAccepting] = useState(false);
       await apiPost("/api/faculty/special-class/update-schedule", {
         user_id: userId,
         special_id: specialEdit.special_id,
+        special_ids: specialEdit.special_ids,
         section_id: specialEdit.section_id,
         meeting1: {
           day: specialEditDraft.day1,
@@ -1540,7 +1569,7 @@ const [isAccepting, setIsAccepting] = useState(false);
             : {},
       });
 
-      onToast?.("success", "Special class schedule updated. Notifications sent to OM/Chair.");
+      onToast?.("success", "Special class schedule updated. Notifications sent to OM, Chair, and student(s).");
       setSpecialEdit(null);
       setSpecialRooms1([]);
       setSpecialRooms2([]);
@@ -1657,19 +1686,128 @@ const scheduleFinalLabel = (() => {
     () => (teachingLoad || []).filter((it) => Boolean((it as any)?.is_special_class)),
     [teachingLoad]
   );
+  const groupedSpecialTeachingLoad = useMemo(() => {
+    const map = new Map<string, TLItem[]>();
+
+    const normalizeDisplayParts = (value: unknown) =>
+      String(value ?? "")
+        .split(/\n|,(?=\s*[A-Z])/)
+        .map((part) => part.trim())
+        .filter((part) => part && part !== "—");
+
+    const normalizeStudentReasonPairs = (it: TLItem): TLItemStudentReasonPair[] => {
+      const explicitPairs = Array.isArray((it as any)?.student_reason_pairs)
+        ? (((it as any).student_reason_pairs as unknown[])
+            .filter((pair): pair is Record<string, unknown> => Boolean(pair) && typeof pair === "object")
+            .map((pair) => ({
+              special_id: String(pair.special_id || (it as any)?.special_id || "").trim() || undefined,
+              student: String(pair.student || "—").trim() || "—",
+              reason: String(pair.reason || "—").trim() || "—",
+            })))
+        : [];
+      if (explicitPairs.length) return explicitPairs;
+
+      const students = Array.isArray((it as any)?.students)
+        ? (((it as any).students as unknown[]).flatMap((value) => normalizeDisplayParts(value)))
+        : normalizeDisplayParts((it as any)?.student);
+      const reasons = Array.isArray((it as any)?.reasons)
+        ? (((it as any).reasons as unknown[]).flatMap((value) => normalizeDisplayParts(value)))
+        : normalizeDisplayParts((it as any)?.reason);
+      const maxLen = Math.max(students.length, reasons.length, 1);
+      return Array.from({ length: maxLen }, (_, index) => ({
+        special_id: String((it as any)?.special_id || "").trim() || undefined,
+        student: students[index] || students[0] || "—",
+        reason: reasons[index] || reasons[0] || "—",
+      }));
+    };
+
+    (specialTeachingLoad || []).forEach((it) => {
+      const key = [
+        String((it as any)?.course_id || "").trim().toUpperCase(),
+        String(it.course_code || "").trim().toUpperCase(),
+        String(it.course_title || "").trim().toUpperCase(),
+      ].join("|");
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(it);
+    });
+
+    return Array.from(map.entries())
+      .map(([groupKey, items]) => {
+        const base = { ...(items[0] || {}) } as TLItem;
+        const pairByKey = new Map<string, TLItemStudentReasonPair>();
+        items.forEach((it) => {
+          normalizeStudentReasonPairs(it).forEach((pair, pairIndex) => {
+            const dedupeKey = `${String(pair.special_id || (it as any)?.special_id || "").trim() || `ROW-${pairIndex}`}|${pair.student}|${pair.reason}`;
+            if (!pairByKey.has(dedupeKey)) pairByKey.set(dedupeKey, pair);
+          });
+        });
+        const studentReasonPairs = Array.from(pairByKey.values()).sort((a, b) =>
+          `${a.student}|${a.special_id || ""}`.localeCompare(`${b.student}|${b.special_id || ""}`)
+        );
+        const students = studentReasonPairs.map((pair) => pair.student || "—");
+        const reasons = studentReasonPairs.map((pair) => pair.reason || "—");
+        const specialIds = Array.from(new Set(items.flatMap((it) => ((it as any)?.special_ids || [(it as any)?.special_id]) as any[]).map((value) => String(value || "").trim()).filter(Boolean)));
+        const backendStudentCount = Math.max(
+          0,
+          ...items.map((it) => {
+            const raw = Number((it as any)?.student_count ?? 0);
+            return Number.isFinite(raw) ? raw : 0;
+          })
+        );
+        const finalStudentCount = Math.max(students.length, backendStudentCount);
+        const overriddenStatus = specialActionOverrides[groupKey];
+        const allAccepted = items.every(
+          (it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() === "ACCEPTED"
+        );
+        return {
+          ...base,
+          special_group_key: groupKey,
+          special_id: specialIds[0] || String((base as any)?.special_id || ""),
+          special_ids: specialIds,
+          student_reason_pairs: studentReasonPairs,
+          students,
+          reasons,
+          student: students.join("\n") || "—",
+          reason: reasons.join("\n") || "—",
+          student_count: finalStudentCount,
+          special_faculty_status: overriddenStatus || (allAccepted ? "ACCEPTED" : "PENDING"),
+        } as TLItem;
+      })
+      .filter((it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() !== "REJECTED");
+  }, [specialTeachingLoad, specialActionOverrides]);
   const acceptedSpecialTeachingLoad = useMemo(
     () =>
-      specialTeachingLoad.filter(
+      groupedSpecialTeachingLoad.filter(
         (it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() === "ACCEPTED"
       ),
-    [specialTeachingLoad]
+    [groupedSpecialTeachingLoad]
   );
   const selectedSpecialList = useMemo(
     () =>
       acceptedSpecialTeachingLoad.filter(
-        (it) => Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])
+        (it) => Boolean(selectedSpecialIds[String((it as any)?.special_group_key || (it as any)?.special_id || "")])
       ),
     [acceptedSpecialTeachingLoad, selectedSpecialIds]
+  );
+  const selectedSpecialStudentCount = useMemo(
+    () =>
+      selectedSpecialList.reduce((total, it) => {
+        const raw = Number((it as any)?.student_count ?? 0);
+        if (Number.isFinite(raw) && raw > 0) return total + raw;
+
+        const explicitPairs = Array.isArray((it as any)?.student_reason_pairs)
+          ? (it as any).student_reason_pairs.filter((pair: any) => pair && typeof pair === "object")
+          : [];
+        if (explicitPairs.length > 0) return total + explicitPairs.length;
+
+        const students = Array.isArray((it as any)?.students)
+          ? (it as any).students.filter((value: any) => String(value ?? "").trim() && String(value ?? "").trim() !== "—")
+          : [];
+        if (students.length > 0) return total + students.length;
+
+        return total + 1;
+      }, 0),
+    [selectedSpecialList]
   );
   const allSpecialSelected =
     acceptedSpecialTeachingLoad.length > 0 && selectedSpecialList.length === acceptedSpecialTeachingLoad.length;
@@ -1851,13 +1989,13 @@ const scheduleFinalLabel = (() => {
                     <button
                       type="button"
                       onClick={() => {
-                        if (!selectedSpecialList.length) {
+                        if (!selectedSpecialStudentCount) {
                           onToast?.("warning", "Select at least one special class.", "Nothing selected");
                           return;
                         }
                         setBulkSpecialOpen(true);
                       }}
-                      disabled={bulkSpecialSending || selectedSpecialList.length === 0}
+                      disabled={bulkSpecialSending || selectedSpecialStudentCount === 0}
                       className={cls(
                         "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-normal shadow-sm whitespace-nowrap sm:min-w-[172px] sm:flex-none",
                         "focus:outline-none focus:ring-2 focus:ring-blue-600/30",
@@ -1867,7 +2005,7 @@ const scheduleFinalLabel = (() => {
                       )}
                       title="Send one grouped inbox message per accepted student"
                     >
-                      Send to ({selectedSpecialList.length}) Student
+                      Send to ({selectedSpecialStudentCount}) Student
                     </button>
 
                     <button
@@ -1932,7 +2070,7 @@ const scheduleFinalLabel = (() => {
 
       <BulkSpecialMessageDialog
         open={bulkSpecialOpen}
-        selectedCount={selectedSpecialList.length}
+        selectedCount={selectedSpecialStudentCount}
         message={bulkSpecialMessage}
         sending={bulkSpecialSending}
         onChangeMessage={setBulkSpecialMessage}
@@ -1943,9 +2081,14 @@ const scheduleFinalLabel = (() => {
         onSend={async () => {
           try {
             if (bulkSpecialSending) return;
-            const ids = selectedSpecialList
-              .map((it) => String((it as any)?.special_id || "").trim())
-              .filter(Boolean);
+            const ids = Array.from(
+              new Set(
+                selectedSpecialList
+                  .flatMap((it) => (((it as any)?.special_ids || [(it as any)?.special_id]) as any[]))
+                  .map((v) => String(v || "").trim())
+                  .filter(Boolean)
+              )
+            );
             if (ids.length === 0) {
               onToast?.("warning", "Select at least one special class.", "Nothing selected");
               return;
@@ -2026,13 +2169,18 @@ const scheduleFinalLabel = (() => {
             if (!userId) throw new Error("User is not logged in");
             if (!it?.special_id) throw new Error("Missing special class id");
 
+            const groupKey = String((it as any)?.special_group_key || it.special_id || "").trim();
             await apiPost("/api/faculty/special-class/respond", {
               user_id: userId,
               special_id: it.special_id,
+              special_ids: it.special_ids || [it.special_id],
               action: "reject",
             });
 
-            onToast?.("info", "Special class rejected. OM/Chair notified.");
+            if (groupKey) {
+              setSpecialActionOverrides((prev) => ({ ...prev, [groupKey]: "REJECTED" }));
+            }
+            onToast?.("info", "Special class rejected. Notifications sent to OM, Chair, and student(s).");
             setRejectSpecialOpen(false);
             setRejectSpecialItem(null);
             await Promise.resolve(onRefresh?.());
@@ -2169,7 +2317,7 @@ const scheduleFinalLabel = (() => {
                       if (!checked) return {};
                       const next: Record<string, boolean> = {};
                       acceptedSpecialTeachingLoad.forEach((row) => {
-                        const sid = String((row as any)?.special_id || "").trim();
+                        const sid = String((row as any)?.special_group_key || (row as any)?.special_id || "").trim();
                         if (sid) next[sid] = true;
                       });
                       return next;
@@ -2192,14 +2340,14 @@ const scheduleFinalLabel = (() => {
             </tr>
           </thead>
           <tbody className="text-gray-900">
-            {specialTeachingLoad.length === 0 ? (
+            {groupedSpecialTeachingLoad.length === 0 ? (
               <tr>
                 <td colSpan={SPECIAL_TABLE_HEADERS.length + 1} className="px-4 py-6 text-center text-sm text-neutral-500">
                   No special classes.
                 </td>
               </tr>
             ) : (
-              specialTeachingLoad.map((it, idx) => {
+              groupedSpecialTeachingLoad.map((it, idx) => {
                 const t1 = splitBeginEnd(it.time1);
                 const t2 = splitBeginEnd(it.time2);
 
@@ -2223,13 +2371,18 @@ const scheduleFinalLabel = (() => {
                     const userId = raw.userId || raw.user_id || raw.id;
                     if (!userId) throw new Error("User is not logged in");
 
+                    const groupKey = String((it as any)?.special_group_key || (it as any)?.special_id || "").trim();
                     await apiPost("/api/faculty/special-class/respond", {
                       user_id: userId,
                       special_id: (it as any)?.special_id,
+                      special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
                       action: "accept",
                     });
 
-                    onToast?.("success", "Special class accepted. OM/Chair notified.");
+                    if (groupKey) {
+                      setSpecialActionOverrides((prev) => ({ ...prev, [groupKey]: "ACCEPTED" }));
+                    }
+                    onToast?.("success", "Special class accepted. Notifications sent to OM, Chair, and student(s).");
                     await Promise.resolve(onRefresh?.());
                   } catch (err: any) {
                     onToast?.("error", err?.message || "Failed to accept special class.");
@@ -2241,6 +2394,7 @@ const scheduleFinalLabel = (() => {
                   setRejectSpecialItem({
                     ...it,
                     special_id: (it as any)?.special_id,
+                    special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
                   });
                   setRejectSpecialOpen(true);
                 };
@@ -2261,6 +2415,7 @@ const scheduleFinalLabel = (() => {
                       syllabus: it.syllabus,
                       is_special_class: true,
                       special_id: (it as any)?.special_id,
+                      special_ids: (it as any)?.special_ids || [(it as any)?.special_id],
                       forceConversationOnly: true,
                       allowStartConversation: true,
                       originalItem: it,
@@ -2294,9 +2449,9 @@ const scheduleFinalLabel = (() => {
                         type="checkbox"
                         className="mt-1 h-4 w-4 rounded border-gray-300 accent-emerald-600"
                         disabled={isPending}
-                        checked={Boolean(selectedSpecialIds[String((it as any)?.special_id || "")])}
+                        checked={Boolean(selectedSpecialIds[String((it as any)?.special_group_key || (it as any)?.special_id || "")])}
                         onChange={(e) => {
-                          const sid = String((it as any)?.special_id || "").trim();
+                          const sid = String((it as any)?.special_group_key || (it as any)?.special_id || "").trim();
                           if (!sid || isPending) return;
                           const checked = e.target.checked;
                           setSelectedSpecialIds((prev) => {
@@ -2311,14 +2466,22 @@ const scheduleFinalLabel = (() => {
                     </td>
                     <td className="px-3 py-3 align-top">
                       <div className="leading-tight">
-                        <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">{(it as any)?.student || "—"}</div>
-                      
+                        <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">
+                          {(it as any)?.student_count ? `${(it as any).student_count} student${(it as any).student_count === 1 ? "" : "s"}` : "—"}
+                        </div>
+                        <div className="mt-1 space-y-1 text-[12px] text-gray-700">
+                          {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).length ? (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).map((pair, studentIdx) => (
+                            <div key={`${pair.special_id || pair.student}-${studentIdx}`} className="break-words whitespace-normal">{pair.student || "—"}</div>
+                          )) : <div>—</div>}
+                        </div>
                       </div>
                     </td>
 
                     <td className="px-3 py-3 align-top">
-                      <div className="text-[12px] text-gray-800 break-words whitespace-normal">
-                        {(it as any)?.reason || "—"}
+                      <div className="space-y-1 text-[12px] text-gray-800 break-words whitespace-normal">
+                        {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).length ? (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).map((pair, reasonIdx) => (
+                          <div key={`${pair.special_id || pair.reason}-${reasonIdx}`}>{pair.reason || "—"}</div>
+                        )) : <div>—</div>}
                       </div>
                     </td>
 
@@ -3807,7 +3970,7 @@ function RfcThreadView({
       )}
 
       {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
-      {!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation)) && (
+      {(!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation))) ? (
         <div className="mt-3 flex items-end gap-2">
           <textarea
             rows={2}
@@ -3851,7 +4014,7 @@ function RfcThreadView({
             <SendIcon className={cls("h-4 w-4", sending && "animate-pulse")} />
           </button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
