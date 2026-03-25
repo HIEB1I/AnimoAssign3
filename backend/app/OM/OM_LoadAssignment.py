@@ -1511,6 +1511,35 @@ async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[
     rows: List[Dict[str, Any]] = []
     seen_fs_ids: set[str] = set()
 
+    # DEDUPE GUARD:
+    # If a Faculty Service request was already reflected into the real OM sources
+    # (faculty_assignments / section_schedules), then `_fetch_rows()` will already
+    # return the normal row for that section_id.
+    #
+    # In that case, do NOT create an extra display-only overlay row, otherwise
+    # the OM table shows 2 rows for the same assignment:
+    #   1) the real OM row
+    #   2) the FSR::<fs_id> overlay row
+    reflected_section_ids: set[str] = set()
+    if section_ids:
+        try:
+            reflected_assignments = await db[COL_ASSIGN].find(
+                {
+                    "section_id": {"$in": section_ids},
+                    "is_archived": {"$ne": True},
+                    "faculty_id": {"$nin": ["", None]},
+                    "synced_from_faculty_service": True,
+                },
+                {"_id": 0, "section_id": 1},
+            ).to_list(None)
+
+            for a in reflected_assignments or []:
+                rsid = str(a.get("section_id") or "").strip()
+                if rsid:
+                    reflected_section_ids.add(rsid)
+        except Exception:
+            reflected_section_ids = set()
+
     for d in fs_docs:
         fs_id = str(d.get('fs_id') or '').strip()
         if not fs_id or fs_id in seen_fs_ids:
@@ -1521,6 +1550,11 @@ async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[
         if checked_term_membership:
             if not sid or sid not in valid_section_ids:
                 continue
+
+        # If this section already exists as a real reflected OM assignment row,
+        # skip the Faculty Service overlay row to avoid duplicates.
+        if sid and sid in reflected_section_ids:
+            continue
 
         faculty = (d.get('faculty') or {}) if isinstance(d.get('faculty'), dict) else {}
         faculty_name = (
