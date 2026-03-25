@@ -1700,7 +1700,7 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
         schedule_lines = _special_class_schedule_summary_lines(sch)
 
         body_lines = [
-            f"Hello! This is {faculty_name} regarding your special class request.",
+            f"Hello! This is your special class request.",
             "",
             f"Course: {' '.join([x for x in [course_code, section_display] if x]).strip() or sid}",
         ]
@@ -1718,21 +1718,22 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
 
         conversation = open_dm_conversation(user_id, student_uid)
 
-        # Insert message
+        # Insert message into the shared DM thread. The messaging store derives
+        # recipients from the conversation itself, so only the supported
+        # parameters should be passed here.
         insert_message(
             conversation_id=conversation["conversation_id"],
             sender_id=user_id,
-            recipient_id=student_uid,
-            message="\n".join(body_lines),
+            body="\n".join(body_lines),
         )
 
-        # Create notification (in-app + Gmail)
+        # Create a topbar notification that deep-links the student to their inbox.
         await create_notification(
             user_id=student_uid,
             title="New message from faculty",
             details=f"{faculty_name} sent you a message about your special class.",
             meta={
-                "route": "/faculty/inbox",
+                "route": "/student/inbox",
                 "kind": "special_class_message",
                 "special_id": sid,
             },
