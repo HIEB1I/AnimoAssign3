@@ -88,7 +88,6 @@ import {
   Download,
   Save,
   Trash2,
-  Inbox,
   MessageSquareText,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
@@ -8150,7 +8149,7 @@ const courseCodeToInfo = useMemo(() => {
                                               });
                                             }}
                                           >
-                                            <Inbox className="h-5 w-5" />
+                                            <MessageSquareText className="h-5 w-5" />
                                             {unread && (
                                               <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
                                             )}
