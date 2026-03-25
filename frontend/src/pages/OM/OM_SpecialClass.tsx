@@ -677,6 +677,45 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     return parts.length ? parts.join(" • ") : undefined;
   };
 
+  type RoomCellItem = {
+    key: string;
+    label: string;
+    title?: string;
+  };
+
+  const roomCellItems = (r: Partial<OMSpecialClassRow>): RoomCellItem[] => {
+    const items: RoomCellItem[] = [];
+
+    const addSlot = (slot: 1 | 2) => {
+      const day = String(slot === 1 ? r.day1 || "" : r.day2 || "").trim();
+      const beginRaw = String(slot === 1 ? r.begin1 || "" : r.begin2 || "").trim();
+      const endRaw = String(slot === 1 ? r.end1 || "" : r.end2 || "").trim();
+      const roomRaw = String(slot === 1 ? r.room1 || "" : r.room2 || "").trim();
+      const roomId = String(slot === 1 ? r.room_id1 || "" : r.room_id2 || "").trim();
+      const hasAnyValue = day || beginRaw || endRaw || roomRaw || roomId;
+
+      if (!hasAnyValue) return;
+
+      items.push({
+        key: `room-${slot}`,
+        label: roomLabel(r, slot),
+        title: roomTitle(r, slot),
+      });
+    };
+
+    addSlot(1);
+    addSlot(2);
+
+    if (items.length) return items;
+
+    return [
+      {
+        key: 'room-empty',
+        label: 'TBA',
+      },
+    ];
+  };
+
   const handleStartWindow = async () => {
     if (startingWindow) return;
 

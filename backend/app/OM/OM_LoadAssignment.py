@@ -3856,6 +3856,65 @@ async def om_get_submitted_course_offerings(
 
     return {"ok": True, "courses": out}
 
+def _extract_section_numeric_suffix(section_code: str) -> int:
+    s = str(section_code or "").strip().upper()
+    m = re.search(r"(\d+)$", s)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+async def _next_auto_section_code(
+    *,
+    db,
+    term_id: str,
+    course_id: str,
+    campus_id: str,
+) -> str:
+    """Auto-generate the next section code for OM Add Section."""
+    campus = str(campus_id or "").strip().upper()
+    default_prefix = "XX" if campus == "CMPS0002" else "S"
+
+    existing_codes: list[str] = []
+    q = {
+        "term_id": term_id,
+        "course_id": course_id,
+        "campus_id": campus_id,
+        "section_code": {"$exists": True, "$ne": ""},
+    }
+
+    cur = db[COL_SECTIONS_SUBMITTED].find(q, {"_id": 0, "section_code": 1})
+    async for d in cur:
+        code = str(d.get("section_code") or "").strip()
+        if code:
+            existing_codes.append(code)
+
+    cur2 = db[COL_SECTIONS].find(q, {"_id": 0, "section_code": 1})
+    async for d in cur2:
+        code = str(d.get("section_code") or "").strip()
+        if code:
+            existing_codes.append(code)
+
+    if existing_codes:
+        ranked = []
+        for code in existing_codes:
+            clean = str(code or "").strip().upper()
+            ranked.append((_extract_section_numeric_suffix(clean), clean))
+        ranked.sort(key=lambda x: x[0])
+        last_code = ranked[-1][1]
+        prefix_match = re.match(r"([A-Z]+)", last_code)
+        prefix = prefix_match.group(1) if prefix_match else default_prefix
+        next_num = ranked[-1][0] + 1
+    else:
+        prefix = default_prefix
+        next_num = 1
+
+    return f"{prefix}{next_num:02d}"
+
+
 @router.post("/load-assignment/new-line")
 async def om_save_new_line(
     user_id: str,
@@ -3886,14 +3945,13 @@ async def om_save_new_line(
 
     # Validate required payload fields
     course_code = str(payload.get("course_code") or "").strip()
-    section_code = str(payload.get("section_code") or "").strip()
     faculty_id = str(payload.get("faculty_id") or "").strip()
-    mode = str(payload.get("mode") or "").strip().upper()
+    mode = str(payload.get("mode") or "HYB").strip().upper() or "HYB"
     day1 = str(payload.get("day1") or "").strip().upper()
     begin1 = _norm_hhmm(str(payload.get("begin1") or "").strip())
     end1 = _norm_hhmm(str(payload.get("end1") or "").strip())
 
-    if not course_code or not section_code or not faculty_id or not mode or not day1 or not begin1 or not end1:
+    if not course_code or not faculty_id or not day1 or not begin1 or not end1:
         raise HTTPException(status_code=422, detail="Missing required fields")
 
     # Optional meeting 2
@@ -3918,65 +3976,6 @@ async def om_save_new_line(
     if not course_id:
         raise HTTPException(status_code=500, detail="Course is missing course_id")
 
-    # --- APO validation helpers ---
-    def _apo_from_section_prefix(sec: str) -> str:
-        """Return 'APO Manila' or 'APO Laguna' based on section prefix."""
-        s = (sec or "").strip().upper()
-        if s.startswith("XX") or s.startswith("XC"):
-            return "APO Laguna"
-        if s.startswith("S") or s.startswith("G"):
-            return "APO Manila"
-        return ""
-
-    def _apo_from_campus_id(cid: str) -> str:
-        """Best-effort mapping of campus_id -> APO name."""
-        c = (cid or "").strip().upper()
-        # Project convention observed in other modules: CMPS0001=Manila, CMPS0002=Laguna
-        if c == "CMPS0001":
-            return "APO Manila"
-        if c == "CMPS0002":
-            return "APO Laguna"
-        return ""
-
-    async def _infer_om_campus_id() -> str:
-        """Infer OM campus_id from payload, OM role scope, or term offerings."""
-        # 1) explicit payload override
-        cid = str(payload.get("campus_id") or "").strip()
-        if cid:
-            return cid
-
-        # 2) OM role scope (ROLE0006) may include campus scopes
-        ra = await db.get_collection("role_assignments").find_one(
-            {"user_id": user_id, "role_id": "ROLE0006"},
-            {"_id": 0, "scope": 1},
-        ) or {}
-        for sc in (ra.get("scope") or []):
-            if not isinstance(sc, dict):
-                continue
-            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
-            if typ in ("campus", "campuses") or "campus" in typ:
-                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
-                if v:
-                    return v
-
-        # 3) Infer from the submitted offerings for this OM's department scope in the term
-        try:
-            pipe = [
-                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
-                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
-                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
-                {"$match": {"course.department_id": {"$in": dept_ids}}},
-                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
-                {"$sort": {"n": -1}},
-                {"$limit": 1},
-            ]
-            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
-            if top and top[0].get("_id"):
-                return str(top[0]["_id"]).strip()
-        except Exception:
-            pass
-        return ""
-
     # Ensure this course exists in submitted offerings for this term (same source as OM table)
     # NOTE: campus_id from the submitted offering is the source of truth for which
     # APO/campus this course offering belongs to. This prevents false Manila/Laguna
@@ -3992,39 +3991,52 @@ async def om_save_new_line(
     if not offering_exists:
         raise HTTPException(status_code=409, detail="Course is not part of submitted course offerings")
 
-    # 1) Prevent duplicate sections per course (same course_code/course_id) for the active term
-    dup = await db[COL_SECTIONS_SUBMITTED].find_one(
-        {
-            "term_id": tid,
-            "submitted_for_scheduling": True,
-            "course_id": course_id,
-            "section_code": {"$regex": rf"^{re.escape(section_code)}$", "$options": "i"},
-        },
-        {"_id": 0, "section_id": 1},
-    )
-    if dup:
-        raise HTTPException(status_code=409, detail="Duplicate section: this section already exists for that course")
-
-    # 2) Enforce APO rules based on section prefix AND the course offering's campus.
-    # The submitted course offering (sections_submitted) is treated as the source of truth
-    # for which campus/APO the course belongs to.
-    section_apo = _apo_from_section_prefix(section_code)
-    if not section_apo:
-        raise HTTPException(
-            status_code=409,
-            detail="Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna)",
-        )
-
     expected_campus_id = (
         str(payload.get("campus_id") or "").strip()
         or str(offering_exists.get("campus_id") or "").strip()
     )
-    expected_apo = _apo_from_campus_id(expected_campus_id)
-    if expected_apo and section_apo != expected_apo:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {expected_apo}.",
-        )
+
+    if not expected_campus_id:
+        ra = await db.get_collection("role_assignments").find_one(
+            {"user_id": user_id, "role_id": "ROLE0006"},
+            {"_id": 0, "scope": 1},
+        ) or {}
+        for sc in (ra.get("scope") or []):
+            if not isinstance(sc, dict):
+                continue
+            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
+            if typ in ("campus", "campuses") or "campus" in typ:
+                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
+                if v:
+                    expected_campus_id = v
+                    break
+
+    if not expected_campus_id:
+        try:
+            pipe = [
+                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+                {"$match": {"course.department_id": {"$in": dept_ids}}},
+                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
+                {"$sort": {"n": -1}},
+                {"$limit": 1},
+            ]
+            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+            if top and top[0].get("_id"):
+                expected_campus_id = str(top[0]["_id"]).strip()
+        except Exception:
+            pass
+
+    if not expected_campus_id:
+        raise HTTPException(status_code=409, detail="Unable to resolve campus for new section")
+
+    section_code = await _next_auto_section_code(
+        db=db,
+        term_id=tid,
+        course_id=course_id,
+        campus_id=expected_campus_id,
+    )
 
     # Generate a new section_id in the existing SEC#### format
     ctx = await phase0_load(tid, db, department_id=None)
@@ -4035,9 +4047,8 @@ async def om_save_new_line(
         seq += 1
         section_id = f"SEC{seq:04d}"
 
-    # Campus routing: prefer the course offering's campus_id (source of truth),
-    # fall back to section-prefix inference for safety.
-    campus_id = expected_campus_id or _section_to_campus_id(section_code)
+    # Campus routing: use the resolved course offering / OM campus.
+    campus_id = expected_campus_id
 
     # NEW: Campus-specific deadline lock.
     # If the APO-set deadline has passed for this campus, OM may not add new sections for it.

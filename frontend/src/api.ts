@@ -3385,7 +3385,6 @@ export async function getOmSubmittedCourses(user_id: string, term_id?: string) {
 
 export type OmNewLineSavePayload = {
   course_code: string;
-  section_code: string;
   faculty_id: string;
   /** Campus context used for APO validation/routing (optional; backend may infer). */
   campus_id?: string;
@@ -3395,7 +3394,8 @@ export type OmNewLineSavePayload = {
   day2?: string;
   begin2?: string;
   end2?: string;
-  mode: string;
+  /** Optional from frontend; backend defaults to HYB. */
+  mode?: string;
   units?: number;
   capacity?: number;
   remarks?: string;
