@@ -2995,6 +2995,8 @@ const NewSectionModal = ({
   );
 };
 
+void NewSectionModal;
+
 type ToastKind = "success" | "error" | "warning" | "info";
 
 function Toast({
@@ -3194,11 +3196,24 @@ const [loadTableCanScrollRight, setLoadTableCanScrollRight] = useState(false);
 const updateLoadTableScrollHints = useCallback(() => {
   const el = loadTableScrollRef.current;
   if (!el) return;
-  const max = el.scrollWidth - el.clientWidth;
+  const max = Math.max(0, el.scrollWidth - el.clientWidth);
   const left = el.scrollLeft;
   setLoadTableCanScrollLeft(left > 1);
   setLoadTableCanScrollRight(left < max - 1);
 }, []);
+
+const scrollLoadTableBy = useCallback((direction: "left" | "right") => {
+  const el = loadTableScrollRef.current;
+  if (!el) return;
+
+  const distance = Math.max(240, Math.round(el.clientWidth * 0.8));
+  el.scrollBy({
+    left: direction === "left" ? -distance : distance,
+    behavior: "smooth",
+  });
+
+  requestAnimationFrame(updateLoadTableScrollHints);
+}, [updateLoadTableScrollHints]);
 
 const handleLoadTableMouseMove = useCallback(
   (e: React.MouseEvent<HTMLDivElement>) => {
@@ -3206,7 +3221,7 @@ const handleLoadTableMouseMove = useCallback(
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const edge = 36; // px hover zone on left/right edges
+    const edge = Math.min(48, Math.max(36, rect.width * 0.08));
     if (x < edge) setLoadTableHoverSide("left");
     else if (x > rect.width - edge) setLoadTableHoverSide("right");
     else setLoadTableHoverSide(null);
@@ -4338,10 +4353,6 @@ const inferOmCampusId = useCallback((): string => {
   return best;
 }, [session, rows]);
 
-
-
-  const [newLineSectionDraft, setNewLineSectionDraft] =
-  useState<Record<string, string>>({});
 
   // Submitted Course Offerings options for the Course dropdown (CODE, Title, Units, Capacity).
   const [submittedCourses, setSubmittedCourses] = useState<
@@ -8212,27 +8223,47 @@ const courseCodeToInfo = useMemo(() => {
     </table>
     </div>
 
-    {loadTableHoverSide === "left" && loadTableCanScrollLeft && (
-      <>
+    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2">
+      {(loadTableHoverSide === "left" || loadTableCanScrollLeft) && (
         <div className="pointer-events-none absolute inset-y-0 left-0 w-16 bg-gradient-to-r from-white/80 to-transparent" />
-        <div className="pointer-events-none absolute inset-y-0 left-2 flex items-center">
-          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
-            <ChevronLeft className="h-5 w-5 text-white" />
-          </div>
-        </div>
-      </>
-    )}
+      )}
+      <button
+        type="button"
+        aria-label="Scroll table left"
+        title="Scroll left"
+        disabled={!loadTableCanScrollLeft}
+        onClick={() => scrollLoadTableBy("left")}
+        className={cls(
+          "pointer-events-auto relative z-[1] inline-flex h-9 w-9 items-center justify-center rounded-full border shadow-sm backdrop-blur-sm transition",
+          loadTableCanScrollLeft
+            ? "border-gray-200 bg-emerald-700/80 text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+            : "cursor-not-allowed border-gray-200 bg-white/70 text-gray-300 opacity-70"
+        )}
+      >
+        <ChevronLeft className="h-5 w-5" />
+      </button>
+    </div>
 
-    {loadTableHoverSide === "right" && loadTableCanScrollRight && (
-      <>
+    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+      {(loadTableHoverSide === "right" || loadTableCanScrollRight) && (
         <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-white/80 to-transparent" />
-        <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
-            <ChevronRight className="h-5 w-5 text-white" />
-          </div>
-        </div>
-      </>
-    )}
+      )}
+      <button
+        type="button"
+        aria-label="Scroll table right"
+        title="Scroll right"
+        disabled={!loadTableCanScrollRight}
+        onClick={() => scrollLoadTableBy("right")}
+        className={cls(
+          "pointer-events-auto relative z-[1] inline-flex h-9 w-9 items-center justify-center rounded-full border shadow-sm backdrop-blur-sm transition",
+          loadTableCanScrollRight
+            ? "border-gray-200 bg-emerald-700/80 text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+            : "cursor-not-allowed border-gray-200 bg-white/70 text-gray-300 opacity-70"
+        )}
+      >
+        <ChevronRight className="h-5 w-5" />
+      </button>
+    </div>
   </div>
 )}
 
