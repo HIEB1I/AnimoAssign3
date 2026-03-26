@@ -5885,6 +5885,15 @@ async def faculty_special_class_update_schedule(
         await db[COL_SCHED].insert_one({"schedule_id": new_id, **doc, "created_at": now})
         return new_id
 
+    async def _delete_schedule(schedule_id: str | None) -> None:
+        sid = str(schedule_id or "").strip()
+        if not sid:
+            return
+        try:
+            await db[COL_SCHED].delete_one({"schedule_id": sid})
+        except Exception:
+            pass
+
     new_sid1 = await _upsert_schedule(sid1 or None, nm1)
     new_sid2 = ""
     has_m2 = bool(m2) and bool(str(nm2.get("day") or "").strip())
@@ -5892,6 +5901,11 @@ async def faculty_special_class_update_schedule(
         if nm2["day"] != "TBA" and (not nm2["start_time"] or not nm2["end_time"]):
             raise HTTPException(status_code=400, detail="Meeting 2 time is required")
         new_sid2 = await _upsert_schedule(sid2 or None, nm2)
+    elif sid2:
+        await _delete_schedule(sid2)
+
+    mirrored_room1 = await _room_label(nm1.get("room_id") or "")
+    mirrored_room2 = await _room_label(nm2.get("room_id") or "") if has_m2 else ""
 
     await db[COL_SPECIAL_CLASS].update_many(
         {"special_id": {"$in": matched_special_ids}},
@@ -5900,6 +5914,14 @@ async def faculty_special_class_update_schedule(
                 "schedule_id1": new_sid1,
                 "schedule_id2": new_sid2 or None,
                 "schedule_cleared": False,
+                "day1": str(nm1.get("day") or "").strip(),
+                "begin1": str(nm1.get("start_time") or "").strip(),
+                "end1": str(nm1.get("end_time") or "").strip(),
+                "room1": mirrored_room1,
+                "day2": str(nm2.get("day") or "").strip() if has_m2 else "",
+                "begin2": str(nm2.get("start_time") or "").strip() if has_m2 else "",
+                "end2": str(nm2.get("end_time") or "").strip() if has_m2 else "",
+                "room2": mirrored_room2 if has_m2 else "",
                 "updated_at": now,
             }
         },

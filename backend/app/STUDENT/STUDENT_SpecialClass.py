@@ -358,6 +358,76 @@ def _is_valid_hhmm(s: str) -> bool:
 def _mins(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[2:])
 
+async def _bulk_schedule_info_by_ids(schedule_pairs: List[Tuple[str, str]]) -> Dict[Tuple[str, str], Dict[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    wanted_ids: List[str] = []
+    seen_pairs: set[Tuple[str, str]] = set()
+    for raw_sid1, raw_sid2 in (schedule_pairs or []):
+        sid1 = str(raw_sid1 or "").strip()
+        sid2 = str(raw_sid2 or "").strip()
+        key = (sid1, sid2)
+        if key in seen_pairs or (not sid1 and not sid2):
+            continue
+        seen_pairs.add(key)
+        pairs.append(key)
+        if sid1:
+            wanted_ids.append(sid1)
+        if sid2:
+            wanted_ids.append(sid2)
+
+    wanted_ids = sorted({sid for sid in wanted_ids if sid})
+    if not wanted_ids:
+        return {}
+
+    rows = await db[COL_SECTION_SCHEDULES].find(
+        {"schedule_id": {"$in": wanted_ids}},
+        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1, "room_code": 1},
+    ).to_list(5000)
+    by_id = {str((r or {}).get("schedule_id") or "").strip(): (r or {}) for r in (rows or [])}
+
+    room_ids = sorted({str((r or {}).get("room_id") or "").strip() for r in (rows or []) if str((r or {}).get("room_id") or "").strip()})
+    room_code_by_id: Dict[str, str] = {}
+    if room_ids:
+        room_docs = await db[COL_ROOMS].find(
+            {"room_id": {"$in": room_ids}},
+            {"_id": 0, "room_id": 1, "room_code": 1, "room_number": 1, "room_name": 1},
+        ).to_list(2000)
+        for rm in room_docs or []:
+            rid = str((rm or {}).get("room_id") or "").strip()
+            if not rid:
+                continue
+            code = str((rm or {}).get("room_code") or (rm or {}).get("room_number") or (rm or {}).get("room_name") or "").strip()
+            if code:
+                room_code_by_id[rid] = code
+
+    def _room_label(row: Dict[str, Any]) -> str:
+        room_id = str((row or {}).get("room_id") or "").strip()
+        room_code = str((row or {}).get("room_code") or "").strip()
+        if room_code:
+            return room_code
+        if room_id.upper() == "ONLINE":
+            return "TBA"
+        return room_code_by_id.get(room_id, room_id)
+
+    def _slot(schedule_id: str) -> Dict[str, str]:
+        row = by_id.get(schedule_id, {}) if schedule_id else {}
+        return {
+            "day": _normalize_day((row or {}).get("day")),
+            "begin": _to_hhmm((row or {}).get("start_time")),
+            "end": _to_hhmm((row or {}).get("end_time")),
+            "room": _room_label(row) if row else "",
+        }
+
+    out: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for sid1, sid2 in pairs:
+        slot1 = _slot(sid1)
+        slot2 = _slot(sid2)
+        out[(sid1, sid2)] = {
+            "day1": slot1["day"], "begin1": slot1["begin"], "end1": slot1["end"], "room1": slot1["room"],
+            "day2": slot2["day"], "begin2": slot2["begin"], "end2": slot2["end"], "room2": slot2["room"],
+        }
+    return out
+
 async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """
     Returns map:
@@ -692,6 +762,9 @@ async def special_class_handler(
                 "section_code": 1,
                 "faculty_id": 1,
                 "faculty_name": 1,
+                "schedule_id1": 1,
+                "schedule_id2": 1,
+                "schedule_cleared": 1,
 
                 # custom schedule (if stored)
                 "day1": 1, "begin1": 1, "end1": 1, "room1": 1,
@@ -719,6 +792,15 @@ async def special_class_handler(
         # resolve section-based schedule/faculty in bulk
         section_ids = [(r.get("section_id") or "").strip() for r in raw_rows if (r.get("section_id") or "").strip()]
         derived_map = await _bulk_assignment_info(section_ids)
+        schedule_pairs = [
+            (
+                (r.get("schedule_id1") or "").strip(),
+                (r.get("schedule_id2") or "").strip(),
+            )
+            for r in raw_rows
+            if (r.get("schedule_id1") or "").strip() or (r.get("schedule_id2") or "").strip()
+        ]
+        special_schedule_map = await _bulk_schedule_info_by_ids(schedule_pairs)
 
         def to_view(r: Dict[str, Any]) -> Dict[str, Any]:
             ay = r.get("terms", {}).get("acad_year_start")
@@ -741,8 +823,51 @@ async def special_class_handler(
             enrolled = int(r.get("enrolled") or 0)
             section_remarks = (r.get("section_remarks") or "").strip()
 
-            # derived overrides if section_id exists
-            if section_id and section_id in derived_map:
+            schedule_id1 = (r.get("schedule_id1") or "").strip()
+            schedule_id2 = (r.get("schedule_id2") or "").strip()
+            schedule_cleared = _as_bool(r.get("schedule_cleared"))
+
+            if schedule_cleared:
+                day1 = begin1 = end1 = room1 = ""
+                day2 = begin2 = end2 = room2 = ""
+                schedule_summary = ""
+                if section_id and section_id in derived_map:
+                    d = derived_map[section_id]
+                    if d.get("section_code"):
+                        section_code = (d.get("section_code") or "").strip()
+                    if d.get("faculty_name"):
+                        faculty_name = (d.get("faculty_name") or "").strip()
+                    enrollment_cap = int(d.get("enrollment_cap") or 0)
+                    enrolled = int(d.get("enrolled") or 0)
+                    section_remarks = (d.get("section_remarks") or "").strip()
+            elif (schedule_id1 or schedule_id2) and (schedule_id1, schedule_id2) in special_schedule_map:
+                d = special_schedule_map[(schedule_id1, schedule_id2)]
+                day1 = (d.get("day1") or "").strip()
+                begin1 = (d.get("begin1") or "").strip()
+                end1 = (d.get("end1") or "").strip()
+                room1 = (d.get("room1") or "").strip()
+                day2 = (d.get("day2") or "").strip()
+                begin2 = (d.get("begin2") or "").strip()
+                end2 = (d.get("end2") or "").strip()
+                room2 = (d.get("room2") or "").strip()
+
+                if section_id and section_id in derived_map:
+                    dd = derived_map[section_id]
+                    if dd.get("section_code"):
+                        section_code = (dd.get("section_code") or "").strip()
+                    if dd.get("faculty_name"):
+                        faculty_name = (dd.get("faculty_name") or "").strip()
+                    enrollment_cap = int(dd.get("enrollment_cap") or 0)
+                    enrolled = int(dd.get("enrolled") or 0)
+                    section_remarks = (dd.get("section_remarks") or "").strip()
+
+                parts = []
+                if day1 and begin1 and end1:
+                    parts.append(f"{day1} {begin1}-{end1}")
+                if day2 and begin2 and end2:
+                    parts.append(f"{day2} {begin2}-{end2}")
+                schedule_summary = "; ".join(parts)
+            elif section_id and section_id in derived_map:
                 d = derived_map[section_id]
                 if d.get("section_code"):
                     section_code = (d.get("section_code") or "").strip()
