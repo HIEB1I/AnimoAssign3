@@ -38,9 +38,11 @@ function useCountdown(targetISO: string) {
 function DeadlineBanner({
   deadlineISO,
   className,
+  emptyMessage,
 }: {
   deadlineISO: string;
   className?: string;
+  emptyMessage?: string;
 }) {
   if (!deadlineISO) {
     return (
@@ -52,7 +54,7 @@ function DeadlineBanner({
           <div>
             <div className="font-semibold">Submission Window Not Started</div>
             <div className="text-xs text-slate-600">
-              Set a deadline above. Until then, students will not be able to submit requests for this term.
+              {emptyMessage || "Set a deadline above. Until then, students will not be able to submit requests for this term."}
             </div>
           </div>
         </div>
@@ -770,7 +772,13 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
     .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
 }
 
-export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
+export default function OM_SpecialClass({
+  hideMessageIcon = false,
+  deadlineReadOnly = false,
+}: {
+  hideMessageIcon?: boolean;
+  deadlineReadOnly?: boolean;
+} = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
@@ -1430,6 +1438,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
   const allVisibleSelected = groupedRows.length > 0 && groupedRows.every((r) => !!selectedIds[r.group_key]);
   const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
+  const deadlineDisplay = submissionWindow.deadlineISO ? new Date(submissionWindow.deadlineISO).toLocaleString() : "Not set";
 
   return (
     <main className="w-full px-8 py-8">
@@ -1441,31 +1450,45 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
           </p>
         </div>
         <div className="flex items-center gap-3">
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <div className="flex items-center gap-2">
-              <span className="text-sm font-medium text-slate-700">Deadline</span>
-              <input
-                type="datetime-local"
-                min={minDeadlineLocal}
-                className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
-                value={deadlineDraft}
-                onChange={(e) => setDeadlineDraft(e.target.value)}
-              />
+          {deadlineReadOnly ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              
             </div>
-            <button
-              type="button"
-              onClick={handleStartWindow}
-              disabled={startingWindow}
-              className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
-              title="Set or update the submission deadline"
-            >
-              {startingWindow ? "Saving…" : "Set Deadline"}
-            </button>
-          </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Deadline</span>
+                <input
+                  type="datetime-local"
+                  min={minDeadlineLocal}
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                  value={deadlineDraft}
+                  onChange={(e) => setDeadlineDraft(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleStartWindow}
+                disabled={startingWindow}
+                className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+                title="Set or update the submission deadline"
+              >
+                {startingWindow ? "Saving…" : "Set Deadline"}
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
-      <DeadlineBanner deadlineISO={submissionWindow.deadlineISO} className="mb-6" />
+      <DeadlineBanner
+        deadlineISO={submissionWindow.deadlineISO}
+        className="mb-6"
+        emptyMessage={
+          deadlineReadOnly
+            ? "The Operations Manager has not set a submission deadline for this term yet."
+            : undefined
+        }
+      />
 
       {err && (
         <div

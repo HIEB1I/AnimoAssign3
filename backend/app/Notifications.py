@@ -1212,7 +1212,7 @@ async def _get_all_om_user_ids() -> list[str]:
         # 2) Best-effort discover additional OM role_ids by role_type.
         # Accept: "om", "office manager", etc.
         cur_roles = db["user_roles"].find(
-            {"role_type": {"$regex": r"(office\\s*manager|\\bom\\b)", "$options": "i"}},
+            {"role_type": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
             {"_id": 0, "role_id": 1},
         )
         async for r in cur_roles:
@@ -1241,7 +1241,7 @@ async def _get_all_om_user_ids() -> list[str]:
         try:
             # Some legacy records store a human-readable role string on role_assignments.role.
             cur_ra2 = db["role_assignments"].find(
-                {"role": {"$regex": r"(office\\s*manager|\\bom\\b)", "$options": "i"}},
+                {"role": {"$regex": r"(office\s*manager|\bom\b)", "$options": "i"}},
                 {"_id": 0, "user_id": 1},
             )
             async for ra in cur_ra2:
