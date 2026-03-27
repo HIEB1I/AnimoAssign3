@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info, Plus, Trash2 } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import { getSessionUserId } from "../../lib/session";
@@ -9,6 +9,19 @@ import {
   updateOMSC,
   getOMSC_Detail,
   exportOMSC_Pdf,
+  createOMSC,
+  getOMSC_EligibleStudents,
+  assignOMSCStudent,
+  deleteOMSCClass,
+  getChairSCOptions,
+  listChairSC,
+  updateChairSC,
+  getChairSC_Detail,
+  exportChairSC_Pdf,
+  createChairSC,
+  getChairSC_EligibleStudents,
+  assignChairSCStudent,
+  deleteChairSCClass,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
   downloadBlob,
@@ -16,6 +29,7 @@ import {
   type OMSpecialClassRow,
   type OMSpecialClassOptions,
   type OMSpecialClassDetail,
+  type OMSpecialClassCandidate,
 } from "../../api";
 
 function useCountdown(targetISO: string) {
@@ -678,6 +692,8 @@ type SpecialClassGroupStudent = {
   faculty_name?: string;
   rfc_needs_om?: boolean;
   term_id: string;
+  status?: string;
+  course_id?: string;
 };
 
 type SpecialClassGroupRow = Partial<OMSpecialClassRow> & {
@@ -691,7 +707,17 @@ type SpecialClassGroupRow = Partial<OMSpecialClassRow> & {
 function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
   const groups = new Map<string, OMSpecialClassRow[]>();
   input.forEach((row) => {
-    const key = String(row.course_id || `${row.course_code || ''}|${row.course_title || ''}`).trim();
+    const sectionId = String(row.section_id || '').trim();
+    const generated = Boolean(row.generated_from_class_retention);
+    const manual = Boolean(row.manual_special_class);
+    const courseId = String(row.course_id || '').trim();
+    const key = sectionId
+      ? `SEC:${sectionId}`
+      : generated
+      ? `RET:${String(row.retention_id || row.special_id || row.course_id || '').trim()}`
+      : manual
+      ? `MAN:${String(row.special_id || row.course_id || '').trim()}`
+      : `PENDING:${courseId || String(row.special_id || '').trim()}`;
     if (!key) return;
     const arr = groups.get(key) || [];
     arr.push(row);
@@ -699,14 +725,7 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
   });
 
   const uniq = (vals: Array<any>) => Array.from(new Set(vals.map((v) => String(v ?? '').trim()).filter(Boolean)));
-  const firstNonEmpty = (rows: OMSpecialClassRow[], pick: (r: OMSpecialClassRow) => any) => {
-    for (const row of rows) {
-      const value = String(pick(row) ?? '').trim();
-      if (value) return value;
-    }
-    return '';
-  };
-  const preferredApprovedRow = (rows: OMSpecialClassRow[]) => rows.find((r) => String(r.status || '').trim() === 'Approved' && String(r.section_id || '').trim()) || rows.find((r) => String(r.status || '').trim() === 'Approved') || rows[0];
+  const preferredApprovedRow = (rows: OMSpecialClassRow[]) => rows.find((r) => String(r.status || '').trim() === 'Approved' && String(r.section_id || '').trim()) || rows.find((r) => String(r.section_id || '').trim()) || rows[0];
   const consensusText = (rows: OMSpecialClassRow[], pick: (r: OMSpecialClassRow) => any, mixedLabel = 'Multiple') => {
     const vals = uniq(rows.map(pick));
     if (vals.length <= 1) return vals[0] || '';
@@ -716,7 +735,7 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
   };
   const consensusNullable = (rows: OMSpecialClassRow[], pick: (r: OMSpecialClassRow) => any) => {
     const vals = uniq(rows.map(pick));
-    if (vals.length <= 1) return (vals[0] || null);
+    if (vals.length <= 1) return vals[0] || null;
     const approvedValue = String(pick(preferredApprovedRow(rows)) ?? '').trim();
     return approvedValue || null;
   };
@@ -729,19 +748,20 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
   return Array.from(groups.entries())
     .map(([groupKey, items]) => {
       const rows = [...items].sort((a, b) => String(a.student_name || '').localeCompare(String(b.student_name || '')));
-      const first = rows[0];
+      const first = preferredApprovedRow(rows) || rows[0];
       const approvedRow = preferredApprovedRow(rows);
       const statuses = uniq(rows.map((r) => r.status));
       const status = statuses.length <= 1 ? (statuses[0] || '') : (String(approvedRow?.status || '').trim() || 'Mixed');
       const remarks = consensusText(rows, (r) => r.remarks, '');
       const facultyId = consensusNullable(rows, (r) => r.faculty_id) as string | null;
+      const applicantRows = rows.filter((r) => !r.generated_from_class_retention && !r.manual_special_class && !!String(r.user_id || '').trim());
       return {
         ...first,
         group_key: groupKey,
         primary_special_id: String(first.special_id || ''),
         special_ids: rows.map((r) => String(r.special_id || '')).filter(Boolean),
-        count: rows.length,
-        students: rows.map((r) => ({
+        count: applicantRows.length,
+        students: applicantRows.map((r) => ({
           special_id: String(r.special_id || ''),
           student_name: String(r.student_name || ''),
           student_number: r.student_number,
@@ -749,6 +769,8 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
           faculty_name: r.faculty_name,
           rfc_needs_om: Boolean((r as any).rfc_needs_om),
           term_id: String(r.term_id || ''),
+          status: r.status,
+          course_id: String(r.course_id || ''),
         })),
         status,
         remarks,
@@ -767,17 +789,20 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
         room_id2: consensusNullable(rows, (r) => r.room_id2),
         room2: consensusText(rows, (r) => r.room2, 'Multiple'),
         rfc_needs_om: rows.some((r) => Boolean((r as any).rfc_needs_om)),
+        manual_special_class: rows.some((r) => Boolean(r.manual_special_class)),
       } as SpecialClassGroupRow;
     })
-    .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
+    .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.section_code || '').localeCompare(String(b.section_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
 }
 
 export default function OM_SpecialClass({
   hideMessageIcon = false,
   deadlineReadOnly = false,
+  role = "om",
 }: {
   hideMessageIcon?: boolean;
   deadlineReadOnly?: boolean;
+  role?: "om" | "chair";
 } = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
@@ -796,6 +821,7 @@ export default function OM_SpecialClass({
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
   const [facultyNameToIdUpper, setFacultyNameToIdUpper] = useState<Record<string, string>>({});
   const [facultyAvailability, setFacultyAvailability] = useState<FacultyAvailabilityMap>({});
+  const [courseOptions, setCourseOptions] = useState<Array<{ course_id: string; course_code: string; course_title?: string }>>([]);
 
   // Rooms (read-only display)
   const [roomIdToInfo, setRoomIdToInfo] = useState<
@@ -821,6 +847,38 @@ export default function OM_SpecialClass({
   const [facultyInput, setFacultyInput] = useState<string>("");
 
   const [didClearAll, setDidClearAll] = useState(false);
+
+  // add class
+  const [adding, setAdding] = useState(false);
+  const [addDraft, setAddDraft] = useState<Partial<OMSpecialClassRow>>({ status: "Forwarded To Department" });
+  const [addCourseInput, setAddCourseInput] = useState("");
+  const [addFacultyInput, setAddFacultyInput] = useState("");
+
+  // student movement
+  const [pendingMove, setPendingMove] = useState<null | {
+    student: SpecialClassGroupStudent;
+    sourceGroupKey: string;
+    sourceSpecialId: string;
+    courseId: string;
+    courseLabel: string;
+    sourceSectionLabel: string;
+  }>(null);
+  const [inlineAssignState, setInlineAssignState] = useState<null | {
+    targetGroupKey: string;
+    targetSpecialId: string;
+    courseLabel: string;
+    sectionLabel: string;
+    candidates: OMSpecialClassCandidate[];
+    selectedStudentId: string;
+    loading: boolean;
+    mode: "add" | "move";
+    targetOptions?: Array<{
+      groupKey: string;
+      specialId: string;
+      label: string;
+      sectionLabel: string;
+    }>;
+  }>(null);
 
   // view modal
   const [viewOpen, setViewOpen] = useState(false);
@@ -852,10 +910,76 @@ export default function OM_SpecialClass({
     }
   }, []);
 
+  const isChair = role === "chair";
+
+  const apiFns = useMemo(() => ({
+    getOptions: isChair ? getChairSCOptions : getOMSC_Options,
+    list: isChair ? listChairSC : listOMSC,
+    update: isChair ? updateChairSC : updateOMSC,
+    detail: isChair ? getChairSC_Detail : getOMSC_Detail,
+    exportPdf: isChair ? exportChairSC_Pdf : exportOMSC_Pdf,
+    create: isChair ? createChairSC : createOMSC,
+    eligibleStudents: isChair ? getChairSC_EligibleStudents : getOMSC_EligibleStudents,
+    assignStudent: isChair ? assignChairSCStudent : assignOMSCStudent,
+    deleteClass: isChair ? deleteChairSCClass : deleteOMSCClass,
+  }), [isChair]);
+
+  const modalCourseOptions = useMemo(() => {
+    const map = new Map<string, { course_id: string; course_code: string; course_title?: string }>();
+    (courseOptions || []).forEach((opt) => {
+      if (!opt?.course_id) return;
+      map.set(String(opt.course_id), opt);
+    });
+    (rows || []).forEach((row) => {
+      const cid = String(row.course_id || "").trim();
+      if (!cid || map.has(cid)) return;
+      map.set(cid, {
+        course_id: cid,
+        course_code: String(row.course_code || ""),
+        course_title: String(row.course_title || ""),
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => `${a.course_code} ${a.course_title || ""}`.localeCompare(`${b.course_code} ${b.course_title || ""}`));
+  }, [courseOptions, rows]);
+
+  const modalCourseLabelToId = useMemo(() => Object.fromEntries(
+    modalCourseOptions.map((opt) => [
+      `${opt.course_code}${opt.course_title ? ` — ${opt.course_title}` : ""}`,
+      opt.course_id,
+    ])
+  ) as Record<string, string>, [modalCourseOptions]);
+
+  const modalCourseIdToLabel = useMemo(() => Object.fromEntries(
+    modalCourseOptions.map((opt) => [
+      opt.course_id,
+      `${opt.course_code}${opt.course_title ? ` — ${opt.course_title}` : ""}`,
+    ])
+  ) as Record<string, string>, [modalCourseOptions]);
+
+  const addCourseCodeToIdUpper = useMemo(() => Object.fromEntries(
+    modalCourseOptions
+      .filter((opt) => !!opt.course_code)
+      .map((opt) => [String(opt.course_code).toUpperCase(), opt.course_id])
+  ) as Record<string, string>, [modalCourseOptions]);
+
   const toast = (message: string, kind?: "success" | "error") => {
     setErrKind(kind === "success" ? "success" : "error");
     setErr(message);
     if (kind === "success") window.setTimeout(() => setErr(""), 2500);
+  };
+
+  const candidateLabel = (candidate: Pick<OMSpecialClassCandidate, "student_name" | "student_number">) =>
+    `${candidate.student_name || ""}${candidate.student_number ? ` (${candidate.student_number})` : ""}`;
+
+  const visibleStudentsForRow = (row: SpecialClassGroupRow) => {
+    if (!pendingMove || pendingMove.sourceGroupKey !== row.group_key) return row.students;
+    return row.students.filter((student) => student.special_id !== pendingMove.student.special_id);
+  };
+
+  const visibleCountForRow = (row: SpecialClassGroupRow) => {
+    const baseCount = typeof row.count === "number" ? row.count : row.students.length;
+    if (!pendingMove || pendingMove.sourceGroupKey !== row.group_key) return baseCount;
+    return Math.max(0, baseCount - 1);
   };
 
   const openConfirm = (payload: {
@@ -996,7 +1120,7 @@ export default function OM_SpecialClass({
   useEffect(() => {
     (async () => {
       try {
-        const opt: OMSpecialClassOptions = await getOMSC_Options();
+        const opt: OMSpecialClassOptions = await apiFns.getOptions();
         if (!opt.ok) throw new Error("Failed to load options");
         setStatuses(["All Status", ...(opt.statuses || [])]);
 
@@ -1029,6 +1153,7 @@ export default function OM_SpecialClass({
         setFacultyNames(["UNASSIGNED", ...names]);
         setFacultyNameToIdUpper(mapUpper);
         setFacultyAvailability(((opt as any).facultyAvailability || {}) as FacultyAvailabilityMap);
+        setCourseOptions((((opt as any).courseOptions || []) as Array<{ course_id: string; course_code: string; course_title?: string }>));
 
         // rooms map for display-only columns
         const rm: Record<string, any> = {};
@@ -1050,7 +1175,7 @@ export default function OM_SpecialClass({
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
     })();
-  }, []);
+  }, [apiFns]);
 
   // debounce search
   useEffect(() => {
@@ -1064,7 +1189,7 @@ export default function OM_SpecialClass({
       setErr("");
       setErrKind("error");
       setErrKind("error");
-      const res = await listOMSC({ status, q });
+      const res = await apiFns.list({ status, q });
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
       setRows(incoming);
@@ -1083,6 +1208,26 @@ export default function OM_SpecialClass({
   }, [status, q]);
 
   const groupedRows = useMemo(() => buildGroupedRows(rows), [rows]);
+
+  const moveTargetOptionsForRow = (sourceRow: SpecialClassGroupRow) => {
+    const courseId = String(sourceRow.course_id || '').trim();
+    return groupedRows
+      .filter((candidate) =>
+        candidate.group_key !== sourceRow.group_key &&
+        !!candidate.primary_special_id &&
+        String(candidate.course_id || '').trim() === courseId
+      )
+      .map((candidate) => {
+        const sectionLabel = String(candidate.section_code || '').trim() || 'Unassigned Section';
+        const facultyLabel = String(candidate.faculty_name || '').trim() || 'UNASSIGNED';
+        return {
+          groupKey: candidate.group_key,
+          specialId: candidate.primary_special_id,
+          label: `${sectionLabel} • ${facultyLabel}`,
+          sectionLabel,
+        };
+      });
+  };
 
   const selectedList = useMemo(
     () => groupedRows.filter((r) => !!selectedIds[r.group_key]).flatMap((r) => r.special_ids),
@@ -1141,7 +1286,7 @@ export default function OM_SpecialClass({
 
       // Always export as separate files when multiple are selected.
       for (const id of selectedList) {
-        const blob = await exportOMSC_Pdf({ special_ids: [id] });
+        const blob = await apiFns.exportPdf({ special_ids: [id] });
         downloadBlob(blob, makeFileName(id));
       }
     } catch (e: any) {
@@ -1341,6 +1486,251 @@ export default function OM_SpecialClass({
     setDidClearAll(false);
   };
 
+  const setAddSlotFromBand = (slot: 1 | 2, bandLabel: string) => {
+    const found = GE_TIME_SLOTS.find((x) => x.label === bandLabel);
+    if (!found) {
+      setAddDraft((d) => ({
+        ...d,
+        ...(slot === 1 ? { begin1: "", end1: "" } : { begin2: "", end2: "" }),
+      }));
+      return;
+    }
+    setAddDraft((d) => ({
+      ...d,
+      ...(slot === 1 ? { begin1: found.start, end1: found.end } : { begin2: found.start, end2: found.end }),
+    }));
+  };
+
+  const openAddClass = () => {
+    const firstCourseId = modalCourseOptions[0]?.course_id || "";
+    setAdding(true);
+    setAddDraft({
+      status: "Forwarded To Department",
+      remarks: "",
+      course_id: firstCourseId,
+      section_code: "",
+      faculty_id: null,
+      day1: "" as any,
+      begin1: "",
+      end1: "",
+      day2: "" as any,
+      begin2: "",
+      end2: "",
+    });
+    setAddCourseInput(modalCourseIdToLabel[String(firstCourseId)] || "");
+    setAddFacultyInput("");
+  };
+
+  const closeAddClass = () => {
+    setAdding(false);
+    setAddDraft({ status: "Forwarded To Department" });
+    setAddCourseInput("");
+    setAddFacultyInput("");
+  };
+
+  const saveAddClass = async () => {
+    try {
+      const courseId = String(addDraft.course_id || "").trim();
+      if (!courseId) throw new Error("Please select a course.");
+
+      const typedName = (addFacultyInput || "").trim();
+      const payloadFacultyId = typedName && typedName.toUpperCase() !== "UNASSIGNED"
+        ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
+        : "";
+
+      const payload: any = {
+        course_id: courseId,
+        status: addDraft.status || "Forwarded To Department",
+        remarks: addDraft.remarks || "",
+      };
+
+      const hasAnyScheduleField = !!(addDraft.section_code || typedName || addDraft.day1 || addDraft.begin1 || addDraft.end1 || addDraft.day2 || addDraft.begin2 || addDraft.end2);
+      if (hasAnyScheduleField) {
+        const hasMeeting1 = !!addDraft.day1 && !!addDraft.begin1 && !!addDraft.end1;
+        const hasAnyMeeting2 = !!addDraft.day2 || !!addDraft.begin2 || !!addDraft.end2;
+        const hasMeeting2 = !!addDraft.day2 && !!addDraft.begin2 && !!addDraft.end2;
+        if (!String(addDraft.section_code || "").trim()) throw new Error("Please provide a section code.");
+        if (!payloadFacultyId) throw new Error("Please select an available faculty.");
+        if (!hasMeeting1) throw new Error("Meeting 1 must include day, begin time, and end time.");
+        if (hasAnyMeeting2 && !hasMeeting2) throw new Error("Meeting 2 must include day, begin time, and end time.");
+
+        payload.section_code = String(addDraft.section_code || "").trim();
+        payload.faculty_id = payloadFacultyId;
+        payload.day1 = addDraft.day1 || "";
+        payload.begin1 = addDraft.begin1 || "";
+        payload.end1 = addDraft.end1 || "";
+        payload.day2 = hasMeeting2 ? (addDraft.day2 || "") : "";
+        payload.begin2 = hasMeeting2 ? (addDraft.begin2 || "") : "";
+        payload.end2 = hasMeeting2 ? (addDraft.end2 || "") : "";
+      }
+
+      setLoading(true);
+      setErr("");
+      await apiFns.create(payload, getSessionUserId() || userId || undefined);
+      closeAddClass();
+      toast("Special class added.", "success");
+      await load();
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to add special class.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const closeInlineAssign = () => {
+    setInlineAssignState(null);
+    setPendingMove(null);
+  };
+
+  const openInlineAssign = async (row: SpecialClassGroupRow) => {
+    if (!row.primary_special_id || pendingMove) return;
+
+    const courseLabel = String(row.course_code || row.course_title || "Course");
+    const sectionLabel = String(row.section_code || "—");
+
+    try {
+      setInlineAssignState({
+        targetGroupKey: row.group_key,
+        targetSpecialId: row.primary_special_id,
+        courseLabel,
+        sectionLabel,
+        candidates: [],
+        selectedStudentId: "",
+        loading: true,
+        mode: "add",
+      });
+      const res = await apiFns.eligibleStudents(row.primary_special_id);
+      const firstId = String((res.rows || [])[0]?.special_id || "");
+      setInlineAssignState({
+        targetGroupKey: row.group_key,
+        targetSpecialId: row.primary_special_id,
+        courseLabel,
+        sectionLabel,
+        candidates: res.rows || [],
+        selectedStudentId: firstId,
+        loading: false,
+        mode: "add",
+      });
+    } catch (e: any) {
+      setInlineAssignState(null);
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to load eligible students.");
+    }
+  };
+
+  const confirmInlineAssign = async () => {
+    if (!inlineAssignState?.targetSpecialId || !inlineAssignState.selectedStudentId) return;
+    try {
+      setLoading(true);
+      await apiFns.assignStudent(inlineAssignState.targetSpecialId, inlineAssignState.selectedStudentId, getSessionUserId() || userId || undefined);
+      const movedStudentName = pendingMove?.student.student_name;
+      setInlineAssignState(null);
+      setPendingMove(null);
+      toast(inlineAssignState.mode === "move"
+        ? `${movedStudentName || "Student"} moved to ${inlineAssignState.sectionLabel || "the selected section"}.`
+        : "Student added to class.", "success");
+      await load();
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to add student to class.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startStudentMove = (student: SpecialClassGroupStudent, row: SpecialClassGroupRow) => {
+    if (loading || editId === row.group_key) return;
+
+    const sameStudentSelected = pendingMove?.student.special_id === student.special_id;
+    if (sameStudentSelected) {
+      setPendingMove(null);
+      setInlineAssignState((current) => current?.selectedStudentId === student.special_id ? null : current);
+      toast("Student move canceled.", "success");
+      return;
+    }
+
+    const targetOptions = moveTargetOptionsForRow(row);
+    if (targetOptions.length === 0) {
+      setErrKind("error");
+      setErr("No other special class section is available for this course yet.");
+      return;
+    }
+
+    const firstTarget = targetOptions[0];
+    const nextPendingMove = {
+      student,
+      sourceGroupKey: row.group_key,
+      sourceSpecialId: row.primary_special_id,
+      courseId: String(row.course_id || student.course_id || ""),
+      courseLabel: String(row.course_code || row.course_title || "Course"),
+      sourceSectionLabel: String(row.section_code || "—"),
+    };
+
+    setPendingMove(nextPendingMove);
+    setInlineAssignState({
+      targetGroupKey: row.group_key,
+      targetSpecialId: firstTarget.specialId,
+      courseLabel: nextPendingMove.courseLabel,
+      sectionLabel: firstTarget.sectionLabel,
+      candidates: [{
+        special_id: student.special_id,
+        student_name: student.student_name,
+        student_number: student.student_number,
+        status: student.status,
+      }],
+      selectedStudentId: student.special_id,
+      loading: false,
+      mode: "move",
+      targetOptions,
+    });
+  };
+
+  const cancelPendingMove = () => {
+    setPendingMove(null);
+    setInlineAssignState((current) => current?.mode === "move" ? null : current);
+  };
+
+  const deleteSpecialClassRow = async (row: SpecialClassGroupRow) => {
+    if (loading || editId === row.group_key || !row.primary_special_id) return;
+
+    const applicantCount = row.students.length;
+    const generatedRow = Boolean(row.generated_from_class_retention);
+    const message = applicantCount > 0
+      ? `Delete this special class for ${row.course_code || row.course_title || "this course"}? The students will stay in the same course, but their section/faculty assignment will be cleared so you can reassign them.`
+      : generatedRow
+      ? `Clear this reflected special class for ${row.course_code || row.course_title || "this course"}? It will stay visible from Class Retention, but the section/faculty schedule will be removed.`
+      : `Delete this special class for ${row.course_code || row.course_title || "this course"}? This removes the class row.`;
+
+    const ok = await openConfirm({
+      title: applicantCount > 0 || generatedRow ? "Clear Special Class?" : "Delete Special Class?",
+      message,
+      accent: "amber",
+      confirmText: applicantCount > 0 || generatedRow ? "Clear" : "Delete",
+      note: applicantCount > 0
+        ? "Students will remain available under the same course so you can place them into another special class later."
+        : generatedRow
+        ? "Because this row is reflected from Class Retention, the course stays visible even after clearing its section/faculty schedule."
+        : undefined,
+    });
+    if (!ok) return;
+
+    try {
+      setLoading(true);
+      setErr("");
+      const res = await apiFns.deleteClass(row.primary_special_id, getSessionUserId() || userId || undefined);
+      closeInlineAssign();
+      cancelPendingMove();
+      toast(res?.message || (res?.kept_row ? "Special class cleared." : "Special class deleted."), "success");
+      await load();
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to delete special class.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   const saveEdit = async () => {
     if (!editId || editTargetIds.length === 0) return;
 
@@ -1389,7 +1779,7 @@ export default function OM_SpecialClass({
         payload.end2 = hasMeeting2 ? (draft.end2 || "") : "";
       }
 
-      await updateOMSC(editTargetIds[0], {
+      await apiFns.update(editTargetIds[0], {
         ...payload,
         special_ids: editTargetIds,
       }, getSessionUserId());
@@ -1414,7 +1804,7 @@ export default function OM_SpecialClass({
     setViewData(null);
 
     try {
-      const res = await getOMSC_Detail(specialId);
+      const res = await apiFns.detail(specialId);
       if (!res.ok) throw new Error("Failed to load application detail.");
       setViewData(res.row);
     } catch (e: any) {
@@ -1438,7 +1828,6 @@ export default function OM_SpecialClass({
 
   const allVisibleSelected = groupedRows.length > 0 && groupedRows.every((r) => !!selectedIds[r.group_key]);
   const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
-  const deadlineDisplay = submissionWindow.deadlineISO ? new Date(submissionWindow.deadlineISO).toLocaleString() : "Not set";
 
   return (
     <main className="w-full px-8 py-8">
@@ -1516,13 +1905,25 @@ export default function OM_SpecialClass({
 
         <SelectBox value={status} onChange={setStatus} options={statuses} />
 
+        <div className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          onClick={openAddClass}
+          disabled={loading}
+          className="inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+          title="Add Class"
+        >
+          <Plus className="h-4 w-4" />
+          Add Class
+        </button>
+
         <div className="relative">
           <button
             type="button"
             onClick={() => setExportOpen((v) => !v)}
             disabled={loading}
             title="Export"
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Download className="h-4 w-4" />
             Export
@@ -1567,6 +1968,7 @@ export default function OM_SpecialClass({
             </div>
           )}
         </div>
+        </div>
       </div>
 
       <div className="table-wrapper w-full overflow-hidden">
@@ -1597,18 +1999,166 @@ export default function OM_SpecialClass({
                 <th className="w-[160px] min-w-[160px] text-center px-4 py-3 whitespace-nowrap">Status</th>
                 <th className="w-[260px] min-w-[260px] text-left px-4 py-3 whitespace-nowrap">Remarks</th>
                 <th className="w-12 px-2 py-2 text-center whitespace-nowrap"></th>
-                <th className="w-12 px-2 py-2 text-center whitespace-nowrap"></th>
+                <th className="w-[88px] px-2 py-2 text-center whitespace-nowrap">Actions</th>
               </tr>
             </thead>
 
             <tbody className="divide-y">
+              {adding && (
+                <tr className="bg-white align-top">
+                  <td className="px-3 py-3"></td>
+
+                  <td className="px-4 py-3 min-w-[280px] align-top">
+                    <ComboSelect
+                      value={addCourseInput}
+                      onChange={(v) => {
+                        const raw = v || "";
+                        const trimmed = raw.trim();
+                        const upper = trimmed.toUpperCase();
+                        const nextCourseId = modalCourseLabelToId[trimmed] || addCourseCodeToIdUpper[upper] || "";
+                        setAddCourseInput(raw);
+                        setAddDraft((d) => ({ ...d, course_id: nextCourseId }));
+                      }}
+                      options={Object.keys(modalCourseLabelToId)}
+                      placeholder="Type or select course"
+                    />
+                    <div className="mt-1 text-xs leading-5 text-gray-500 whitespace-normal break-words">
+                      {modalCourseOptions.find((opt) => String(opt.course_id) === String(addDraft.course_id || ""))?.course_title || " "}
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <span className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">0</span>
+                  </td>
+
+                  <td className="px-4 py-3 align-top">
+                    <div className="min-w-[260px] rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      No student application yet. You can add same-course applicants after saving this class.
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <input
+                      value={String(addDraft.section_code || "")}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, section_code: e.target.value }))}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
+                      placeholder="e.g. SS2"
+                    />
+                  </td>
+
+                  <td className="px-4 py-3 text-left align-top">
+                    <ComboSelect
+                      value={addFacultyInput}
+                      onChange={(v) => {
+                        const t = (v || "").trim();
+                        setAddFacultyInput(t);
+                        const fid = t && t.toUpperCase() !== "UNASSIGNED" ? facultyNameToIdUpper[t.toUpperCase()] || "" : "";
+                        setAddDraft((d) => ({ ...d, faculty_id: fid || null }));
+                      }}
+                      options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
+                      placeholder="Select Faculty"
+                    />
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <div className="space-y-2 min-w-[150px]">
+                      <SelectBox
+                        value={addDraft.day1 ? DAY_LABELS[addDraft.day1 as DayCode] : DAY_PLACEHOLDER}
+                        onChange={(lbl) => setAddDraft((d) => ({ ...d, day1: lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "") as any }))}
+                        options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
+                      />
+                      <SelectBox
+                        value={addDraft.day2 ? DAY_LABELS[addDraft.day2 as DayCode] : DAY_PLACEHOLDER}
+                        onChange={(lbl) => setAddDraft((d) => ({ ...d, day2: lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "") as any }))}
+                        options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
+                      />
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <div className="space-y-2 min-w-[180px]">
+                      <div className="space-y-1">
+                        <SelectBox
+                          value={prettyHHMM(addDraft.begin1 || "") || "Select time…"}
+                          onChange={(band) => setAddSlotFromBand(1, band === "Select time…" ? "" : band)}
+                          options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
+                        />
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 text-left">
+                          End 1: {prettyHHMM(addDraft.end1 || "") || "—"}
+                        </div>
+                      </div>
+                      <div className="space-y-1">
+                        <SelectBox
+                          value={prettyHHMM(addDraft.begin2 || "") || "Select time…"}
+                          onChange={(band) => setAddSlotFromBand(2, band === "Select time…" ? "" : band)}
+                          options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
+                        />
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 text-left">
+                          End 2: {prettyHHMM(addDraft.end2 || "") || "—"}
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">TBA</div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <SelectBox
+                      value={String(addDraft.status || "Forwarded To Department")}
+                      onChange={(v) => setAddDraft((d) => ({ ...d, status: v }))}
+                      options={statuses.filter((s) => s !== "All Status")}
+                    />
+                  </td>
+
+                  <td className="px-4 py-3 align-top">
+                    <textarea
+                      value={String(addDraft.remarks || "")}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, remarks: e.target.value }))}
+                      rows={3}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none focus:ring-2 focus:ring-emerald-500/30"
+                      placeholder="Optional remarks"
+                    />
+                  </td>
+
+                  <td className="px-2 py-3 text-center align-top">
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={saveAddClass}
+                        disabled={loading}
+                        className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Save"
+                      >
+                        <Check className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </td>
+
+                  <td className="px-2 py-3 text-center align-top">
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={closeAddClass}
+                        disabled={loading}
+                        className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-400 text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Cancel"
+                      >
+                        <X className="h-4 w-4" strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+
               {loading ? (
                 <tr>
                   <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     Loading…
                   </td>
                 </tr>
-              ) : rows.length === 0 ? (
+              ) : groupedRows.length === 0 ? (
                 <tr>
                   <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     No results
@@ -1618,9 +2168,15 @@ export default function OM_SpecialClass({
                 groupedRows.map((r) => {
                   const editing = editId === r.group_key;
                   const canEditSectionFaculty = true;
+                  const visibleStudents = visibleStudentsForRow(r);
+                  const displayCount = visibleCountForRow(r);
+                  const moveSourceRow = pendingMove?.sourceGroupKey === r.group_key;
+                  const assignInlineOpen = inlineAssignState?.targetGroupKey === r.group_key;
+                  const addStudentButtonLabel = "Add Student";
 
                   return (
-                    <tr key={r.special_id} className="hover:bg-gray-50 align-top">
+                    <Fragment key={r.group_key}>
+                    <tr className="hover:bg-gray-50 align-top">
                       <td className="px-3 py-3">
                         <input
                           type="checkbox"
@@ -1638,23 +2194,63 @@ export default function OM_SpecialClass({
 
                       <td className="px-4 py-3 text-center align-top">
                         <span className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
-                          {r.count}
+                          {displayCount}
                         </span>
                       </td>
 
                       <td className="px-4 py-3 align-top">
-                        <div className="space-y-1.5 min-w-[240px]">
-                          {r.students.map((student) => (
-                            <button
-                              key={student.special_id}
-                              type="button"
-                              onClick={() => openView(student.special_id)}
-                              className="block text-left text-sm font-medium text-emerald-700 hover:text-emerald-800 hover:underline"
-                              title="View application"
-                            >
-                              {student.student_name || "—"}
-                            </button>
-                          ))}
+                        <div className="space-y-2 min-w-[260px]">
+                          {visibleStudents.length > 0 ? (
+                            visibleStudents.map((student) => {
+                              const selectedForMove = pendingMove?.student.special_id === student.special_id;
+                              return (
+                              <div key={student.special_id} className="flex items-center justify-between gap-2 rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+                                <button
+                                  type="button"
+                                  onClick={() => openView(student.special_id)}
+                                  className="min-w-0 flex-1 text-left text-sm font-medium text-emerald-700 hover:text-emerald-800 hover:underline"
+                                  title="View application"
+                                >
+                                  <div className="truncate">{student.student_name || "—"}</div>
+                                  {student.student_number ? (
+                                    <div className="text-xs text-emerald-900/70">{student.student_number}</div>
+                                  ) : null}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => startStudentMove(student, r)}
+                                  disabled={editing || loading}
+                                  className={cls(
+                                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-red-600 disabled:cursor-not-allowed disabled:opacity-50",
+                                    selectedForMove ? "border-amber-300 bg-amber-100 text-amber-900" : "border-red-200 hover:bg-red-50"
+                                  )}
+                                  title={selectedForMove ? "Cancel move" : "Move student to another special class"}
+                                  aria-label={selectedForMove ? "Cancel move" : "Move student to another special class"}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            )})
+                          ) : (
+                            <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                              {r.generated_from_class_retention
+                                ? "No student application. Reflected from Class Retention."
+                                : r.manual_special_class
+                                ? "No student application yet. You can add eligible students for this same course."
+                                : "No unassigned student application in this class yet."}
+                            </div>
+                          )}
+
+                          <button
+                            type="button"
+                            onClick={() => openInlineAssign(r)}
+                            disabled={editing || loading || !r.primary_special_id || !!pendingMove}
+                            className="inline-flex items-center gap-2 rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                            title={pendingMove ? "Finish the current move first." : "Add a same-course student who already applied"}
+                          >
+                            <Plus className="h-4 w-4" />
+                            {addStudentButtonLabel}
+                          </button>
                         </div>
                       </td>
 
@@ -2020,18 +2616,131 @@ export default function OM_SpecialClass({
                             </button>
                           </div>
                         ) : (
-                          <button
-                            type="button"
-                            onClick={() => beginEdit(r)}
-                            className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
-                            title="Edit"
-                            aria-label="Edit"
-                          >
-                            <Edit className="h-4 w-4" />
-                          </button>
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => beginEdit(r)}
+                              className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
+                              title="Edit"
+                              aria-label="Edit"
+                            >
+                              <Edit className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteSpecialClassRow(r)}
+                              disabled={loading || assignInlineOpen}
+                              className="inline-flex items-center justify-center p-1 rounded-md text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Delete special class"
+                              aria-label="Delete special class"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
                         )}
                       </td>
                     </tr>
+
+                    {assignInlineOpen && inlineAssignState ? (
+                      <tr className="bg-emerald-50/40">
+                        <td colSpan={13} className="border-t border-emerald-100 px-4 py-4">
+                          <div className="rounded-xl border border-emerald-200 bg-white p-4 shadow-sm">
+                            {inlineAssignState.mode === "move" ? (
+                              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto] lg:items-end">
+                                <div className="space-y-1.5">
+                                  <div className="text-sm font-semibold text-emerald-800">Move Student</div>
+                                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                                    <span className="font-semibold">{pendingMove?.student.student_name || "Student"}</span>
+                                    {pendingMove?.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
+                                    {` • from ${pendingMove?.sourceSectionLabel || "current class"}`}
+                                  </div>
+                                </div>
+
+                                <div className="space-y-1.5">
+                                  <div className="text-sm font-medium text-gray-700">Move to section</div>
+                                  <SelectBox
+                                    value={inlineAssignState.targetOptions?.find((option) => option.specialId === inlineAssignState.targetSpecialId)?.label || ""}
+                                    onChange={(value) => {
+                                      const match = inlineAssignState.targetOptions?.find((option) => option.label === value);
+                                      setInlineAssignState((current) => current && match
+                                        ? { ...current, targetSpecialId: match.specialId, sectionLabel: match.sectionLabel }
+                                        : current);
+                                    }}
+                                    options={(inlineAssignState.targetOptions || []).map((option) => option.label)}
+                                  />
+                                  <div className="text-xs text-gray-500">Pick the target section for this same course.</div>
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={cancelPendingMove}
+                                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={!inlineAssignState.targetSpecialId || !inlineAssignState.selectedStudentId}
+                                    onClick={confirmInlineAssign}
+                                    className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                                  >
+                                    Move Student
+                                  </button>
+                                </div>
+                              </div>
+                            ) : (
+                              <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                                <div className="space-y-1.5">
+                                  <div className="text-base font-semibold text-emerald-800">Add Student to Class</div>
+                                  <div className="text-sm text-gray-600">
+                                    {inlineAssignState.courseLabel} • {inlineAssignState.sectionLabel || "—"}
+                                  </div>
+                                  <div className="text-sm font-medium text-gray-700">Eligible student</div>
+                                  {inlineAssignState.loading ? (
+                                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">Loading eligible students…</div>
+                                  ) : inlineAssignState.candidates.length === 0 ? (
+                                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                      No students are available for this course right now.
+                                    </div>
+                                  ) : (
+                                    <SelectBox
+                                      value={(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)
+                                        ? candidateLabel(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)!)
+                                        : "")}
+                                      onChange={(v) => {
+                                        const match = inlineAssignState.candidates.find((candidate) => candidateLabel(candidate) === v);
+                                        setInlineAssignState((current) => current ? { ...current, selectedStudentId: match?.special_id || "" } : current);
+                                      }}
+                                      options={inlineAssignState.candidates.map((candidate) => candidateLabel(candidate))}
+                                    />
+                                  )}
+                                </div>
+
+                                <div className="flex items-center justify-end gap-2">
+                                  <button
+                                    type="button"
+                                    onClick={closeInlineAssign}
+                                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+                                  >
+                                    Cancel
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={inlineAssignState.loading || !inlineAssignState.selectedStudentId}
+                                    onClick={confirmInlineAssign}
+                                    className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                                  >
+                                    Add Student
+                                  </button>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                    </Fragment>
                   );
                 })
               )}
@@ -2040,110 +2749,103 @@ export default function OM_SpecialClass({
         </div>
       </div>
 
-      {/* View Application Modal */}
+
       {viewOpen && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) closeView();
-          }}
-        >
-          <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-4 border-b bg-gray-50">
+        <div className="fixed inset-0 z-[125] flex items-center justify-center bg-black/40 px-4 py-6">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-5 py-4">
               <div>
-                <div className="text-lg font-bold text-gray-900">View Application</div>
+                <div className="text-lg font-semibold text-slate-900">Special Class Application</div>
+                <div className="mt-1 text-sm text-slate-500">
+                  {viewData?.student_name || "View submitted details"}
+                </div>
               </div>
               <button
                 type="button"
                 onClick={closeView}
-                className="h-9 w-9 inline-flex items-center justify-center rounded-full hover:bg-gray-200/70"
-                title="Close"
+                className="rounded-lg p-1 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close application detail"
               >
-                <X className="h-5 w-5 text-gray-700" />
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="p-5 max-h-[75vh] overflow-auto">
+            <div className="max-h-[calc(90vh-88px)] overflow-y-auto px-5 py-4">
               {viewLoading ? (
-                <div className="py-10 text-center text-gray-500">Loading application…</div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+                  Loading application details…
+                </div>
               ) : viewErr ? (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
                   {viewErr}
                 </div>
-              ) : !viewData ? (
-                <div className="py-10 text-center text-gray-500">No data</div>
-              ) : (
-                <div className="space-y-5">
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Student Details</div>
+              ) : viewData ? (
+                <div className="space-y-6">
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Application</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Student" value={viewData.student_name} />
+                      <DetailRow label="Student Number" value={viewData.student_number} />
+                      <DetailRow label="Status" value={viewData.status} />
+                      <DetailRow label="Submitted" value={formatDate(viewData.submitted_at)} />
+                      <DetailRow label="Updated" value={formatDate(viewData.updated_at)} />
                     </div>
-                    <div className="px-4">
-                      <DetailRow label="Name" value={viewData.student_name} />
-                      <DetailRow label="ID Number" value={viewData.student_number} />
-                      <DetailRow label="Program" value={viewData.program_code} />
-                    </div>
-                  </div>
+                  </section>
 
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Request</div>
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Course and class</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Course Code" value={viewData.course_code} />
+                      <DetailRow label="Course Title" value={viewData.course_title} />
+                      <DetailRow label="Section" value={viewData.section_code} />
+                      <DetailRow label="Faculty" value={viewData.faculty_name} />
+                      <DetailRow label="Schedule" value={viewData.schedule_text} />
+                      <DetailRow label="Remarks" value={viewData.remarks} />
                     </div>
-                    <div className="px-4">
+                  </section>
+
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Student details</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Department" value={viewData.department_name} />
+                      <DetailRow label="Course Units" value={viewData.course_units} />
+                      <DetailRow label="Units Remaining" value={viewData.units_remaining} />
                       <DetailRow label="Graduating After Term" value={viewData.graduating_after_term} />
-                      <DetailRow
-                        label="Reason"
-                        value={viewData.reason_other ? `${viewData.reason}${viewData.reason ? " — " : ""}${viewData.reason_other}` : viewData.reason}
-                      />
                     </div>
-                  </div>
+                  </section>
 
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">EAF Submission</div>
+                  <section>
+                    <div className="mb-2 flex items-center justify-between gap-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+                      <span>Attached EAF</span>
+                      {viewData.eaf_view_url ? (
+                        <button
+                          type="button"
+                          onClick={() => openEaf(viewData.eaf_view_url)}
+                          className="inline-flex items-center rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-semibold normal-case tracking-normal text-white hover:bg-emerald-800"
+                        >
+                          Open EAF
+                        </button>
+                      ) : null}
                     </div>
-                    <div className="px-4 py-4 space-y-3">
-                      {viewData.has_eaf && viewData.eaf_view_url ? (
-                        <>
-                          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
-                            <div className="text-sm font-medium text-gray-900">{viewData.eaf_original_name || "Uploaded EAF"}</div>
-                            <div className="mt-1 text-xs text-gray-500">
-                              Uploaded: {formatDate(viewData.eaf_uploaded_at)}
-                            </div>
-                          </div>
-                          <div>
-                            <button
-                              type="button"
-                              onClick={() => openEaf(viewData.eaf_view_url)}
-                              className="inline-flex items-center rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800"
-                            >
-                              Open PDF
-                            </button>
-                          </div>
-                        </>
-                      ) : (
-                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-500">
-                          No EAF submission found.
-                        </div>
-                      )}
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Uploaded" value={viewData.has_eaf ? 'Yes' : 'No'} />
+                      <DetailRow label="Filename" value={viewData.eaf_original_name} />
+                      <DetailRow label="Content Type" value={viewData.eaf_content_type} />
+                      <DetailRow label="File Size" value={viewData.eaf_size ? `${viewData.eaf_size} bytes` : ''} />
+                      <DetailRow label="Uploaded At" value={formatDate(viewData.eaf_uploaded_at)} />
                     </div>
-                  </div>
+                  </section>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+                  No application details available.
                 </div>
               )}
-            </div>
-
-            <div className="px-5 py-4 border-t bg-gray-50 flex items-center justify-end">
-              <button
-                type="button"
-                onClick={closeView}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-100"
-              >
-                Close
-              </button>
             </div>
           </div>
         </div>
       )}
+
 
       {confirmState && (
         <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 px-4">

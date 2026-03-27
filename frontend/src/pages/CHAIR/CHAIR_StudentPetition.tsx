@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
-import { AlertTriangle, CalendarClock, Check, Edit, Info, Search as SearchIcon } from "lucide-react";
+import { AlertTriangle, CalendarClock, Check, Edit, Info, Search as SearchIcon, X } from "lucide-react";
 import {
-  getChairSPOptions,
-  listChairSP,
-  updateChairSPCourse,
-  type ChairPetitionRow,
-  type ChairPetitionOptions,
+  getOMSPOptions,
+  listOMSP,
+  updateOMSPCourse,
+  startOMSPWindow,
+  type OMPetitionRow,
+  type OMPetitionOptions,
 } from "../../api";
 import { getSessionUserId } from "../../lib/session";
 
@@ -45,7 +46,7 @@ function DeadlineBanner({
           <div>
             <div className="font-semibold">Submission Window Not Started</div>
             <div className="text-xs text-slate-600">
-              The Operations Manager has not set a submission deadline for this term yet.
+              Set a deadline above. Until then, students will not be able to submit requests for this term.
             </div>
           </div>
         </div>
@@ -88,6 +89,42 @@ function DeadlineBanner({
   );
 }
 
+function toLocalInput(isoOrDate: string) {
+  const d = new Date(isoOrDate);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
+}
+
+function nextMinuteFrom(date = new Date()) {
+  const d = new Date(date);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  return d;
+}
+
+function PetitionStatusHint() {
+  return (
+    <div className="group relative inline-flex items-center">
+      <button
+        type="button"
+        className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-700 transition hover:bg-amber-100"
+        aria-label="Student petition status guide"
+        title="Student petition status guide"
+      >
+        <Info className="h-4 w-4" />
+      </button>
+      <div className="pointer-events-none absolute right-0 top-[calc(100%+0.5rem)] z-20 hidden w-80 rounded-xl border border-amber-200 bg-white p-3 text-left text-xs leading-5 text-gray-700 shadow-lg group-hover:block">
+        Yellow rows mean the petition count is 15 or more and the status is automatically treated as <span className="font-semibold text-amber-800">Forwarded To Department</span>. OM should take this into consideration for opening another section or increasing available slots.
+      </div>
+    </div>
+  );
+}
 
 function TextBox({
   value,
@@ -159,13 +196,16 @@ export default function CHAIR_StudentPetition() {
   const [search, setSearch] = useState("");
 
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
+  const [activeTerm, setActiveTerm] = useState<OMPetitionOptions["activeTerm"] | null>(null);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
   const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({
     openISO: "",
     deadlineISO: "",
   });
+  const [deadlineDraft, setDeadlineDraft] = useState("");
+  const [startingWindow, setStartingWindow] = useState(false);
 
-  const [rows, setRows] = useState<ChairPetitionRow[]>([]);
+  const [rows, setRows] = useState<OMPetitionRow[]>([]);
   const [selected, setSelected] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
@@ -173,13 +213,44 @@ export default function CHAIR_StudentPetition() {
   const [editCourseId, setEditCourseId] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ status?: string; remarks?: string }>({});
 
+  const confirmResolverRef = useRef<((v: boolean) => void) | null>(null);
+  const [confirmState, setConfirmState] = useState<
+    | {
+        title: string;
+        message: string;
+        accent: "emerald" | "amber";
+        confirmText: string;
+        note?: string;
+      }
+    | null
+  >(null);
+
+  const openConfirm = (payload: {
+    title: string;
+    message: string;
+    accent: "emerald" | "amber";
+    confirmText: string;
+    note?: string;
+  }) =>
+    new Promise<boolean>((resolve) => {
+      confirmResolverRef.current = resolve;
+      setConfirmState(payload);
+    });
+
+  const closeConfirm = (result: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmState(null);
+    resolver?.(result);
+  };
 
   useEffect(() => {
     (async () => {
       try {
-        const opt: ChairPetitionOptions = await getChairSPOptions();
+        const opt: OMPetitionOptions = await getOMSPOptions();
         if (!opt.ok) throw new Error("Failed to load options");
         setStatuses(["All Status", ...(opt.statuses || [])]);
+        setActiveTerm(opt.activeTerm || null);
         const ay = opt.activeTerm?.acad_year_start;
         const tn = opt.activeTerm?.term_number;
         setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
@@ -189,6 +260,13 @@ export default function CHAIR_StudentPetition() {
           deadlineISO: win.deadlineISO || "",
         };
         setSubmissionWindow(nextWindow);
+        if (nextWindow.deadlineISO) {
+          setDeadlineDraft(toLocalInput(nextWindow.deadlineISO));
+        } else {
+          const base = nextMinuteFrom();
+          const plus7 = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
+          setDeadlineDraft(toLocalInput(plus7.toISOString()));
+        }
       } catch (e: any) {
         setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
       }
@@ -205,7 +283,7 @@ export default function CHAIR_StudentPetition() {
       try {
         setLoading(true);
         setErr("");
-        const { ok, rows } = await listChairSP({ status, search, userId: getSessionUserId() || undefined });
+        const { ok, rows } = await listOMSP({ status, search });
         if (!ok) throw new Error("Failed to load petitions.");
         setRows(rows);
         setSelected((sel) => sel.filter((cid) => rows.some((r) => r.course_id === cid)));
@@ -220,7 +298,7 @@ export default function CHAIR_StudentPetition() {
 
   const toggleAll = (checked: boolean) => setSelected(checked ? rows.map((r) => r.course_id) : []);
 
-  const beginEdit = (row: ChairPetitionRow) => {
+  const beginEdit = (row: OMPetitionRow) => {
     setEditCourseId(row.course_id);
     setDraft({ status: row.status, remarks: row.remarks || "" });
   };
@@ -230,8 +308,8 @@ export default function CHAIR_StudentPetition() {
     try {
       setLoading(true);
       setErr("");
-      await updateChairSPCourse(editCourseId, draft);
-      const { rows } = await listChairSP({ status, search, userId: getSessionUserId() || undefined });
+      await updateOMSPCourse(editCourseId, draft, getSessionUserId());
+      const { rows } = await listOMSP({ status, search });
       setRows(rows);
       setEditCourseId(null);
       setDraft({});
@@ -242,13 +320,86 @@ export default function CHAIR_StudentPetition() {
     }
   };
 
+  const handleStartWindow = async () => {
+    if (startingWindow) return;
+
+    const deadlineDate = new Date(deadlineDraft);
+    if (!deadlineDraft || Number.isNaN(deadlineDate.getTime())) {
+      setErr("Please provide a valid deadline date and time.");
+      return;
+    }
+
+    const minDeadlineDate = nextMinuteFrom();
+    if (deadlineDate.getTime() < minDeadlineDate.getTime()) {
+      setErr(`Deadline must be at or after ${minDeadlineDate.toLocaleString()}.`);
+      return;
+    }
+
+    const openDate = new Date();
+
+    const ok = await openConfirm({
+      title: "Set submission deadline?",
+      message: `Set the submission deadline to ${deadlineDate.toLocaleString()}? This will apply immediately.`,
+      accent: "emerald",
+      confirmText: "Set deadline",
+      note: `Students will be able to submit immediately until the selected deadline. The earliest valid deadline is ${minDeadlineDate.toLocaleString()}.`,
+    });
+    if (!ok) return;
+
+    try {
+      setStartingWindow(true);
+      setErr("");
+      const data = await startOMSPWindow({
+        termId: activeTerm?.term_id,
+        openISO: openDate.toISOString(),
+        deadlineISO: deadlineDate.toISOString(),
+      });
+      if (!data?.ok || !data.submission_window) throw new Error("Failed to set submission window.");
+
+      setSubmissionWindow({
+        openISO: data.submission_window.openISO || "",
+        deadlineISO: data.submission_window.deadlineISO || "",
+      });
+      setDeadlineDraft(toLocalInput(data.submission_window.deadlineISO || deadlineDate.toISOString()));
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || e?.message || "Failed to set submission window.");
+    } finally {
+      setStartingWindow(false);
+    }
+  };
+
+  const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
 
   return (
     <main className="w-full px-8 py-8">
-      <header className="mb-4">
+      <header className="mb-4 flex items-center justify-between">
         <div>
           <h1 className="text-2xl font-bold">Student Petition</h1>
           <p className="text-sm text-gray-600">Manage course section requests {activeTermLabel && `for ${activeTermLabel}`}</p>
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-medium text-slate-700">Deadline</span>
+              <input
+                type="datetime-local"
+                min={minDeadlineLocal}
+                className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                value={deadlineDraft}
+                onChange={(e) => setDeadlineDraft(e.target.value)}
+              />
+            </div>
+            <button
+              type="button"
+              onClick={handleStartWindow}
+              disabled={startingWindow}
+              className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+              title="Set or update the submission deadline"
+            >
+              {startingWindow ? "Saving…" : "Set Deadline"}
+            </button>
+          </div>
         </div>
       </header>
 
@@ -266,7 +417,10 @@ export default function CHAIR_StudentPetition() {
             className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
         </div>
-        <SelectBox value={status} onChange={setStatus} options={statuses} />
+        <div className="flex items-center gap-2">
+          <SelectBox value={status} onChange={setStatus} options={statuses} />
+          <PetitionStatusHint />
+        </div>
       </div>
 
       <div className="overflow-auto rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -305,7 +459,13 @@ export default function CHAIR_StudentPetition() {
               rows.map((r) => {
                 const editing = editCourseId === r.course_id;
                 return (
-                  <tr key={r.course_id} className="align-top hover:bg-gray-50">
+                  <tr
+                    key={r.course_id}
+                    className={cls(
+                      "align-top transition-colors",
+                      r.highlight_yellow ? "bg-yellow-100 hover:bg-yellow-200" : "hover:bg-gray-50"
+                    )}
+                  >
                     <td className="px-3 py-3 text-center">
                       <input
                         type="checkbox"
@@ -371,6 +531,55 @@ export default function CHAIR_StudentPetition() {
           </tbody>
         </table>
       </div>
+
+      {confirmState && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+            <div
+              className={cls(
+                "flex items-start gap-3 px-5 py-4 text-white",
+                confirmState.accent === "amber" ? "bg-amber-600" : "bg-emerald-700"
+              )}
+            >
+              <div className="mt-0.5 rounded-full bg-white/15 p-2">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-base font-semibold">{confirmState.title}</div>
+                {confirmState.note && <div className="mt-1 text-sm text-white/85">{confirmState.note}</div>}
+              </div>
+              <button
+                type="button"
+                onClick={() => closeConfirm(false)}
+                className="rounded-lg p-1 text-white/90 transition hover:bg-white/10"
+                aria-label="Close confirmation"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 text-sm whitespace-pre-line text-slate-700">{confirmState.message}</div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 px-5 py-4">
+              <button
+                type="button"
+                onClick={() => closeConfirm(false)}
+                className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-gray-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => closeConfirm(true)}
+                className={cls(
+                  "rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm",
+                  confirmState.accent === "amber" ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-700 hover:bg-emerald-800"
+                )}
+              >
+                {confirmState.confirmText}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

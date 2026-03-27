@@ -1386,7 +1386,6 @@ export default function CourseOfferingsPage() {
   const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
   const [scLoading, setScLoading] = useState(false);
   const [scErr, setScErr] = useState<string | null>(null);
-  const [dissolvedData, setDissolvedData] = useState<DissolvedClassesResponse | null>(null);
   const [dissolvedRows, setDissolvedRows] = useState<DissolvedClassRow[]>([]);
   const [dissolvedLoading, setDissolvedLoading] = useState(false);
   const [dissolvedErr, setDissolvedErr] = useState<string | null>(null);
@@ -1937,7 +1936,6 @@ const loadOfferings = async () => {
         view: "dissolved",
       })) as unknown as DissolvedClassesResponse;
 
-      setDissolvedData(resp);
       setDissolvedRows(Array.isArray(resp?.rows) ? resp.rows : []);
     } catch (e: any) {
       setDissolvedErr(e?.message || "Failed to load dissolved classes.");

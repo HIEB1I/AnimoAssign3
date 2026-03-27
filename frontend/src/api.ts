@@ -2633,6 +2633,8 @@ export type OMPetitionRow = {
   count: number;
   status: string;
   remarks?: string;
+  highlight_row?: boolean;
+  highlight_yellow?: boolean;
 };
 
 export type OMPetitionOptions = {
@@ -2784,6 +2786,9 @@ export type OMSpecialClassRow = {
   assignment_id?: string | null;
   schedule_cleared?: boolean;
   clear_schedule_only?: boolean;
+  generated_from_class_retention?: boolean;
+  manual_special_class?: boolean;
+  retention_id?: string;
 };
 
 export type OMSpecialClassDetail = OMSpecialClassRow & {
@@ -2806,11 +2811,18 @@ export type OMSpecialClassDetail = OMSpecialClassRow & {
   updated_at?: string;
 };
 
+export type OMSpecialClassCourseOption = {
+  course_id: string;
+  course_code: string;
+  course_title?: string;
+};
+
 export type OMSpecialClassOptions = {
   ok: boolean;
   statuses: string[];
   activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
   facultyOptions?: OMSCFaultyOpt[];
+  courseOptions?: OMSpecialClassCourseOption[];
   // backend includes this in options, even if UI doesn't edit rooms yet
   roomOptions?: OMSCRoomOpt[];
   submission_window?: SubmissionWindow;
@@ -2865,6 +2877,63 @@ export async function updateOMSC(
     params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
+}
+
+export type OMSpecialClassCandidate = {
+  special_id: string;
+  student_name: string;
+  student_number?: string | number;
+  status?: string;
+};
+
+export async function createOMSC(
+  payload: Partial<OMSpecialClassRow>,
+  userId?: string | null
+): Promise<{ ok: boolean; special_id: string; row?: OMSpecialClassRow }> {
+  const { data } = await api.post(`/om/specialclass`, payload, {
+    params: { action: "create", ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; special_id: string; row?: OMSpecialClassRow };
+}
+
+export async function getOMSC_EligibleStudents(
+  targetSpecialId: string
+): Promise<{ ok: boolean; rows: OMSpecialClassCandidate[] }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "eligibleStudents", targetSpecialId },
+  });
+  return data as { ok: boolean; rows: OMSpecialClassCandidate[] };
+}
+
+export async function unassignOMSCStudent(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "unassignStudent", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function assignOMSCStudent(
+  targetSpecialId: string,
+  studentSpecialId: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, { studentSpecialId }, {
+    params: { action: "assignStudent", targetSpecialId, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function deleteOMSCClass(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "deleteClass", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string };
 }
 
 export async function getOMSC_Detail(
@@ -3040,6 +3109,8 @@ export type ChairPetitionRow = {
   count: number;
   status: string;
   remarks?: string;
+  highlight_row?: boolean;
+  highlight_yellow?: boolean;
 };
 
 export type ChairPetitionOptions = {
@@ -3123,6 +3194,58 @@ export async function updateChairSC(
     params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
+}
+
+export type ChairSpecialClassCandidate = OMSpecialClassCandidate;
+
+export async function createChairSC(
+  payload: Partial<ChairSpecialClassRow>,
+  userId?: string | null
+): Promise<{ ok: boolean; special_id: string; row?: ChairSpecialClassRow }> {
+  const { data } = await api.post(`/chair/specialclass`, payload, {
+    params: { action: "create", ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; special_id: string; row?: ChairSpecialClassRow };
+}
+
+export async function getChairSC_EligibleStudents(
+  targetSpecialId: string
+): Promise<{ ok: boolean; rows: ChairSpecialClassCandidate[] }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "eligibleStudents", targetSpecialId },
+  });
+  return data as { ok: boolean; rows: ChairSpecialClassCandidate[] };
+}
+
+export async function unassignChairSCStudent(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "unassignStudent", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function assignChairSCStudent(
+  targetSpecialId: string,
+  studentSpecialId: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/chair/specialclass`, { studentSpecialId }, {
+    params: { action: "assignStudent", targetSpecialId, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function deleteChairSCClass(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "deleteClass", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string };
 }
 
 export async function getChairSC_Detail(

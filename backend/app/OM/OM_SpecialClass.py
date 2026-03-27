@@ -10,7 +10,8 @@ import uuid
 
 from fastapi import APIRouter, Body, HTTPException, Query
 from fastapi.responses import Response, StreamingResponse
-from pymongo import ASCENDING
+from pymongo import ASCENDING, ReturnDocument
+from pymongo.errors import DuplicateKeyError
 
 from ..main import db
 from ..Notifications import create_notification
@@ -38,6 +39,7 @@ COL_ROOMS = "rooms"
 
 COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_SPECIAL_WINDOWS = "specialclass_windows"
+COL_CLASS_RETENTION = "class_retention"
 
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
@@ -65,6 +67,11 @@ def _now_utc() -> datetime:
 
 def _safe_str(x: Any) -> str:
     return str(x).strip() if x is not None else ""
+
+
+def _is_convert_to_special_status(value: Any) -> bool:
+    s = _safe_str(value).lower()
+    return s in {"convert to special class", "special class"}
 
 
 def _eaf_available(doc: Dict[str, Any]) -> bool:
@@ -701,6 +708,138 @@ def _is_valid_hhmm(hhmm: str) -> bool:
 def _mins(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[2:])
 
+async def _role_user_ids_by_name_patterns(patterns: List[str], department_id: str | None = None) -> List[str]:
+    """Best-effort role recipient lookup across multiple schema variants."""
+    pats = [p for p in (patterns or []) if _safe_str(p)]
+    dept_id = _safe_str(department_id)
+    if not pats:
+        return []
+
+    recipients: set[str] = set()
+    ra_matchers: List[Dict[str, Any]] = []
+
+    for p in pats:
+        regex = {"$regex": p, "$options": "i"}
+        ra_matchers.extend([
+            {"role": regex},
+            {"role_name": regex},
+            {"role_title": regex},
+            {"role_code": regex},
+        ])
+
+    ra_filter: Dict[str, Any] = {"$or": ra_matchers}
+    if dept_id:
+        ra_filter = {
+            "$and": [
+                ra_filter,
+                {
+                    "$or": [
+                        {"department_id": dept_id},
+                        {"dept_id": dept_id},
+                        {"scope": {"$exists": True}},
+                    ]
+                },
+            ]
+        }
+
+    try:
+        ras = await db["role_assignments"].find(
+            ra_filter,
+            {"_id": 0, "user_id": 1, "department_id": 1, "dept_id": 1, "scope": 1},
+        ).to_list(500)
+        for row in ras or []:
+            if dept_id:
+                dept_match = _safe_str(row.get("department_id")) == dept_id or _safe_str(row.get("dept_id")) == dept_id
+                if not (dept_match or _scope_has_department(row.get("scope"), dept_id)):
+                    continue
+            uid = _safe_str((row or {}).get("user_id"))
+            if uid:
+                recipients.add(uid)
+    except Exception:
+        pass
+
+    role_doc_matchers: List[Dict[str, Any]] = []
+    for p in pats:
+        regex = {"$regex": p, "$options": "i"}
+        role_doc_matchers.extend([
+            {"name": regex},
+            {"role_name": regex},
+            {"title": regex},
+            {"code": regex},
+            {"slug": regex},
+        ])
+
+    role_ids: set[str] = set()
+    try:
+        role_docs = await db["roles"].find(
+            {"$or": role_doc_matchers},
+            {"_id": 0, "role_id": 1, "id": 1},
+        ).to_list(200)
+        for row in role_docs or []:
+            rid = _safe_str(row.get("role_id") or row.get("id"))
+            if rid:
+                role_ids.add(rid)
+    except Exception:
+        pass
+
+    if role_ids:
+        try:
+            user_role_filter: Dict[str, Any] = {"role_id": {"$in": list(role_ids)}}
+            if dept_id:
+                user_role_filter = {
+                    "$and": [
+                        user_role_filter,
+                        {
+                            "$or": [
+                                {"department_id": dept_id},
+                                {"dept_id": dept_id},
+                                {"scope": {"$exists": True}},
+                            ]
+                        },
+                    ]
+                }
+            urs = await db["user_roles"].find(
+                user_role_filter,
+                {"_id": 0, "user_id": 1, "department_id": 1, "dept_id": 1, "scope": 1},
+            ).to_list(500)
+            for row in urs or []:
+                if dept_id:
+                    dept_match = _safe_str(row.get("department_id")) == dept_id or _safe_str(row.get("dept_id")) == dept_id
+                    if not (dept_match or _scope_has_department(row.get("scope"), dept_id)):
+                        continue
+                uid = _safe_str((row or {}).get("user_id"))
+                if uid:
+                    recipients.add(uid)
+        except Exception:
+            pass
+
+    if recipients:
+        return sorted(recipients)
+
+    try:
+        users = await db[COL_USERS].find({}, {"_id": 0, "user_id": 1, "role": 1, "role_name": 1, "position": 1, "department_id": 1}).to_list(5000)
+        import re
+        compiled = [re.compile(p, re.I) for p in pats]
+        for u in users or []:
+            hay = " ".join([
+                _safe_str(u.get("role")),
+                _safe_str(u.get("role_name")),
+                _safe_str(u.get("position")),
+            ])
+            if not hay:
+                continue
+            if dept_id and _safe_str(u.get("department_id")) not in {"", dept_id}:
+                continue
+            if any(rx.search(hay) for rx in compiled):
+                uid = _safe_str(u.get("user_id"))
+                if uid:
+                    recipients.add(uid)
+    except Exception:
+        pass
+
+    return sorted(recipients)
+
+
 
 def _normalize_day_short(value: Any) -> str:
     raw = _safe_str(value).upper()
@@ -998,6 +1137,16 @@ async def _special_window_override_for_term(term: Dict[str, Any]) -> Dict[str, A
 
 async def _get_allowed_statuses() -> List[str]:
     return OM_ALLOWED_STATUSES
+
+async def _next_special_id() -> str:
+    doc = await db[COL_SPECIAL].find_one_and_update(
+        {"_id": "config"},
+        {"$setOnInsert": {"doc_type": "config"}, "$inc": {"next_seq": 1}},
+        upsert=True,
+        return_document=ReturnDocument.AFTER,
+    )
+    seq = int((doc or {}).get("next_seq", 1))
+    return f"SPCL{seq:04d}"
 
 
 async def _faculty_name_from_id(faculty_id: Optional[str]) -> str:
@@ -1793,7 +1942,7 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
 
     status = (r.get("status") or "").strip()
     binding = (maps.get("approved_group_bindings") or {}).get((_safe_str(r.get("term_id")), cid)) if cid else None
-    if binding and (_safe_str(status) != "Approved"):
+    if (not bool(r.get("generated_from_class_retention"))) and binding and (_safe_str(status) != "Approved"):
         if not sid:
             sid = _safe_str(binding.get("section_id")) or None
         if not _safe_str(r.get("assignment_id") or r.get("faculty_assignment_id")) and binding.get("assignment_id"):
@@ -1827,7 +1976,7 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     if course_units in (None, "", 0):
         course_units = c.get("units", "") or ""
 
-    section_code = (s.get("section_code") or "").strip() if sid else ""
+    section_code = (_safe_str(s.get("section_code")) or _safe_str(r.get("section_code")) or "")
 
     # schedule is derived by IDs (schedule_id1/2) if present, else by section_id
     # NOTE: When schedule_cleared is true, we intentionally show blank schedule even if section has schedules.
@@ -1872,11 +2021,12 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
 
     # faculty derived by assignment_id first; fallback to latest assignment for section
     assignment_id = (r.get("assignment_id") or r.get("faculty_assignment_id") or "").strip() or None
+    generated_from_class_retention = bool(r.get("generated_from_class_retention"))
 
     faculty_id: Optional[str] = None
     faculty_name = "UNASSIGNED"
 
-    if status_norm == "SUBMITTED":
+    if status_norm == "SUBMITTED" or (generated_from_class_retention and not assignment_id):
         faculty_id = None
         faculty_name = "UNASSIGNED"
     else:
@@ -1942,8 +2092,248 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         "eaf_content_type": r.get("eaf_content_type") or "",
         "eaf_size": r.get("eaf_size") or 0,
         "eaf_uploaded_at": r.get("eaf_uploaded_at"),
+        "generated_from_class_retention": generated_from_class_retention,
+        "manual_special_class": bool(r.get("manual_special_class")),
+        "retention_id": _safe_str(r.get("retention_id")),
         "eaf_view_url": _build_admin_eaf_view_url("om", r.get("special_id") or ""),
     }
+
+
+async def _resolve_special_course(payload: Dict[str, Any]) -> Dict[str, Any]:
+    course_id = _safe_str(payload.get("course_id") or payload.get("courseId"))
+    course_code = _safe_str(payload.get("course_code") or payload.get("courseCode"))
+
+    query: Dict[str, Any]
+    if course_id:
+        query = {"course_id": course_id}
+    elif course_code:
+        query = {"$or": [{"course_code": course_code}, {"course_code": {"$in": [course_code]}}]}
+    else:
+        raise HTTPException(status_code=400, detail="course_id or course_code is required.")
+
+    course = await db[COL_COURSES].find_one(
+        query,
+        {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1, "department_id": 1, "units": 1},
+    ) or {}
+    if not course:
+        raise HTTPException(status_code=404, detail="Course not found.")
+    return course
+
+
+async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
+    term_id = _safe_str(term_id)
+    if not term_id:
+        return
+
+    rows = await db[COL_CLASS_RETENTION].find(
+        {"term_id": term_id},
+        {"_id": 1, "course_id": 1, "section_id": 1, "section_code": 1, "status": 1},
+    ).to_list(5000)
+
+    keep_ids: List[str] = []
+    for row in rows or []:
+        rid = _safe_str(row.get("_id"))
+        if not _is_convert_to_special_status(row.get("status")):
+            continue
+        course_id = _safe_str(row.get("course_id"))
+        section_id = _safe_str(row.get("section_id"))
+        section_code = _safe_str(row.get("section_code"))
+        if not rid or not course_id:
+            continue
+        keep_ids.append(rid)
+        course = await db[COL_COURSES].find_one(
+            {"course_id": course_id},
+            {"_id": 0, "department_id": 1},
+        ) or {}
+        dept_id = _safe_str(course.get("department_id"))
+        now = datetime.utcnow()
+        generated_special_id = f"CRSC{rid.upper()}"
+        base_set = {
+            "term_id": term_id,
+            "course_id": course_id,
+            "department_id": dept_id,
+            "section_id": section_id or None,
+            "section_code": section_code,
+            "updated_at": now,
+            "generated_from_class_retention": True,
+            "retention_id": rid,
+            "generated_source_status": "Convert to Special Class",
+        }
+        existing = await db[COL_SPECIAL].find_one(
+            {
+                "$or": [
+                    {"generated_from_class_retention": True, "retention_id": rid},
+                    {"special_id": generated_special_id},
+                ]
+            },
+            {"_id": 1, "special_id": 1},
+        )
+        if existing:
+            await db[COL_SPECIAL].update_one(
+                {"_id": existing["_id"]},
+                {"$set": base_set},
+            )
+        else:
+            insert_doc = {
+                "special_id": generated_special_id,
+                "user_id": "",
+                "student_user_id": "",
+                "student_number": "",
+                "reason": "Class Retention Conversion",
+                "reason_other": "",
+                "status": "Forwarded To Department",
+                "remarks": "",
+                "submitted_at": now,
+                "created_at": now,
+                "assignment_id": None,
+                "schedule_id1": None,
+                "schedule_id2": None,
+                "schedule_cleared": True,
+                **base_set,
+            }
+            try:
+                await db[COL_SPECIAL].insert_one(insert_doc)
+            except DuplicateKeyError:
+                await db[COL_SPECIAL].update_one(
+                    {"special_id": generated_special_id},
+                    {"$set": base_set},
+                )
+
+    cleanup_query: Dict[str, Any] = {"term_id": term_id, "generated_from_class_retention": True}
+    if keep_ids:
+        cleanup_query["retention_id"] = {"$nin": keep_ids}
+    await db[COL_SPECIAL].delete_many(cleanup_query)
+
+
+async def _create_manual_special_class_row(term_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    payload = payload or {}
+    course = await _resolve_special_course(payload)
+    course_id = _safe_str(course.get("course_id"))
+    if not course_id:
+        raise HTTPException(status_code=400, detail="Resolved course is missing course_id.")
+
+    allowed = set(await _get_allowed_statuses())
+    status = _safe_str(payload.get("status")) or "Forwarded To Department"
+    if allowed and status not in allowed:
+        raise HTTPException(status_code=400, detail="Invalid status value.")
+
+    special_id = await _next_special_id()
+    now = datetime.utcnow()
+
+    doc: Dict[str, Any] = {
+        "special_id": special_id,
+        "term_id": term_id,
+        "user_id": "",
+        "course_id": course_id,
+        "department_id": _safe_str(course.get("department_id")),
+        "status": status,
+        "remarks": _safe_str(payload.get("remarks")),
+        "manual_special_class": True,
+        "submitted_at": now,
+        "updated_at": now,
+        "student_number": None,
+        "reason": "",
+        "reason_other": "",
+        "units_remaining": "",
+        "graduating_after_term": False,
+        "course_units": course.get("units") or "",
+        "section_id": None,
+        "schedule_id1": None,
+        "schedule_id2": None,
+        "assignment_id": None,
+        "schedule_cleared": False,
+    }
+
+    has_custom_schedule_fields = any(
+        payload.get(k) not in (None, "", [], {})
+        for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
+    )
+
+    if has_custom_schedule_fields:
+        section_code = _safe_str(payload.get("section_code")).upper()
+        faculty_id = _safe_str(payload.get("faculty_id"))
+        if not section_code:
+            raise HTTPException(status_code=400, detail="section_code is required when adding a class schedule.")
+        if not faculty_id:
+            raise HTTPException(status_code=400, detail="faculty_id is required when adding a class schedule.")
+
+        sched_valid = _validate_day_fields(payload)
+        conflicts = await _find_faculty_schedule_conflicts(
+            term_id=term_id,
+            faculty_id=faculty_id,
+            payload=sched_valid,
+            exclude_section_ids=[],
+        )
+        if conflicts:
+            raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
+
+        created = await _create_custom_section_bundle(
+            term_id=term_id,
+            course_id=course_id,
+            section_code=section_code,
+            sched=sched_valid,
+            faculty_id=faculty_id,
+        )
+        doc["section_id"] = created.get("section_id")
+        doc["schedule_id1"] = created.get("schedule_id1")
+        doc["schedule_id2"] = created.get("schedule_id2")
+        doc["assignment_id"] = created.get("assignment_id")
+
+    await db[COL_SPECIAL].insert_one(doc)
+    return doc
+
+
+async def _eligible_special_class_students(term_id: str, target_special_id: str) -> List[Dict[str, Any]]:
+    target = await db[COL_SPECIAL].find_one(
+        {"term_id": term_id, "special_id": target_special_id},
+        {"_id": 0, "course_id": 1},
+    ) or {}
+    course_id = _safe_str(target.get("course_id"))
+    if not course_id:
+        raise HTTPException(status_code=404, detail="Target special class not found.")
+
+    docs = await db[COL_SPECIAL].find(
+        {
+            "term_id": term_id,
+            "course_id": course_id,
+            "special_id": {"$ne": target_special_id},
+            "user_id": {"$exists": True, "$nin": ["", None]},
+            "manual_special_class": {"$ne": True},
+            "generated_from_class_retention": {"$ne": True},
+            "status": {"$ne": "Convert to Regular Class"},
+            "$or": [
+                {"section_id": {"$exists": False}},
+                {"section_id": None},
+                {"section_id": ""},
+            ],
+        },
+        {"_id": 0, "special_id": 1, "user_id": 1, "student_number": 1, "status": 1},
+    ).to_list(5000)
+
+    user_ids = [_safe_str(d.get("user_id")) for d in docs if _safe_str(d.get("user_id"))]
+    users = await db[COL_USERS].find(
+        {"user_id": {"$in": user_ids}},
+        {"_id": 0, "user_id": 1, "first_name": 1, "firstName": 1, "last_name": 1, "lastName": 1},
+    ).to_list(5000)
+    umap = {_safe_str(u.get("user_id")): u for u in users}
+
+    rows: List[Dict[str, Any]] = []
+    for d in docs:
+        uid = _safe_str(d.get("user_id"))
+        u = umap.get(uid) or {}
+        rows.append({
+            "special_id": _safe_str(d.get("special_id")),
+            "student_name": _upper_name(
+                u.get("first_name") or u.get("firstName") or "",
+                u.get("last_name") or u.get("lastName") or "",
+            ),
+            "student_number": d.get("student_number"),
+            "status": _safe_str(d.get("status")),
+        })
+
+    rows.sort(key=lambda r: (str(r.get("student_name") or ""), str(r.get("student_number") or "")))
+    return rows
+
 
 
 # ---------------- PDF drawing helpers (NO IMAGE TEMPLATE) ----------------
@@ -2578,6 +2968,143 @@ def _build_pdf(rows: List[Dict[str, Any]], active_term: Dict[str, Any]) -> bytes
 
 
 # ---------------- routes (GET) ----------------
+async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str, Any]:
+    term_id = _safe_str(term_id)
+    special_id = _safe_str(special_id)
+    if not term_id or not special_id:
+        raise HTTPException(status_code=400, detail="term_id and special_id are required.")
+
+    target = await db[COL_SPECIAL].find_one({"term_id": term_id, "special_id": special_id}, {"_id": 0}) or {}
+    if not target:
+        raise HTTPException(status_code=404, detail="Special Class row not found.")
+
+    section_id = _safe_str(target.get("section_id"))
+    retention_id = _safe_str(target.get("retention_id"))
+    course_id = _safe_str(target.get("course_id"))
+    is_generated = bool(target.get("generated_from_class_retention"))
+    is_manual = bool(target.get("manual_special_class"))
+
+    if section_id:
+        group_docs = await db[COL_SPECIAL].find({"term_id": term_id, "section_id": section_id}, {"_id": 0}).to_list(5000)
+    elif is_generated and retention_id:
+        group_docs = await db[COL_SPECIAL].find(
+            {"term_id": term_id, "generated_from_class_retention": True, "retention_id": retention_id},
+            {"_id": 0},
+        ).to_list(5000)
+    else:
+        group_docs = [target]
+
+    if not group_docs:
+        group_docs = [target]
+
+    applicant_docs = [
+        d for d in group_docs
+        if not bool(d.get("manual_special_class"))
+        and not bool(d.get("generated_from_class_retention"))
+        and _safe_str(d.get("user_id"))
+    ]
+    applicant_ids = [_safe_str(d.get("special_id")) for d in applicant_docs if _safe_str(d.get("special_id"))]
+    anchor_ids = [
+        _safe_str(d.get("special_id")) for d in group_docs
+        if (bool(d.get("manual_special_class")) or bool(d.get("generated_from_class_retention")) or not _safe_str(d.get("user_id")))
+        and _safe_str(d.get("special_id"))
+    ]
+
+    now = datetime.utcnow()
+    cleared_students = 0
+    deleted_rows = 0
+    kept_row = False
+
+    if applicant_ids:
+        res = await db[COL_SPECIAL].update_many(
+            {"term_id": term_id, "special_id": {"$in": applicant_ids}},
+            {
+                "$set": {
+                    "section_id": None,
+                    "schedule_id1": None,
+                    "schedule_id2": None,
+                    "assignment_id": None,
+                    "schedule_cleared": False,
+                    "status": "Forwarded To Department",
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "faculty_assignment_id": "",
+                    "day1": "",
+                    "begin1": "",
+                    "end1": "",
+                    "day2": "",
+                    "begin2": "",
+                    "end2": "",
+                    "faculty_id": "",
+                    "faculty_name": "",
+                    "section_code": "",
+                    "room_id1": "",
+                    "room_id2": "",
+                    "room1": "",
+                    "room2": "",
+                },
+            },
+        )
+        cleared_students = int(res.modified_count)
+        kept_row = True
+
+    if is_generated:
+        await db[COL_SPECIAL].update_many(
+            {"term_id": term_id, "special_id": {"$in": anchor_ids}},
+            {
+                "$set": {
+                    "section_id": None,
+                    "section_code": "",
+                    "schedule_id1": None,
+                    "schedule_id2": None,
+                    "assignment_id": None,
+                    "schedule_cleared": False,
+                    "status": "Forwarded To Department",
+                    "updated_at": now,
+                },
+                "$unset": {
+                    "faculty_assignment_id": "",
+                    "day1": "",
+                    "begin1": "",
+                    "end1": "",
+                    "day2": "",
+                    "begin2": "",
+                    "end2": "",
+                    "faculty_id": "",
+                    "faculty_name": "",
+                    "room_id1": "",
+                    "room_id2": "",
+                    "room1": "",
+                    "room2": "",
+                },
+            },
+        )
+        kept_row = True
+    elif anchor_ids:
+        res = await db[COL_SPECIAL].delete_many({"term_id": term_id, "special_id": {"$in": anchor_ids}})
+        deleted_rows += int(res.deleted_count)
+
+    if not applicant_ids and not is_generated and not is_manual and special_id:
+        res = await db[COL_SPECIAL].delete_one({"term_id": term_id, "special_id": special_id})
+        deleted_rows += int(res.deleted_count)
+
+    message = "Special Class deleted."
+    if kept_row and applicant_ids:
+        message = "Special Class cleared. Students remain under the same course and can be reassigned."
+    elif kept_row and is_generated:
+        message = "Special Class cleared. The reflected Class Retention row remains visible without schedule/faculty."
+
+    return {
+        "ok": True,
+        "cleared_students": cleared_students,
+        "deleted_rows": deleted_rows,
+        "kept_row": kept_row,
+        "message": message,
+        "course_id": course_id,
+    }
+
+
 @router.get("/specialclass")
 async def om_specialclass_get(
     action: str = Query("options", description="options | schedulePresets | eaf"),
@@ -2590,6 +3117,20 @@ async def om_specialclass_get(
         statuses = await _get_allowed_statuses()
         faculty = await _build_faculty_options()
         rooms = await _build_room_options()
+        course_docs = await db[COL_COURSES].find(
+            {},
+            {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+        ).sort("course_id", ASCENDING).to_list(5000)
+        course_options = []
+        for course_doc in course_docs or []:
+            course_code = course_doc.get("course_code")
+            if isinstance(course_code, list):
+                course_code = course_code[0] if course_code else ""
+            course_options.append({
+                "course_id": _safe_str(course_doc.get("course_id")),
+                "course_code": _safe_str(course_code),
+                "course_title": _safe_str(course_doc.get("course_title")),
+            })
         faculty_availability = await _faculty_busy_slots(
             _safe_str((active or {}).get("term_id")),
             [_safe_str(f.get("faculty_id")) for f in (faculty or []) if _safe_str(f.get("faculty_id"))],
@@ -2605,6 +3146,7 @@ async def om_specialclass_get(
             },
             "facultyOptions": faculty,
             "facultyAvailability": faculty_availability,
+            "courseOptions": course_options,
             # note: rooms are returned but UI does NOT need to edit rooms; display comes from list rows
             "roomOptions": rooms,
             "submission_window": {
@@ -2649,6 +3191,7 @@ async def om_specialclass_post(
     q: Optional[str] = Query(None),
     termId: Optional[str] = Query(None),
     specialId: Optional[str] = Query(None),
+    targetSpecialId: Optional[str] = Query(None),
     # Optional: used as Gmail sender for notification emails (best effort).
     userId: Optional[str] = Query(None),
     durationDays: Optional[int] = Query(None),
@@ -2659,7 +3202,7 @@ async def om_specialclass_post(
     active = await _active_term()
     current_term_id = termId or active.get("term_id")
 
-    if action in {"list", "detail", "update", "bulkUpdate", "exportPdf"} and not current_term_id:
+    if action in {"list", "detail", "update", "bulkUpdate", "exportPdf", "create", "eligibleStudents", "unassignStudent", "assignStudent", "deleteClass"} and not current_term_id:
         raise HTTPException(status_code=503, detail="No active term configured.")
 
     if action == "startWindow":
@@ -2729,7 +3272,107 @@ async def om_specialclass_post(
             },
         }
 
+    if action == "create":
+        if payload is None:
+            raise HTTPException(status_code=400, detail="payload is required.")
+        doc = await _create_manual_special_class_row(current_term_id, payload)
+        maps = await _bulk_maps_for_rows([doc])
+        row = await _shape_row(doc, maps)
+        return {"ok": True, "special_id": _safe_str(doc.get("special_id")), "row": row}
+
+    if action == "eligibleStudents":
+        target_sid = _safe_str(targetSpecialId or specialId)
+        if not target_sid:
+            raise HTTPException(status_code=400, detail="targetSpecialId is required.")
+        rows = await _eligible_special_class_students(current_term_id, target_sid)
+        return {"ok": True, "rows": rows}
+
+    if action == "unassignStudent":
+        if not specialId:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+        doc = await db[COL_SPECIAL].find_one({"term_id": current_term_id, "special_id": specialId}, {"_id": 0}) or {}
+        if not doc:
+            raise HTTPException(status_code=404, detail="Student application not found.")
+        if bool(doc.get("manual_special_class")) or bool(doc.get("generated_from_class_retention")) or not _safe_str(doc.get("user_id")):
+            raise HTTPException(status_code=400, detail="Only actual student applications can be removed from a class.")
+
+        res = await db[COL_SPECIAL].update_one(
+            {"term_id": current_term_id, "special_id": specialId},
+            {
+                "$set": {
+                    "section_id": None,
+                    "schedule_id1": None,
+                    "schedule_id2": None,
+                    "assignment_id": None,
+                    "schedule_cleared": False,
+                    "status": "Forwarded To Department",
+                    "updated_at": datetime.utcnow(),
+                },
+                "$unset": {
+                    "faculty_assignment_id": "",
+                    "day1": "",
+                    "begin1": "",
+                    "end1": "",
+                    "day2": "",
+                    "begin2": "",
+                    "end2": "",
+                    "faculty_id": "",
+                    "faculty_name": "",
+                    "section_code": "",
+                },
+            },
+        )
+        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
+
+    if action == "assignStudent":
+        target_sid = _safe_str(targetSpecialId or specialId)
+        student_sid = _safe_str((payload or {}).get("studentSpecialId"))
+        if not target_sid or not student_sid:
+            raise HTTPException(status_code=400, detail="targetSpecialId and studentSpecialId are required.")
+
+        target_doc = await db[COL_SPECIAL].find_one({"term_id": current_term_id, "special_id": target_sid}, {"_id": 0}) or {}
+        student_doc = await db[COL_SPECIAL].find_one({"term_id": current_term_id, "special_id": student_sid}, {"_id": 0}) or {}
+        if not target_doc or not student_doc:
+            raise HTTPException(status_code=404, detail="Special Class row not found.")
+        if bool(student_doc.get("manual_special_class")) or bool(student_doc.get("generated_from_class_retention")) or not _safe_str(student_doc.get("user_id")):
+            raise HTTPException(status_code=400, detail="Only actual student applications can be assigned.")
+
+        target_course_id = _safe_str(target_doc.get("course_id") or target_doc.get("courseId"))
+        student_course_id = _safe_str(student_doc.get("course_id") or student_doc.get("courseId"))
+        if not target_course_id or target_course_id != student_course_id:
+            raise HTTPException(status_code=400, detail="Student applications can only be assigned within the same course.")
+
+        section_id = _safe_str(target_doc.get("section_id")) or None
+        section_code = _safe_str(target_doc.get("section_code"))
+        assignment_id = _safe_str(target_doc.get("assignment_id") or target_doc.get("faculty_assignment_id")) or None
+        if not section_id and not assignment_id:
+            raise HTTPException(status_code=400, detail="Target special class must have a section/faculty schedule before adding students.")
+
+        res = await db[COL_SPECIAL].update_one(
+            {"term_id": current_term_id, "special_id": student_sid},
+            {
+                "$set": {
+                    "section_id": section_id or None,
+                    "section_code": section_code,
+                    "schedule_id1": _safe_str(target_doc.get("schedule_id1")) or None,
+                    "schedule_id2": _safe_str(target_doc.get("schedule_id2")) or None,
+                    "assignment_id": assignment_id,
+                    "schedule_cleared": bool(target_doc.get("schedule_cleared", False)),
+                    "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
+                    "updated_at": datetime.utcnow(),
+                }
+            },
+        )
+        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
+
+    if action == "deleteClass":
+        target_sid = _safe_str(targetSpecialId or specialId)
+        if not target_sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+        return await _delete_special_class_group(current_term_id, target_sid)
+
     if action == "list":
+        await _sync_generated_special_classes_from_retention(current_term_id)
         match: Dict[str, Any] = {"term_id": current_term_id, "special_id": {"$exists": True}}
         if status and status.strip() and status.strip() != "All Status":
             match["status"] = status.strip()

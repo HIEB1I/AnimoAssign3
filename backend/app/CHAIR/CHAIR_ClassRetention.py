@@ -26,8 +26,14 @@ COL_USERS = "users"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_PREEN_COUNT = "preenlistment_count" 
+COL_SPECIAL = "special_class"
 
 STATUS_OPTIONS = ["Approved", "Under Review", "Convert to Special Class", "Dissolved"]
+
+
+def _is_convert_to_special_status(status: str) -> bool:
+    s = (status or "").strip().lower()
+    return s in {"convert to special class", "special class"}
 
 
 def _is_dissolved_status(status: str) -> bool:
@@ -91,6 +97,81 @@ async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, no
 
     await _sync_collection(COL_SECTIONS)
     await _sync_collection(COL_SECTIONS_SUBMITTED)
+
+
+async def _upsert_generated_special_class_from_retention(
+    *,
+    retention_id: str,
+    term_id: str,
+    course_id: str,
+    section_id: str,
+    now: datetime,
+) -> None:
+    """Mirror a Class Retention special-class conversion into special_class.
+
+    Important constraints:
+    - create the bridge row only once (stable by retention_id)
+    - keep later Special Class edits/status changes intact on subsequent retention saves
+    - keep the row excluded from Load Assignment via section_id
+    - start with blank schedule/faculty so old regular-class assignments do not leak
+    """
+
+    rid = str(retention_id or "").strip()
+    term_id = str(term_id or "").strip()
+    course_id = str(course_id or "").strip()
+    section_id = str(section_id or "").strip()
+    if not rid or not term_id or not course_id or not section_id:
+        return
+
+    course = await db[COL_COURSES].find_one(
+        {"course_id": course_id},
+        {"_id": 0, "department_id": 1},
+    ) or {}
+    dept_id = str(course.get("department_id") or "").strip()
+
+    special_id = f"CRSC{rid.upper()}"
+
+    await db[COL_SPECIAL].update_one(
+        {"generated_from_class_retention": True, "retention_id": rid},
+        {
+            "$set": {
+                "term_id": term_id,
+                "course_id": course_id,
+                "department_id": dept_id,
+                "section_id": section_id,
+                "updated_at": now,
+                "generated_from_class_retention": True,
+                "retention_id": rid,
+                "generated_source_status": "Convert to Special Class",
+            },
+            "$setOnInsert": {
+                "special_id": special_id,
+                "user_id": "",
+                "student_user_id": "",
+                "student_number": "",
+                "reason": "Class Retention Conversion",
+                "reason_other": "",
+                "status": "Forwarded To Department",
+                "remarks": "",
+                "submitted_at": now,
+                "created_at": now,
+                "assignment_id": None,
+                "schedule_id1": None,
+                "schedule_id2": None,
+                "schedule_cleared": True,
+            },
+        },
+        upsert=True,
+    )
+
+
+async def _delete_generated_special_class_from_retention(retention_id: str) -> None:
+    rid = str(retention_id or "").strip()
+    if not rid:
+        return
+    await db[COL_SPECIAL].delete_many(
+        {"generated_from_class_retention": True, "retention_id": rid}
+    )
 
 
 async def _broadcast_dissolved_to_students(*, term_id: str, course_id: str, section_id: str, enrolled: Any = None) -> None:
@@ -1126,6 +1207,17 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             status_effective = (update_doc.get("status") or prev_status or "").strip()
             await _ensure_section_remarks_tag(section_id_for_fac, status_effective, now)
 
+            if _is_convert_to_special_status(status_effective):
+                await _upsert_generated_special_class_from_retention(
+                    retention_id=rid,
+                    term_id=str(out.get("term_id") or prev_term_id or ""),
+                    course_id=str(out.get("course_id") or prev_course_id or ""),
+                    section_id=str(section_id_for_fac or ""),
+                    now=now,
+                )
+            else:
+                await _delete_generated_special_class_from_retention(rid)
+
             # Broadcast to ALL students only on transition to Dissolved (best-effort; in-app only).
             if prev_status.strip().lower() != "dissolved" and status_effective.strip().lower() == "dissolved":
                 await _broadcast_dissolved_to_students(
@@ -1197,6 +1289,15 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
         # so APO_CourseOfferings + OM_LoadAssignment can display it.
         await _ensure_section_remarks_tag(doc.get("section_id"), doc.get("status") or "", now)
 
+        if _is_convert_to_special_status(doc.get("status") or ""):
+            await _upsert_generated_special_class_from_retention(
+                retention_id=str(res.inserted_id),
+                term_id=str(doc.get("term_id") or ""),
+                course_id=str(doc.get("course_id") or ""),
+                section_id=str(doc.get("section_id") or ""),
+                now=now,
+            )
+
         # Broadcast to ALL students if created as Dissolved (best-effort; in-app only).
         if str(doc.get("status") or "").strip().lower() == "dissolved":
             await _broadcast_dissolved_to_students(
@@ -1233,6 +1334,7 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid retention_id")
         await db[COL_CLASS_RETENTION].delete_one({"_id": _id})
+        await _delete_generated_special_class_from_retention(str(rid))
         return {"ok": True}
 
     if action == "forward":
@@ -1253,7 +1355,7 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
         try:
             prev_rows = await db[COL_CLASS_RETENTION].find(
                 {"_id": {"$in": obj_ids}},
-                {"_id": 0, "term_id": 1, "course_id": 1, "section_id": 1, "status": 1, "enrolled": 1},
+                {"term_id": 1, "course_id": 1, "section_id": 1, "status": 1, "enrolled": 1},
             ).to_list(5000)
         except Exception:
             prev_rows = []
@@ -1271,6 +1373,18 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                 section_id = str((r or {}).get("section_id") or "").strip()
                 if section_id:
                     await _ensure_section_remarks_tag(section_id, new_status, now)
+
+                rid = str((r or {}).get("_id") or "").strip()
+                if _is_convert_to_special_status(new_status):
+                    await _upsert_generated_special_class_from_retention(
+                        retention_id=rid,
+                        term_id=str((r or {}).get("term_id") or "").strip(),
+                        course_id=str((r or {}).get("course_id") or "").strip(),
+                        section_id=section_id,
+                        now=now,
+                    )
+                else:
+                    await _delete_generated_special_class_from_retention(rid)
 
         # If status transitioned to Dissolved, broadcast notifications (best-effort).
         if str(new_status or "").strip().lower() == "dissolved" and prev_rows:

@@ -108,6 +108,24 @@ function nextMinuteFrom(date = new Date()) {
   return d;
 }
 
+function PetitionStatusHint() {
+  return (
+    <div className="group relative inline-flex items-center">
+      <button
+        type="button"
+        className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-amber-200 bg-amber-50 text-amber-700 transition hover:bg-amber-100"
+        aria-label="Student petition status guide"
+        title="Student petition status guide"
+      >
+        <Info className="h-4 w-4" />
+      </button>
+      <div className="pointer-events-none absolute right-0 top-[calc(100%+0.5rem)] z-20 hidden w-80 rounded-xl border border-amber-200 bg-white p-3 text-left text-xs leading-5 text-gray-700 shadow-lg group-hover:block">
+        Yellow rows mean the petition count is 15 or more and the status is automatically treated as <span className="font-semibold text-amber-800">Forwarded To Department</span>. OM should take this into consideration for opening another section or increasing available slots.
+      </div>
+    </div>
+  );
+}
+
 function TextBox({
   value,
   onChange,
@@ -399,7 +417,10 @@ export default function OM_StudentPetition() {
             className="w-full rounded-lg border border-gray-300 px-9 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
           />
         </div>
-        <SelectBox value={status} onChange={setStatus} options={statuses} />
+        <div className="flex items-center gap-2">
+          <SelectBox value={status} onChange={setStatus} options={statuses} />
+          <PetitionStatusHint />
+        </div>
       </div>
 
       <div className="overflow-auto rounded-xl border border-gray-200 bg-white shadow-sm">
@@ -438,7 +459,13 @@ export default function OM_StudentPetition() {
               rows.map((r) => {
                 const editing = editCourseId === r.course_id;
                 return (
-                  <tr key={r.course_id} className="align-top hover:bg-gray-50">
+                  <tr
+                    key={r.course_id}
+                    className={cls(
+                      "align-top transition-colors",
+                      r.highlight_yellow ? "bg-yellow-100 hover:bg-yellow-200" : "hover:bg-gray-50"
+                    )}
+                  >
                     <td className="px-3 py-3 text-center">
                       <input
                         type="checkbox"

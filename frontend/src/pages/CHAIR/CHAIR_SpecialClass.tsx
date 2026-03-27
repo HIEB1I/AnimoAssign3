@@ -6,5 +6,5 @@ import OM_SpecialClass from "../OM/OM_SpecialClass";
  * - CHAIR-only difference: cannot set the submission deadline; can only view it.
  */
 export default function CHAIR_SpecialClass() {
-  return <OM_SpecialClass deadlineReadOnly />;
+  return <OM_SpecialClass deadlineReadOnly role="chair" />;
 }

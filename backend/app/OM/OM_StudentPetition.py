@@ -372,18 +372,14 @@ async def om_student_petitions_handler(
             }},
         ]
 
-        # client filters
-        post: Dict[str, Any] = {}
-        if status and status.strip().lower() != "all status":
-            post["last_status"] = status.strip()
         if search and search.strip():
             s = search.strip()
-            post["$or"] = [
-                {"course_code": {"$regex": s, "$options": "i"}},
-                {"course_title": {"$regex": s, "$options": "i"}},
-            ]
-        if post:
-            pipeline.append({"$match": post})
+            pipeline.append({"$match": {
+                "$or": [
+                    {"course_code": {"$regex": s, "$options": "i"}},
+                    {"course_title": {"$regex": s, "$options": "i"}},
+                ]
+            }})
 
         pipeline += [
             {"$project": {
@@ -399,7 +395,33 @@ async def om_student_petitions_handler(
         ]
 
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
-        return {"ok": True, "rows": rows, "term_id": current_term_id}
+
+        threshold_managed_statuses = {"", "Less Than Minimum", "Forwarded To Department"}
+        status_filter = (status or "").strip()
+        if status_filter.lower() == "all status":
+            status_filter = ""
+
+        normalized_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            count = int(row.get("count") or 0)
+            raw_status = str(row.get("status") or "").strip()
+            effective_status = raw_status
+
+            if raw_status in threshold_managed_statuses:
+                effective_status = "Forwarded To Department" if count >= 15 else "Less Than Minimum"
+
+            highlight_yellow = count >= 15 and effective_status == "Forwarded To Department"
+
+            normalized = {
+                **row,
+                "status": effective_status,
+                "highlight_yellow": highlight_yellow,
+            }
+            if status_filter and effective_status != status_filter:
+                continue
+            normalized_rows.append(normalized)
+
+        return {"ok": True, "rows": normalized_rows, "term_id": current_term_id}
 
     # ---------- UPDATE (single course) ----------
     if action == "update":
