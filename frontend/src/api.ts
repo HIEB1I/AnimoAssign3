@@ -1580,9 +1580,18 @@ export async function getApoSpecialClass(
 
 export type ApoSpecialClassUpdatePayload = {
   special_id: string;
+  special_ids?: string[];
   term_id?: string;
+  section_code?: string;
   remarks?: string;
-  schedule_entries?: Array<{ schedule_id?: string | null; room_id?: string | null }>;
+  schedule_entries?: Array<{
+    schedule_id?: string | null;
+    day?: string | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    room_type?: string | null;
+    room_id?: string | null;
+  }>;
 };
 
 export async function updateApoSpecialClassRow(
@@ -1593,7 +1602,37 @@ export async function updateApoSpecialClassRow(
   return post(url, payload as any);
 }
 
+export type ApoSpecialClassDetail = {
+  special_id: string;
+  student_name?: string;
+  student_number?: string | number;
+  program_code?: string;
+  graduating_after_term?: boolean;
+  reason?: string;
+  reason_other?: string;
+  has_eaf?: boolean;
+  eaf_original_name?: string;
+  eaf_content_type?: string;
+  eaf_size?: number;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
+  [k: string]: any;
+};
 
+export async function getApoSpecialClassDetail(
+  userId: string,
+  specialId: string,
+  termId?: string
+): Promise<{ ok: boolean; row: ApoSpecialClassDetail }> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    view: "specialclass",
+    action: "specialclassDetail",
+    specialId,
+    termId,
+  })}`;
+  return get<any>(url);
+}
 
 export type DissolvedClassRow = {
   section_id: string;

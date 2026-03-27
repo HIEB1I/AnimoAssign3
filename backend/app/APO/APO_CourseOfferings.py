@@ -6,11 +6,15 @@ import re
 import json
 import hashlib
 import secrets
+import base64
+import binascii
+from pathlib import Path
 from bson import ObjectId
 from typing import Any, Dict, List, Optional, Tuple, Literal, Set
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi.responses import Response
 from pymongo.errors import DuplicateKeyError
 from ..main import db
 from ..Notifications import create_notification
@@ -69,6 +73,66 @@ def _course_code_str(course_doc: Dict[str, Any]) -> str:
     if isinstance(cc, list):
         return (cc[0] or "").strip()
     return (cc or "").strip()
+
+
+def _safe_str(x: Any) -> str:
+    return str(x).strip() if x is not None else ""
+
+
+def _eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                return True
+        except Exception:
+            pass
+    return bool(_safe_str(doc.get("eaf_base64")))
+
+
+def _build_apo_eaf_view_url(special_id: str, term_id: str = "", user_id: str = "") -> str:
+    sid = _safe_str(special_id)
+    if not sid:
+        return ""
+    base = f"/api/apo/courseofferings?view=specialclass&action=eaf&specialId={sid}"
+    tid = _safe_str(term_id)
+    if tid:
+        base += f"&termId={tid}"
+    uid = _safe_str(user_id)
+    if uid:
+        base += f"&userId={uid}"
+    return base
+
+
+def _inline_eaf_response(doc: Dict[str, Any]) -> Response:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                data = file_path.read_bytes()
+                return Response(
+                    content=data,
+                    media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or file_path.name}"'},
+                )
+        except Exception:
+            pass
+
+    b64 = _safe_str(doc.get("eaf_base64"))
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        return Response(
+            content=data,
+            media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or "eaf.pdf"}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
 
 async def _audit_offering_change(
     *, action: str, user_id: str, term_id: str, campus_id: str,
@@ -4177,7 +4241,9 @@ async def get_course_offerings(
     section_id: Optional[str] = Query(None),
     course_id: Optional[str] = Query(None),
     slot: Optional[int] = Query(None),              
-    schedule_id: Optional[str] = Query(None),      
+    schedule_id: Optional[str] = Query(None),
+    specialId: Optional[str] = Query(None),
+    termId: Optional[str] = Query(None),
     # NEW: used only when action == "catalogSearch"
     q: Optional[str] = Query(None),
     limit: int = Query(20),
@@ -5070,6 +5136,65 @@ async def get_course_offerings(
             r["faculty_name"] = faculty_name or "UNASSIGNED"
 
         return rows
+
+    if action == "specialclassDetail":
+        sid = _safe_str(specialId)
+        if not sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+
+        term_sc_meta = await _active_term_for_specialclass()
+        term_id_sc = _safe_str(termId) or _safe_str(term_id) or _safe_str((term_sc_meta or {}).get("term_id"))
+        if not term_id_sc:
+            raise HTTPException(status_code=400, detail="No active term found for special class.")
+
+        raw_doc = await db[COL_SPECIAL].find_one(
+            {"term_id": term_id_sc, "special_id": sid},
+            {"_id": 0},
+        )
+        if not raw_doc:
+            raise HTTPException(status_code=404, detail="Special class record not found.")
+
+        rows_detail = await _specialclass_rows(term_id_sc, {"special_id": sid})
+        row = rows_detail[0] if rows_detail else dict(raw_doc)
+
+        program_code = ""
+        program_id_detail = _safe_str(raw_doc.get("program_id"))
+        if program_id_detail:
+            prog_doc = await db[COL_PROGRAMS].find_one(
+                {"program_id": program_id_detail},
+                {"_id": 0, "program_code": 1, "program_name": 1},
+            ) or {}
+            program_code = _safe_str(prog_doc.get("program_code")) or _safe_str(prog_doc.get("program_name"))
+
+        row["program_code"] = program_code
+        row["graduating_after_term"] = raw_doc.get("graduating_after_term")
+        row["reason"] = raw_doc.get("reason") or ""
+        row["reason_other"] = raw_doc.get("reason_other") or ""
+        row["has_eaf"] = _eaf_available(raw_doc)
+        row["eaf_original_name"] = raw_doc.get("eaf_original_name") or ""
+        row["eaf_content_type"] = raw_doc.get("eaf_content_type") or ""
+        row["eaf_size"] = raw_doc.get("eaf_size") or 0
+        row["eaf_uploaded_at"] = raw_doc.get("eaf_uploaded_at")
+        row["eaf_view_url"] = _build_apo_eaf_view_url(sid, term_id_sc, userId)
+
+        return {"ok": True, "row": row}
+
+    if action == "eaf":
+        sid = _safe_str(specialId)
+        if not sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+        term_sc_meta = await _active_term_for_specialclass()
+        term_id_sc = _safe_str(termId) or _safe_str(term_id) or _safe_str((term_sc_meta or {}).get("term_id"))
+        match: Dict[str, Any] = {"special_id": sid}
+        if term_id_sc:
+            match["term_id"] = term_id_sc
+        doc = await db[COL_SPECIAL].find_one(
+            match,
+            {"_id": 0, "eaf_storage_path": 1, "eaf_original_name": 1, "eaf_content_type": 1, "eaf_base64": 1},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="EAF not found.")
+        return _inline_eaf_response(doc)
 
 
     async def _dissolved_rows(term_id: str, campus_id: str) -> List[Dict[str, Any]]:
@@ -6148,15 +6273,63 @@ async def post_course_offerings(
         if not base:
             raise HTTPException(status_code=404, detail="Special class record not found.")
 
+        target_special_ids: List[str] = []
+        if isinstance(payload.get("special_ids"), list):
+            for raw_sid in payload.get("special_ids") or []:
+                sid0 = _safe_str(raw_sid)
+                if sid0 and sid0 not in target_special_ids:
+                    target_special_ids.append(sid0)
+        if special_id not in target_special_ids:
+            target_special_ids.insert(0, special_id)
+
         updates: Dict[str, Any] = {"updated_at": now()}
 
         if "remarks" in payload:
             updates["remarks"] = payload.get("remarks") or ""
+        if "section_code" in payload:
+            updates["section_code"] = (payload.get("section_code") or "").strip()
 
-        await db[COL_SPECIAL].update_one(
-            {"term_id": term_id_target, "special_id": special_id},
+        await db[COL_SPECIAL].update_many(
+            {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
             {"$set": updates},
         )
+
+        # Optional: persist section code to linked section records
+        section_id_sc = (base.get("section_id") or "").strip()
+        if not section_id_sc:
+            asg_id = (base.get("assignment_id") or "").strip()
+            if asg_id:
+                asg = await db[COL_FAC_ASSIGN].find_one(
+                    {"assignment_id": asg_id},
+                    {"_id": 0, "section_id": 1},
+                ) or {}
+                section_id_sc = _safe_str(asg.get("section_id"))
+        if not section_id_sc:
+            base_se = base.get("schedule_entries")
+            if isinstance(base_se, list):
+                for ent in base_se[:2]:
+                    if isinstance(ent, dict):
+                        sched_id0 = _safe_str(ent.get("schedule_id"))
+                        if not sched_id0:
+                            continue
+                        sch0 = await db[COL_SCHEDS].find_one(
+                            {"schedule_id": sched_id0},
+                            {"_id": 0, "section_id": 1},
+                        ) or {}
+                        section_id_sc = _safe_str(sch0.get("section_id"))
+                        if section_id_sc:
+                            break
+
+        new_section_code = (payload.get("section_code") or "").strip() if "section_code" in payload else ""
+        if section_id_sc and "section_code" in payload:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": section_id_sc},
+                {"$set": {"section_code": new_section_code, "updated_at": now()}},
+            )
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"section_id": section_id_sc},
+                {"$set": {"section_code": new_section_code, "updated_at": now()}},
+            )
 
         # Optional: persist room edits by updating the section_schedules records
         # IMPORTANT: validate using the same rules as Room Allocation / eligibleRooms:
@@ -6166,7 +6339,6 @@ async def post_course_offerings(
         # - overlap conflicts (term-aware)
         se = payload.get("schedule_entries")
         if isinstance(se, list):
-            section_id_sc = (base.get("section_id") or "").strip()
 
             # Track room assignments/changes so we can notify OM (in-app + Gmail).
             # We only notify when a real room is assigned or changed (nots when cleared to TBA).
