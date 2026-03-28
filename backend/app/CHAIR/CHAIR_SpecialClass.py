@@ -3177,6 +3177,7 @@ async def om_specialclass_post(
                     "assignment_id": None,
                     "schedule_cleared": False,
                     "status": "Forwarded To Department",
+                    "unassigned_by_admin": True,
                     "updated_at": datetime.utcnow(),
                 },
                 "$unset": {
@@ -3230,8 +3231,13 @@ async def om_specialclass_post(
                     "assignment_id": assignment_id,
                     "schedule_cleared": bool(target_doc.get("schedule_cleared", False)),
                     "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
+                    "unassigned_by_admin": False,
                     "updated_at": datetime.utcnow(),
-                }
+                },
+                "$unset": {
+                    "unassigned_at": "",
+                    "unassigned_section_id": "",
+                },
             },
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}

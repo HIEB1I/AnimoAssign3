@@ -17,11 +17,11 @@ COL_COURSES = "courses"
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_ROOMS = "rooms"
-COL_SPECIAL = "special_class"
 
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_USERS = "users"
+COL_SPECIAL = "special_class"
 
 
 # ---------------- helpers ----------------
@@ -29,30 +29,54 @@ def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
 
 
-async def _special_class_section_ids(term_id: str) -> set[str]:
-    tid = str(term_id or "").strip()
-    if not tid:
+async def _active_special_class_section_ids(term_id: str) -> set[str]:
+    term_id = str(term_id or "").strip()
+    if not term_id:
         return set()
-    rows = await db[COL_SPECIAL].find({"term_id": tid}, {"_id": 0, "section_id": 1}).to_list(None)
-    return {str(r.get("section_id") or "").strip() for r in rows if str(r.get("section_id") or "").strip()}
 
+    rows = [x async for x in db[COL_SPECIAL].find(
+        {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
+        {"_id": 0, "section_id": 1, "assignment_id": 1, "schedule_id1": 1, "schedule_id2": 1},
+    )]
+    if not rows:
+        return set()
 
-def _is_visible_regular_section(doc: Dict[str, Any], special_section_ids: set[str]) -> bool:
-    sid = str(doc.get("section_id") or "").strip()
-    remarks = str(doc.get("remarks") or "").upper()
-    status = str(doc.get("status") or "").strip().lower()
-    class_retention_status = str(doc.get("class_retention_status") or "").strip().lower()
-    if status == "archived":
-        return False
-    if sid and sid in special_section_ids:
-        return False
-    if "SPECIAL CLASS" in remarks or "DISSOLVED" in remarks:
-        return False
-    if bool(doc.get("is_dissolved")):
-        return False
-    if class_retention_status == "dissolved":
-        return False
-    return True
+    out: set[str] = set()
+    assignment_ids: set[str] = set()
+    schedule_ids: set[str] = set()
+    for row in rows:
+        sid = str(row.get("section_id") or "").strip()
+        if sid:
+            out.add(sid)
+        aid = str(row.get("assignment_id") or "").strip()
+        if aid:
+            assignment_ids.add(aid)
+        for key in ("schedule_id1", "schedule_id2"):
+            sched_id = str(row.get(key) or "").strip()
+            if sched_id:
+                schedule_ids.add(sched_id)
+
+    if assignment_ids:
+        docs = [x async for x in db[COL_FAC_ASSIGN].find(
+            {"assignment_id": {"$in": list(assignment_ids)}, "is_archived": {"$ne": True}},
+            {"_id": 0, "section_id": 1},
+        )]
+        for doc in docs:
+            sid = str(doc.get("section_id") or "").strip()
+            if sid:
+                out.add(sid)
+
+    if schedule_ids:
+        docs = [x async for x in db[COL_SECTION_SCHEDULES].find(
+            {"schedule_id": {"$in": list(schedule_ids)}},
+            {"_id": 0, "section_id": 1},
+        )]
+        for doc in docs:
+            sid = str(doc.get("section_id") or "").strip()
+            if sid:
+                out.add(sid)
+
+    return out
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -237,8 +261,8 @@ async def student_course_offerings(
             return {"ok": True, "term": term, "course": {"course_code": code}, "sections": []}
 
         # sections for course + term
-        special_section_ids = await _special_class_section_ids(term_id)
-        sec_docs_all = await db[COL_SECTIONS].find(
+        active_special_section_ids = await _active_special_class_section_ids(term_id)
+        sec_docs = await db[COL_SECTIONS].find(
             {"term_id": term_id, "course_id": course["course_id"]},
             {
                 "_id": 0,
@@ -248,11 +272,11 @@ async def student_course_offerings(
                 "enrolled": 1,
                 "status": 1,
                 "remarks": 1,
-                "is_dissolved": 1,
-                "class_retention_status": 1,
             },
         ).sort([("section_code", 1)]).to_list(None)
-        sec_docs = [s for s in sec_docs_all if _is_visible_regular_section(s, special_section_ids)]
+        if active_special_section_ids:
+            sec_docs = [s for s in sec_docs if str(s.get("section_id") or "").strip() not in active_special_section_ids]
+        sec_docs = [s for s in sec_docs if "SPECIAL CLASS" not in str(s.get("remarks") or "").upper()]
 
         section_ids = [s.get("section_id") for s in sec_docs if s.get("section_id")]
         if not section_ids:

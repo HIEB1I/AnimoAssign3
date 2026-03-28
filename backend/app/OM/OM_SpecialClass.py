@@ -2058,7 +2058,13 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
 
     status = (r.get("status") or "").strip()
     binding = (maps.get("approved_group_bindings") or {}).get((_safe_str(r.get("term_id")), cid)) if cid else None
-    if (not bool(r.get("generated_from_class_retention"))) and binding and (_safe_str(status) != "Approved"):
+    status_key = _safe_str(status)
+    if (
+        (not bool(r.get("generated_from_class_retention")))
+        and binding
+        and status_key not in {"Approved", "Convert to Regular Class"}
+        and not bool(r.get("unassigned_by_admin", False))
+    ):
         if not sid:
             sid = _safe_str(binding.get("section_id")) or None
         if not _safe_str(r.get("assignment_id") or r.get("faculty_assignment_id")) and binding.get("assignment_id"):
@@ -2264,8 +2270,6 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
         dept_id = _safe_str(course.get("department_id"))
         now = datetime.utcnow()
         generated_special_id = f"CRSC{rid.upper()}"
-        fa = await _latest_faculty_assignment_for_section(section_id) if section_id else {"assignment_id": None}
-        sid1, sid2 = await _schedule_ids_for_section(section_id) if section_id else (None, None)
         base_set = {
             "term_id": term_id,
             "course_id": course_id,
@@ -2276,9 +2280,6 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
             "generated_from_class_retention": True,
             "retention_id": rid,
             "generated_source_status": "Convert to Special Class",
-            "assignment_id": fa.get("assignment_id"),
-            "schedule_id1": sid1,
-            "schedule_id2": sid2,
             "schedule_cleared": False,
         }
         existing = await db[COL_SPECIAL].find_one(
@@ -2307,6 +2308,9 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
                 "remarks": "",
                 "submitted_at": now,
                 "created_at": now,
+                "assignment_id": None,
+                "schedule_id1": None,
+                "schedule_id2": None,
                 **base_set,
             }
             try:
@@ -3424,6 +3428,7 @@ async def om_specialclass_post(
                     "assignment_id": None,
                     "schedule_cleared": False,
                     "status": "Forwarded To Department",
+                    "unassigned_by_admin": True,
                     "updated_at": datetime.utcnow(),
                 },
                 "$unset": {
@@ -3477,8 +3482,13 @@ async def om_specialclass_post(
                     "assignment_id": assignment_id,
                     "schedule_cleared": bool(target_doc.get("schedule_cleared", False)),
                     "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
+                    "unassigned_by_admin": False,
                     "updated_at": datetime.utcnow(),
-                }
+                },
+                "$unset": {
+                    "unassigned_at": "",
+                    "unassigned_section_id": "",
+                },
             },
         )
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}

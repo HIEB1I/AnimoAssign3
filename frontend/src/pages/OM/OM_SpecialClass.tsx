@@ -12,6 +12,7 @@ import {
   createOMSC,
   getOMSC_EligibleStudents,
   assignOMSCStudent,
+  unassignOMSCStudent,
   deleteOMSCClass,
   getChairSCOptions,
   listChairSC,
@@ -21,6 +22,7 @@ import {
   createChairSC,
   getChairSC_EligibleStudents,
   assignChairSCStudent,
+  unassignChairSCStudent,
   deleteChairSCClass,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
@@ -870,7 +872,7 @@ export default function OM_SpecialClass({
     candidates: OMSpecialClassCandidate[];
     selectedStudentId: string;
     loading: boolean;
-    mode: "add" | "move";
+    mode: "add";
   }>(null);
 
   // view modal
@@ -914,6 +916,7 @@ export default function OM_SpecialClass({
     create: isChair ? createChairSC : createOMSC,
     eligibleStudents: isChair ? getChairSC_EligibleStudents : getOMSC_EligibleStudents,
     assignStudent: isChair ? assignChairSCStudent : assignOMSCStudent,
+    unassignStudent: isChair ? unassignChairSCStudent : unassignOMSCStudent,
     deleteClass: isChair ? deleteChairSCClass : deleteOMSCClass,
   }), [isChair]);
 
@@ -967,6 +970,14 @@ export default function OM_SpecialClass({
     const baseCount = typeof row.count === "number" ? row.count : row.students.length;
     if (!pendingMove || pendingMove.sourceGroupKey !== row.group_key) return baseCount;
     return Math.max(0, baseCount - 1);
+  };
+
+  const canReceiveMovedStudent = (row: SpecialClassGroupRow) => {
+    if (!pendingMove) return false;
+    if (row.group_key === pendingMove.sourceGroupKey) return false;
+    if (String(row.course_id || "") !== pendingMove.courseId) return false;
+    if (!row.primary_special_id) return false;
+    return !!String(row.section_id || (row as any).assignment_id || "").trim();
   };
 
   const openConfirm = (payload: {
@@ -1550,36 +1561,6 @@ export default function OM_SpecialClass({
     const courseLabel = String(row.course_code || row.course_title || "Course");
     const sectionLabel = String(row.section_code || "—");
 
-    if (pendingMove) {
-      if (String(row.course_id || "") !== pendingMove.courseId) {
-        setErrKind("error");
-        setErr("You can only move a student into another class of the same course.");
-        return;
-      }
-      if (row.group_key === pendingMove.sourceGroupKey) {
-        setErrKind("error");
-        setErr("Choose a different special class row for this student.");
-        return;
-      }
-
-      setInlineAssignState({
-        targetGroupKey: row.group_key,
-        targetSpecialId: row.primary_special_id,
-        courseLabel,
-        sectionLabel,
-        candidates: [{
-          special_id: pendingMove.student.special_id,
-          student_name: pendingMove.student.student_name,
-          student_number: pendingMove.student.student_number,
-          status: pendingMove.student.status,
-        }],
-        selectedStudentId: pendingMove.student.special_id,
-        loading: false,
-        mode: "move",
-      });
-      return;
-    }
-
     try {
       setInlineAssignState({
         targetGroupKey: row.group_key,
@@ -1615,10 +1596,8 @@ export default function OM_SpecialClass({
     try {
       setLoading(true);
       await apiFns.assignStudent(inlineAssignState.targetSpecialId, inlineAssignState.selectedStudentId, getSessionUserId() || userId || undefined);
-      const movedStudentName = pendingMove?.student.student_name;
       setInlineAssignState(null);
-      setPendingMove(null);
-      toast(inlineAssignState.mode === "move" ? `${movedStudentName || "Student"} moved successfully.` : "Student added to class.", "success");
+      toast("Student added to class.", "success");
       await load();
     } catch (e: any) {
       setErrKind("error");
@@ -1634,26 +1613,71 @@ export default function OM_SpecialClass({
     const sameStudentSelected = pendingMove?.student.special_id === student.special_id;
     if (sameStudentSelected) {
       setPendingMove(null);
-      setInlineAssignState((current) => current?.selectedStudentId === student.special_id ? null : current);
       toast("Student move canceled.", "success");
       return;
     }
 
-    setPendingMove({
+    const nextMove = {
       student,
       sourceGroupKey: row.group_key,
       sourceSpecialId: row.primary_special_id,
       courseId: String(row.course_id || student.course_id || ""),
       courseLabel: String(row.course_code || row.course_title || "Course"),
       sourceSectionLabel: String(row.section_code || "—"),
-    });
+    };
+
+    setPendingMove(nextMove);
     setInlineAssignState(null);
-    toast("Student selected. Choose another class in the same course and click Add Student.", "success");
+
+    const availableTargets = groupedRows.some((candidate) => {
+      if (candidate.group_key === row.group_key) return false;
+      if (String(candidate.course_id || "") !== nextMove.courseId) return false;
+      if (!candidate.primary_special_id) return false;
+      return !!String(candidate.section_id || (candidate as any).assignment_id || "").trim();
+    });
+
+    if (availableTargets) toast("Choose another same-course class, then click Move Here.", "success");
+    else toast("No other ready class is available. You can unassign this student instead.", "success");
   };
 
   const cancelPendingMove = () => {
     setPendingMove(null);
-    setInlineAssignState((current) => current?.mode === "move" ? null : current);
+  };
+
+  const moveStudentHere = async (row: SpecialClassGroupRow) => {
+    if (!pendingMove || !canReceiveMovedStudent(row)) return;
+    try {
+      setLoading(true);
+      await apiFns.assignStudent(row.primary_special_id, pendingMove.student.special_id, getSessionUserId() || userId || undefined);
+      const movedStudentName = pendingMove.student.student_name || "Student";
+      setPendingMove(null);
+      setInlineAssignState(null);
+      toast(`${movedStudentName} moved successfully.`, "success");
+      await load();
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to move student.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const unassignPendingStudent = async () => {
+    if (!pendingMove?.student?.special_id) return;
+    try {
+      setLoading(true);
+      await apiFns.unassignStudent(pendingMove.student.special_id, getSessionUserId() || userId || undefined);
+      const movedStudentName = pendingMove.student.student_name || "Student";
+      setPendingMove(null);
+      setInlineAssignState(null);
+      toast(`${movedStudentName} unassigned successfully.`, "success");
+      await load();
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to unassign student.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const deleteSpecialClassRow = async (row: SpecialClassGroupRow) => {
@@ -1936,27 +1960,6 @@ export default function OM_SpecialClass({
         </div>
       </div>
 
-      {pendingMove && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-          <div>
-            <div className="font-semibold">Student selected for reassignment</div>
-            <div>
-              <span className="font-medium">{pendingMove.student.student_name || "Student"}</span>
-              {pendingMove.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
-              {` • ${pendingMove.courseLabel} • from ${pendingMove.sourceSectionLabel || "current class"}`}
-            </div>
-            <div className="text-xs text-amber-800">Click <span className="font-semibold">Add Student</span> on another row of the same course to place this student there.</div>
-          </div>
-          <button
-            type="button"
-            onClick={cancelPendingMove}
-            className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
-          >
-            <X className="h-4 w-4" />
-            Cancel Move
-          </button>
-        </div>
-      )}
 
       <div className="table-wrapper w-full overflow-hidden">
         <div className="border border-gray-200 bg-white shadow-sm overflow-x-auto rounded-xl">
@@ -2155,12 +2158,6 @@ export default function OM_SpecialClass({
                   const displayCount = visibleCountForRow(r);
                   const moveSourceRow = pendingMove?.sourceGroupKey === r.group_key;
                   const assignInlineOpen = inlineAssignState?.targetGroupKey === r.group_key;
-                  const addStudentButtonLabel = pendingMove
-                    ? moveSourceRow
-                      ? "Select Another Class"
-                      : "Place Student Here"
-                    : "Add Student";
-
                   return (
                     <Fragment key={r.group_key}>
                     <tr className="hover:bg-gray-50 align-top">
@@ -2189,8 +2186,26 @@ export default function OM_SpecialClass({
                         <div className="space-y-2 min-w-[260px]">
                           {moveSourceRow && pendingMove ? (
                             <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                              <div className="font-medium">{pendingMove.student.student_name || "Student"} is ready to move.</div>
-                              <div className="text-xs text-amber-800">Choose another class in this same course, then click Add Student on that row.</div>
+                              <div className="font-medium">{pendingMove.student.student_name || "Student"} is selected.</div>
+                              <div className="text-xs text-amber-800">Choose another same-course class and click Move Here, or unassign the student from this section.</div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={unassignPendingStudent}
+                                  disabled={loading}
+                                  className="inline-flex items-center rounded-md border border-amber-400 bg-amber-100 px-3 py-2 text-sm font-medium text-amber-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Unassign Student
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelPendingMove}
+                                  disabled={loading}
+                                  className="inline-flex items-center rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
                             </div>
                           ) : null}
 
@@ -2237,16 +2252,39 @@ export default function OM_SpecialClass({
                             </div>
                           )}
 
-                          <button
-                            type="button"
-                            onClick={() => openInlineAssign(r)}
-                            disabled={editing || loading || !r.primary_special_id || (!!pendingMove && moveSourceRow)}
-                            className="inline-flex items-center gap-2 rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                            title={pendingMove ? "Place the selected student into this class" : "Add a same-course student who already applied"}
-                          >
-                            <Plus className="h-4 w-4" />
-                            {addStudentButtonLabel}
-                          </button>
+                          {pendingMove ? (
+                            canReceiveMovedStudent(r) ? (
+                              <button
+                                type="button"
+                                onClick={() => moveStudentHere(r)}
+                                disabled={editing || loading}
+                                className="inline-flex items-center gap-2 rounded-md border border-amber-500 bg-amber-200 px-3 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                                title="Move the selected student into this class"
+                              >
+                                Move Here
+                              </button>
+                            ) : String(r.course_id || "") === pendingMove.courseId && !moveSourceRow ? (
+                              <button
+                                type="button"
+                                disabled
+                                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400 disabled:cursor-not-allowed"
+                                title="This class needs a section/faculty assignment first"
+                              >
+                                Unavailable
+                              </button>
+                            ) : null
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openInlineAssign(r)}
+                              disabled={editing || loading || !r.primary_special_id}
+                              className="inline-flex items-center gap-2 rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Add a same-course student who already applied"
+                            >
+                              <Plus className="h-4 w-4" />
+                              Add Student
+                            </button>
+                          )}
                         </div>
                       </td>
 
@@ -2644,25 +2682,18 @@ export default function OM_SpecialClass({
                             <div className="flex flex-wrap items-start justify-between gap-3">
                               <div>
                                 <div className="text-base font-semibold text-emerald-800">
-                                  {inlineAssignState.mode === "move" ? "Place Student Into Class" : "Add Student to Class"}
+                                  Add Student to Class
                                 </div>
                                 <div className="text-sm text-gray-600">
                                   {inlineAssignState.courseLabel} • {inlineAssignState.sectionLabel || "—"}
                                 </div>
                               </div>
-                              {inlineAssignState.mode === "move" && pendingMove ? (
-                                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                                  Moving <span className="font-semibold">{pendingMove.student.student_name || "Student"}</span>
-                                  {pendingMove.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
-                                  {` from ${pendingMove.sourceSectionLabel || "current class"}`}
-                                </div>
-                              ) : null}
                             </div>
 
                             <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
                               <div className="space-y-1.5">
                                 <div className="text-sm font-medium text-gray-700">
-                                  {inlineAssignState.mode === "move" ? "Selected student" : "Eligible student"}
+                                  Eligible student
                                 </div>
                                 {inlineAssignState.loading ? (
                                   <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">Loading eligible students…</div>
@@ -2698,7 +2729,7 @@ export default function OM_SpecialClass({
                                   onClick={confirmInlineAssign}
                                   className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
                                 >
-                                  {inlineAssignState.mode === "move" ? "Move Student" : "Add Student"}
+                                  Add Student
                                 </button>
                               </div>
                             </div>
