@@ -113,7 +113,7 @@ async def _special_class_section_ids(term_id: str, db) -> set[str]:
 
     try:
         sc_rows = await db.get_collection("special_class").find(
-            {"term_id": term_id},
+            {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
             {
                 "_id": 0,
                 "section_id": 1,
@@ -121,6 +121,7 @@ async def _special_class_section_ids(term_id: str, db) -> set[str]:
                 "schedule_entries": 1,
                 "slot1": 1,
                 "slot2": 1,
+                "status": 1,
             },
         ).to_list(None)
     except Exception:

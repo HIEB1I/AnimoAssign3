@@ -4609,13 +4609,17 @@ async def get_course_offerings(
     async def _specialclass_rows(term_id: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         filters = filters or {}
 
-        # Pull rows; exclude Mongo _id so we don't need ObjectId conversion
-        rows = [x async for x in db[COL_SPECIAL].find({"term_id": term_id, **filters}, {"_id": 0})]
-        if not rows:
-            return []
-
         def _s(x: Any) -> str:
             return (str(x).strip() if x is not None else "")
+
+        # Pull rows; exclude Mongo _id so we don't need ObjectId conversion
+        match = {"term_id": term_id, **filters}
+        if not _s(filters.get("special_id")):
+            match["status"] = {"$ne": "Convert to Regular Class"}
+
+        rows = [x async for x in db[COL_SPECIAL].find(match, {"_id": 0})]
+        if not rows:
+            return []
 
         def _course_code_str(cc: Any) -> str:
             if isinstance(cc, list):

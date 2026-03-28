@@ -69,6 +69,97 @@ def _safe_str(x: Any) -> str:
     return str(x).strip() if x is not None else ""
 
 
+async def _department_campus_id_for_course(course_id: str) -> str:
+    course_id = _safe_str(course_id)
+    if not course_id:
+        return ""
+    course = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "department_id": 1}) or {}
+    dept_id = _safe_str(course.get("department_id"))
+    if not dept_id:
+        return ""
+    dept = await db[COL_DEPARTMENTS].find_one(
+        {"department_id": dept_id},
+        {"_id": 0, "campus_id": 1, "campus": 1},
+    ) or {}
+    return _safe_str(dept.get("campus_id") or dept.get("campus")).upper()
+
+
+async def _regularization_snapshot(section_id: str, course_id: str) -> Dict[str, Any]:
+    section_id = _safe_str(section_id)
+    course_id = _safe_str(course_id)
+
+    sec = {}
+    sub = {}
+    if section_id:
+        sec = await db[COL_SECTIONS].find_one(
+            {"section_id": section_id},
+            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1},
+        ) or {}
+        sub = await db[COL_SECTIONS_SUBMITTED].find_one(
+            {"section_id": section_id},
+            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1},
+        ) or {}
+
+    campus_id = _safe_str(sec.get("campus_id") or sub.get("campus_id")).upper()
+    if not campus_id:
+        campus_id = await _department_campus_id_for_course(course_id or _safe_str(sec.get("course_id") or sub.get("course_id")))
+
+    section_code = _safe_str(sec.get("section_code") or sub.get("section_code"))
+
+    def _coerce_int(value: Any, default: int) -> int:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+    return {
+        "section_code": section_code,
+        "campus_id": campus_id,
+        "enrollment_cap": _coerce_int(sec.get("enrollment_cap") or sub.get("enrollment_cap"), 45),
+        "batch_number": _coerce_int(sec.get("batch_number") or sub.get("batch_number"), 0),
+        "mode": _safe_str(sec.get("mode") or sub.get("mode")) or "HYB",
+    }
+
+
+async def _sync_regularized_special_sections(term_id: str) -> None:
+    term_id = _safe_str(term_id)
+    if not term_id:
+        return
+
+    rows = await db[COL_SPECIAL].find(
+        {"term_id": term_id, "status": "Convert to Regular Class"},
+        {"_id": 0, "section_id": 1, "assignment_id": 1, "course_id": 1},
+    ).to_list(5000)
+
+    if not rows:
+        return
+
+    assignment_ids = sorted({_safe_str(r.get("assignment_id")) for r in rows if _safe_str(r.get("assignment_id"))})
+    assignment_to_section: Dict[str, str] = {}
+    if assignment_ids:
+        asg_docs = await db[COL_FAC_ASSIGN].find(
+            {"assignment_id": {"$in": assignment_ids}, "is_archived": {"$ne": True}},
+            {"_id": 0, "assignment_id": 1, "section_id": 1},
+        ).to_list(5000)
+        assignment_to_section = {
+            _safe_str(a.get("assignment_id")): _safe_str(a.get("section_id"))
+            for a in asg_docs or []
+            if _safe_str(a.get("assignment_id")) and _safe_str(a.get("section_id"))
+        }
+
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        course_id = _safe_str(row.get("course_id"))
+        section_id = _safe_str(row.get("section_id")) or assignment_to_section.get(_safe_str(row.get("assignment_id")), "")
+        if not section_id:
+            continue
+        key = (section_id, course_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        await _regularize_special_section_bundle(section_id=section_id, term_id=term_id, course_id=course_id)
+
+
 def _is_convert_to_special_status(value: Any) -> bool:
     s = _safe_str(value).lower()
     return s in {"convert to special class", "special class"}
@@ -1361,6 +1452,7 @@ async def _create_custom_section_bundle(
         raise HTTPException(status_code=400, detail="faculty_id is required for custom schedule.")
 
     now = datetime.utcnow()
+    campus_id = await _department_campus_id_for_course(course_id)
 
     # --- create section ---
     section_id = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
@@ -1369,6 +1461,7 @@ async def _create_custom_section_bundle(
         "section_code": section_code,
         "term_id": term_id,
         "course_id": course_id,
+        "campus_id": campus_id or None,
         "enrollment_cap": 45,
         "enrolled": 0,
         "batch_number": 0,
@@ -1386,7 +1479,7 @@ async def _create_custom_section_bundle(
         "section_code": section_code,
         "submitted_for_scheduling": True,
 
-        "campus_id": "",
+        "campus_id": campus_id or "",
         "mode": "HYB", 
         "enrollment_cap": 45,
         "batch_number": 0,
@@ -1472,6 +1565,64 @@ async def _create_custom_section_bundle(
         "schedule_id2": schedule_id2,
         "assignment_id": assignment_id,
     }
+
+
+async def _regularize_special_section_bundle(*, section_id: str, term_id: str, course_id: str) -> None:
+    """Make a reflected Special Class section behave like a regular class section.
+
+    Also backfill the section snapshot fields needed by APO/OM regular views.
+    """
+    section_id = _safe_str(section_id)
+    term_id = _safe_str(term_id)
+    course_id = _safe_str(course_id)
+    if not section_id:
+        return
+
+    now = datetime.utcnow()
+    snap = await _regularization_snapshot(section_id, course_id)
+
+    sec_set: Dict[str, Any] = {
+        "term_id": term_id or None,
+        "course_id": course_id or None,
+        "updated_at": now,
+        "status": "active",
+        "remarks": "REGULAR CLASS",
+    }
+    sub_set: Dict[str, Any] = {
+        "term_id": term_id or None,
+        "course_id": course_id or None,
+        "submitted_for_scheduling": True,
+        "updated_at": now,
+        "remarks": "REGULAR CLASS",
+        "status": "active",
+    }
+
+    if snap.get("section_code"):
+        sec_set["section_code"] = snap["section_code"]
+        sub_set["section_code"] = snap["section_code"]
+    if snap.get("campus_id"):
+        sec_set["campus_id"] = snap["campus_id"]
+        sub_set["campus_id"] = snap["campus_id"]
+    if snap.get("mode"):
+        sub_set["mode"] = snap["mode"]
+    if snap.get("enrollment_cap") is not None:
+        sec_set["enrollment_cap"] = snap["enrollment_cap"]
+        sub_set["enrollment_cap"] = snap["enrollment_cap"]
+    if snap.get("batch_number") is not None:
+        sec_set["batch_number"] = snap["batch_number"]
+        sub_set["batch_number"] = snap["batch_number"]
+
+    await db[COL_SECTIONS].update_one(
+        {"section_id": section_id},
+        {"$set": sec_set},
+        upsert=True,
+    )
+
+    await db[COL_SECTIONS_SUBMITTED].update_one(
+        {"section_id": section_id},
+        {"$set": sub_set},
+        upsert=True,
+    )
 
 
 async def _section_schedule_two(section_id: str) -> Dict[str, Any]:
@@ -1746,7 +1897,7 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
     faculty_id: Optional[str] = None
     faculty_name = "UNASSIGNED"
 
-    if status_norm == "SUBMITTED" or (generated_from_class_retention and not assignment_id):
+    if status_norm == "SUBMITTED":
         faculty_id = None
         faculty_name = "UNASSIGNED"
     else:
@@ -1878,6 +2029,7 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
             "generated_from_class_retention": True,
             "retention_id": rid,
             "generated_source_status": "Convert to Special Class",
+            "schedule_cleared": False,
         }
         existing = await db[COL_SPECIAL].find_one(
             {
@@ -1908,7 +2060,6 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
                 "assignment_id": None,
                 "schedule_id1": None,
                 "schedule_id2": None,
-                "schedule_cleared": True,
                 **base_set,
             }
             try:
@@ -3093,6 +3244,7 @@ async def om_specialclass_post(
 
     if action == "list":
         await _sync_generated_special_classes_from_retention(current_term_id)
+        await _sync_regularized_special_sections(current_term_id)
         match: Dict[str, Any] = {"term_id": current_term_id, "special_id": {"$exists": True}}
         if status and status.strip() and status.strip() != "All Status":
             match["status"] = status.strip()
@@ -3315,6 +3467,28 @@ async def om_specialclass_post(
             {"term_id": current_term_id, "special_id": specialId},
             {"$set": updates_set, "$unset": updates_unset},
         )
+
+        converted_docs: List[Dict[str, Any]] = []
+        try:
+            target_status_for_update = _safe_str(updates_set.get("status") or payload.get("status") or prev_status)
+            if res.modified_count and target_status_for_update == "Convert to Regular Class":
+                converted_docs = await db[COL_SPECIAL].find(
+                    {"term_id": current_term_id, "special_id": {"$in": [specialId]}},
+                    {
+                        "_id": 0,
+                        "special_id": 1,
+                        "course_id": 1,
+                        "courseId": 1,
+                        "section_id": 1,
+                    },
+                ).to_list(10)
+                for cd in converted_docs:
+                    sec_id = _safe_str(cd.get("section_id"))
+                    course_id = _safe_str(cd.get("course_id") or cd.get("courseId") or course_id_base)
+                    if sec_id:
+                        await _regularize_special_section_bundle(section_id=sec_id, term_id=current_term_id, course_id=course_id)
+        except Exception:
+            converted_docs = []
 
         # ---------------- STUDENT notifications ----------------
         # Notify the student who submitted this Special Class when OM updates the record.
@@ -3580,6 +3754,27 @@ async def om_specialclass_post(
             {"term_id": current_term_id, "special_id": {"$in": special_ids}},
             {"$set": {"status": target_status, "updated_at": datetime.utcnow()}},
         )
+
+        converted_docs: List[Dict[str, Any]] = []
+        try:
+            if res.modified_count and target_status == "Convert to Regular Class":
+                converted_docs = await db[COL_SPECIAL].find(
+                    {"term_id": current_term_id, "special_id": {"$in": special_ids}},
+                    {
+                        "_id": 0,
+                        "special_id": 1,
+                        "course_id": 1,
+                        "courseId": 1,
+                        "section_id": 1,
+                    },
+                ).to_list(5000)
+                for d in converted_docs:
+                    sec_id = _safe_str(d.get("section_id"))
+                    course_id = _safe_str(d.get("course_id") or d.get("courseId"))
+                    if sec_id:
+                        await _regularize_special_section_bundle(section_id=sec_id, term_id=current_term_id, course_id=course_id)
+        except Exception:
+            converted_docs = []
 
         # Notify chairs for approvals / updates (best-effort; never blocks).
         try:

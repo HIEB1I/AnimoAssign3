@@ -851,7 +851,6 @@ export default function OM_SpecialClass({
   // add class
   const [adding, setAdding] = useState(false);
   const [addDraft, setAddDraft] = useState<Partial<OMSpecialClassRow>>({ status: "Forwarded To Department" });
-  const [addCourseInput, setAddCourseInput] = useState("");
   const [addFacultyInput, setAddFacultyInput] = useState("");
 
   // student movement
@@ -872,12 +871,6 @@ export default function OM_SpecialClass({
     selectedStudentId: string;
     loading: boolean;
     mode: "add" | "move";
-    targetOptions?: Array<{
-      groupKey: string;
-      specialId: string;
-      label: string;
-      sectionLabel: string;
-    }>;
   }>(null);
 
   // view modal
@@ -954,12 +947,6 @@ export default function OM_SpecialClass({
       opt.course_id,
       `${opt.course_code}${opt.course_title ? ` — ${opt.course_title}` : ""}`,
     ])
-  ) as Record<string, string>, [modalCourseOptions]);
-
-  const addCourseCodeToIdUpper = useMemo(() => Object.fromEntries(
-    modalCourseOptions
-      .filter((opt) => !!opt.course_code)
-      .map((opt) => [String(opt.course_code).toUpperCase(), opt.course_id])
   ) as Record<string, string>, [modalCourseOptions]);
 
   const toast = (message: string, kind?: "success" | "error") => {
@@ -1208,26 +1195,6 @@ export default function OM_SpecialClass({
   }, [status, q]);
 
   const groupedRows = useMemo(() => buildGroupedRows(rows), [rows]);
-
-  const moveTargetOptionsForRow = (sourceRow: SpecialClassGroupRow) => {
-    const courseId = String(sourceRow.course_id || '').trim();
-    return groupedRows
-      .filter((candidate) =>
-        candidate.group_key !== sourceRow.group_key &&
-        !!candidate.primary_special_id &&
-        String(candidate.course_id || '').trim() === courseId
-      )
-      .map((candidate) => {
-        const sectionLabel = String(candidate.section_code || '').trim() || 'Unassigned Section';
-        const facultyLabel = String(candidate.faculty_name || '').trim() || 'UNASSIGNED';
-        return {
-          groupKey: candidate.group_key,
-          specialId: candidate.primary_special_id,
-          label: `${sectionLabel} • ${facultyLabel}`,
-          sectionLabel,
-        };
-      });
-  };
 
   const selectedList = useMemo(
     () => groupedRows.filter((r) => !!selectedIds[r.group_key]).flatMap((r) => r.special_ids),
@@ -1502,12 +1469,11 @@ export default function OM_SpecialClass({
   };
 
   const openAddClass = () => {
-    const firstCourseId = modalCourseOptions[0]?.course_id || "";
     setAdding(true);
     setAddDraft({
       status: "Forwarded To Department",
       remarks: "",
-      course_id: firstCourseId,
+      course_id: modalCourseOptions[0]?.course_id || "",
       section_code: "",
       faculty_id: null,
       day1: "" as any,
@@ -1517,14 +1483,12 @@ export default function OM_SpecialClass({
       begin2: "",
       end2: "",
     });
-    setAddCourseInput(modalCourseIdToLabel[String(firstCourseId)] || "");
     setAddFacultyInput("");
   };
 
   const closeAddClass = () => {
     setAdding(false);
     setAddDraft({ status: "Forwarded To Department" });
-    setAddCourseInput("");
     setAddFacultyInput("");
   };
 
@@ -1578,16 +1542,43 @@ export default function OM_SpecialClass({
     }
   };
 
-  const closeInlineAssign = () => {
-    setInlineAssignState(null);
-    setPendingMove(null);
-  };
+  const closeInlineAssign = () => setInlineAssignState(null);
 
   const openInlineAssign = async (row: SpecialClassGroupRow) => {
-    if (!row.primary_special_id || pendingMove) return;
+    if (!row.primary_special_id) return;
 
     const courseLabel = String(row.course_code || row.course_title || "Course");
     const sectionLabel = String(row.section_code || "—");
+
+    if (pendingMove) {
+      if (String(row.course_id || "") !== pendingMove.courseId) {
+        setErrKind("error");
+        setErr("You can only move a student into another class of the same course.");
+        return;
+      }
+      if (row.group_key === pendingMove.sourceGroupKey) {
+        setErrKind("error");
+        setErr("Choose a different special class row for this student.");
+        return;
+      }
+
+      setInlineAssignState({
+        targetGroupKey: row.group_key,
+        targetSpecialId: row.primary_special_id,
+        courseLabel,
+        sectionLabel,
+        candidates: [{
+          special_id: pendingMove.student.special_id,
+          student_name: pendingMove.student.student_name,
+          student_number: pendingMove.student.student_number,
+          status: pendingMove.student.status,
+        }],
+        selectedStudentId: pendingMove.student.special_id,
+        loading: false,
+        mode: "move",
+      });
+      return;
+    }
 
     try {
       setInlineAssignState({
@@ -1627,9 +1618,7 @@ export default function OM_SpecialClass({
       const movedStudentName = pendingMove?.student.student_name;
       setInlineAssignState(null);
       setPendingMove(null);
-      toast(inlineAssignState.mode === "move"
-        ? `${movedStudentName || "Student"} moved to ${inlineAssignState.sectionLabel || "the selected section"}.`
-        : "Student added to class.", "success");
+      toast(inlineAssignState.mode === "move" ? `${movedStudentName || "Student"} moved successfully.` : "Student added to class.", "success");
       await load();
     } catch (e: any) {
       setErrKind("error");
@@ -1650,40 +1639,16 @@ export default function OM_SpecialClass({
       return;
     }
 
-    const targetOptions = moveTargetOptionsForRow(row);
-    if (targetOptions.length === 0) {
-      setErrKind("error");
-      setErr("No other special class section is available for this course yet.");
-      return;
-    }
-
-    const firstTarget = targetOptions[0];
-    const nextPendingMove = {
+    setPendingMove({
       student,
       sourceGroupKey: row.group_key,
       sourceSpecialId: row.primary_special_id,
       courseId: String(row.course_id || student.course_id || ""),
       courseLabel: String(row.course_code || row.course_title || "Course"),
       sourceSectionLabel: String(row.section_code || "—"),
-    };
-
-    setPendingMove(nextPendingMove);
-    setInlineAssignState({
-      targetGroupKey: row.group_key,
-      targetSpecialId: firstTarget.specialId,
-      courseLabel: nextPendingMove.courseLabel,
-      sectionLabel: firstTarget.sectionLabel,
-      candidates: [{
-        special_id: student.special_id,
-        student_name: student.student_name,
-        student_number: student.student_number,
-        status: student.status,
-      }],
-      selectedStudentId: student.special_id,
-      loading: false,
-      mode: "move",
-      targetOptions,
     });
+    setInlineAssignState(null);
+    toast("Student selected. Choose another class in the same course and click Add Student.", "success");
   };
 
   const cancelPendingMove = () => {
@@ -1971,6 +1936,28 @@ export default function OM_SpecialClass({
         </div>
       </div>
 
+      {pendingMove && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+          <div>
+            <div className="font-semibold">Student selected for reassignment</div>
+            <div>
+              <span className="font-medium">{pendingMove.student.student_name || "Student"}</span>
+              {pendingMove.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
+              {` • ${pendingMove.courseLabel} • from ${pendingMove.sourceSectionLabel || "current class"}`}
+            </div>
+            <div className="text-xs text-amber-800">Click <span className="font-semibold">Add Student</span> on another row of the same course to place this student there.</div>
+          </div>
+          <button
+            type="button"
+            onClick={cancelPendingMove}
+            className="inline-flex items-center gap-2 rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100"
+          >
+            <X className="h-4 w-4" />
+            Cancel Move
+          </button>
+        </div>
+      )}
+
       <div className="table-wrapper w-full overflow-hidden">
         <div className="border border-gray-200 bg-white shadow-sm overflow-x-auto rounded-xl">
           <table className="w-full min-w-[1800px] text-sm table-auto">
@@ -2010,14 +1997,10 @@ export default function OM_SpecialClass({
 
                   <td className="px-4 py-3 min-w-[280px] align-top">
                     <ComboSelect
-                      value={addCourseInput}
+                      value={modalCourseIdToLabel[String(addDraft.course_id || "")] || ""}
                       onChange={(v) => {
-                        const raw = v || "";
-                        const trimmed = raw.trim();
-                        const upper = trimmed.toUpperCase();
-                        const nextCourseId = modalCourseLabelToId[trimmed] || addCourseCodeToIdUpper[upper] || "";
-                        setAddCourseInput(raw);
-                        setAddDraft((d) => ({ ...d, course_id: nextCourseId }));
+                        const nextId = modalCourseLabelToId[v] || modalCourseLabelToId[(v || "").trim()] || "";
+                        setAddDraft((d) => ({ ...d, course_id: nextId }));
                       }}
                       options={Object.keys(modalCourseLabelToId)}
                       placeholder="Type or select course"
@@ -2172,7 +2155,11 @@ export default function OM_SpecialClass({
                   const displayCount = visibleCountForRow(r);
                   const moveSourceRow = pendingMove?.sourceGroupKey === r.group_key;
                   const assignInlineOpen = inlineAssignState?.targetGroupKey === r.group_key;
-                  const addStudentButtonLabel = "Add Student";
+                  const addStudentButtonLabel = pendingMove
+                    ? moveSourceRow
+                      ? "Select Another Class"
+                      : "Place Student Here"
+                    : "Add Student";
 
                   return (
                     <Fragment key={r.group_key}>
@@ -2200,6 +2187,13 @@ export default function OM_SpecialClass({
 
                       <td className="px-4 py-3 align-top">
                         <div className="space-y-2 min-w-[260px]">
+                          {moveSourceRow && pendingMove ? (
+                            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                              <div className="font-medium">{pendingMove.student.student_name || "Student"} is ready to move.</div>
+                              <div className="text-xs text-amber-800">Choose another class in this same course, then click Add Student on that row.</div>
+                            </div>
+                          ) : null}
+
                           {visibleStudents.length > 0 ? (
                             visibleStudents.map((student) => {
                               const selectedForMove = pendingMove?.student.special_id === student.special_id;
@@ -2233,7 +2227,9 @@ export default function OM_SpecialClass({
                             )})
                           ) : (
                             <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                              {r.generated_from_class_retention
+                              {moveSourceRow && pendingMove
+                                ? "Student is waiting to be placed in another class of this same course."
+                                : r.generated_from_class_retention
                                 ? "No student application. Reflected from Class Retention."
                                 : r.manual_special_class
                                 ? "No student application yet. You can add eligible students for this same course."
@@ -2244,9 +2240,9 @@ export default function OM_SpecialClass({
                           <button
                             type="button"
                             onClick={() => openInlineAssign(r)}
-                            disabled={editing || loading || !r.primary_special_id || !!pendingMove}
+                            disabled={editing || loading || !r.primary_special_id || (!!pendingMove && moveSourceRow)}
                             className="inline-flex items-center gap-2 rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
-                            title={pendingMove ? "Finish the current move first." : "Add a same-course student who already applied"}
+                            title={pendingMove ? "Place the selected student into this class" : "Add a same-course student who already applied"}
                           >
                             <Plus className="h-4 w-4" />
                             {addStudentButtonLabel}
@@ -2645,97 +2641,67 @@ export default function OM_SpecialClass({
                       <tr className="bg-emerald-50/40">
                         <td colSpan={13} className="border-t border-emerald-100 px-4 py-4">
                           <div className="rounded-xl border border-emerald-200 bg-white p-4 shadow-sm">
-                            {inlineAssignState.mode === "move" ? (
-                              <div className="grid gap-4 lg:grid-cols-[minmax(0,1.1fr)_minmax(0,1fr)_auto] lg:items-end">
-                                <div className="space-y-1.5">
-                                  <div className="text-sm font-semibold text-emerald-800">Move Student</div>
-                                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                                    <span className="font-semibold">{pendingMove?.student.student_name || "Student"}</span>
-                                    {pendingMove?.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
-                                    {` • from ${pendingMove?.sourceSectionLabel || "current class"}`}
-                                  </div>
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <div className="text-base font-semibold text-emerald-800">
+                                  {inlineAssignState.mode === "move" ? "Place Student Into Class" : "Add Student to Class"}
                                 </div>
+                                <div className="text-sm text-gray-600">
+                                  {inlineAssignState.courseLabel} • {inlineAssignState.sectionLabel || "—"}
+                                </div>
+                              </div>
+                              {inlineAssignState.mode === "move" && pendingMove ? (
+                                <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                                  Moving <span className="font-semibold">{pendingMove.student.student_name || "Student"}</span>
+                                  {pendingMove.student.student_number ? ` (${pendingMove.student.student_number})` : ""}
+                                  {` from ${pendingMove.sourceSectionLabel || "current class"}`}
+                                </div>
+                              ) : null}
+                            </div>
 
-                                <div className="space-y-1.5">
-                                  <div className="text-sm font-medium text-gray-700">Move to section</div>
+                            <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                              <div className="space-y-1.5">
+                                <div className="text-sm font-medium text-gray-700">
+                                  {inlineAssignState.mode === "move" ? "Selected student" : "Eligible student"}
+                                </div>
+                                {inlineAssignState.loading ? (
+                                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">Loading eligible students…</div>
+                                ) : inlineAssignState.candidates.length === 0 ? (
+                                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                    No students are available for this course right now.
+                                  </div>
+                                ) : (
                                   <SelectBox
-                                    value={inlineAssignState.targetOptions?.find((option) => option.specialId === inlineAssignState.targetSpecialId)?.label || ""}
-                                    onChange={(value) => {
-                                      const match = inlineAssignState.targetOptions?.find((option) => option.label === value);
-                                      setInlineAssignState((current) => current && match
-                                        ? { ...current, targetSpecialId: match.specialId, sectionLabel: match.sectionLabel }
-                                        : current);
+                                    value={(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)
+                                      ? candidateLabel(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)!)
+                                      : "")}
+                                    onChange={(v) => {
+                                      const match = inlineAssignState.candidates.find((candidate) => candidateLabel(candidate) === v);
+                                      setInlineAssignState((current) => current ? { ...current, selectedStudentId: match?.special_id || "" } : current);
                                     }}
-                                    options={(inlineAssignState.targetOptions || []).map((option) => option.label)}
+                                    options={inlineAssignState.candidates.map((candidate) => candidateLabel(candidate))}
                                   />
-                                  <div className="text-xs text-gray-500">Pick the target section for this same course.</div>
-                                </div>
-
-                                <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={cancelPendingMove}
-                                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={!inlineAssignState.targetSpecialId || !inlineAssignState.selectedStudentId}
-                                    onClick={confirmInlineAssign}
-                                    className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-                                  >
-                                    Move Student
-                                  </button>
-                                </div>
+                                )}
                               </div>
-                            ) : (
-                              <div className="grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
-                                <div className="space-y-1.5">
-                                  <div className="text-base font-semibold text-emerald-800">Add Student to Class</div>
-                                  <div className="text-sm text-gray-600">
-                                    {inlineAssignState.courseLabel} • {inlineAssignState.sectionLabel || "—"}
-                                  </div>
-                                  <div className="text-sm font-medium text-gray-700">Eligible student</div>
-                                  {inlineAssignState.loading ? (
-                                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">Loading eligible students…</div>
-                                  ) : inlineAssignState.candidates.length === 0 ? (
-                                    <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-                                      No students are available for this course right now.
-                                    </div>
-                                  ) : (
-                                    <SelectBox
-                                      value={(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)
-                                        ? candidateLabel(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)!)
-                                        : "")}
-                                      onChange={(v) => {
-                                        const match = inlineAssignState.candidates.find((candidate) => candidateLabel(candidate) === v);
-                                        setInlineAssignState((current) => current ? { ...current, selectedStudentId: match?.special_id || "" } : current);
-                                      }}
-                                      options={inlineAssignState.candidates.map((candidate) => candidateLabel(candidate))}
-                                    />
-                                  )}
-                                </div>
 
-                                <div className="flex items-center justify-end gap-2">
-                                  <button
-                                    type="button"
-                                    onClick={closeInlineAssign}
-                                    className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
-                                  >
-                                    Cancel
-                                  </button>
-                                  <button
-                                    type="button"
-                                    disabled={inlineAssignState.loading || !inlineAssignState.selectedStudentId}
-                                    onClick={confirmInlineAssign}
-                                    className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
-                                  >
-                                    Add Student
-                                  </button>
-                                </div>
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={closeInlineAssign}
+                                  className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={inlineAssignState.loading || !inlineAssignState.selectedStudentId}
+                                  onClick={confirmInlineAssign}
+                                  className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                                >
+                                  {inlineAssignState.mode === "move" ? "Move Student" : "Add Student"}
+                                </button>
                               </div>
-                            )}
+                            </div>
                           </div>
                         </td>
                       </tr>

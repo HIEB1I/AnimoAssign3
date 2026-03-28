@@ -113,7 +113,7 @@ async def _upsert_generated_special_class_from_retention(
     - create the bridge row only once (stable by retention_id)
     - keep later Special Class edits/status changes intact on subsequent retention saves
     - keep the row excluded from Load Assignment via section_id
-    - start with blank schedule/faculty so old regular-class assignments do not leak
+    - reflect the section faculty/schedule by default so converted rows match the source class
     """
 
     rid = str(retention_id or "").strip()
@@ -158,7 +158,7 @@ async def _upsert_generated_special_class_from_retention(
                 "assignment_id": None,
                 "schedule_id1": None,
                 "schedule_id2": None,
-                "schedule_cleared": True,
+                "schedule_cleared": False,
             },
         },
         upsert=True,
