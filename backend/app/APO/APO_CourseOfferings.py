@@ -78,74 +78,6 @@ def _course_code_str(course_doc: Dict[str, Any]) -> str:
 def _safe_str(x: Any) -> str:
     return str(x).strip() if x is not None else ""
 
-async def _active_special_class_section_ids(term_id: str) -> Set[str]:
-    term_id = _safe_str(term_id)
-    if not term_id:
-        return set()
-
-    rows = [x async for x in db[COL_SPECIAL].find(
-        {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
-        {
-            "_id": 0,
-            "section_id": 1,
-            "assignment_id": 1,
-            "schedule_id1": 1,
-            "schedule_id2": 1,
-            "schedule_entries": 1,
-            "slot1": 1,
-            "slot2": 1,
-        },
-    )]
-    if not rows:
-        return set()
-
-    out: Set[str] = set()
-    assignment_ids: Set[str] = set()
-    schedule_ids: Set[str] = set()
-
-    for row in rows:
-        sid = _safe_str(row.get("section_id"))
-        if sid:
-            out.add(sid)
-        aid = _safe_str(row.get("assignment_id"))
-        if aid:
-            assignment_ids.add(aid)
-        for key in ("schedule_id1", "schedule_id2"):
-            sched_id = _safe_str(row.get(key))
-            if sched_id:
-                schedule_ids.add(sched_id)
-        for legacy in (row.get("schedule_entries") or []):
-            sched_id = _safe_str((legacy or {}).get("schedule_id"))
-            if sched_id:
-                schedule_ids.add(sched_id)
-        for slot_key in ("slot1", "slot2"):
-            slot = row.get(slot_key) or {}
-            sched_id = _safe_str(slot.get("schedule_id"))
-            if sched_id:
-                schedule_ids.add(sched_id)
-
-    if assignment_ids:
-        docs = [x async for x in db[COL_FAC_ASSIGN].find(
-            {"assignment_id": {"$in": list(assignment_ids)}, "is_archived": {"$ne": True}},
-            {"_id": 0, "section_id": 1},
-        )]
-        for doc in docs:
-            sid = _safe_str(doc.get("section_id"))
-            if sid:
-                out.add(sid)
-
-    if schedule_ids:
-        docs = [x async for x in db[COL_SCHEDS].find(
-            {"schedule_id": {"$in": list(schedule_ids)}},
-            {"_id": 0, "section_id": 1},
-        )]
-        for doc in docs:
-            sid = _safe_str(doc.get("section_id"))
-            if sid:
-                out.add(sid)
-
-    return out
-
 
 def _eaf_available(doc: Dict[str, Any]) -> bool:
     raw_path = _safe_str(doc.get("eaf_storage_path"))
@@ -4674,6 +4606,13 @@ async def get_course_offerings(
         return await _get_planning_term() or (await _ensure_current_term() or {})
 
 
+    async def _active_special_section_ids_for_term(term_id: str) -> set[str]:
+        rows = await db[COL_SPECIAL].find(
+            {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
+            {"_id": 0, "section_id": 1},
+        ).to_list(10000)
+        return {str(r.get("section_id") or "").strip() for r in rows if str(r.get("section_id") or "").strip()}
+
     async def _specialclass_rows(term_id: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         filters = filters or {}
 
@@ -5758,7 +5697,6 @@ async def get_course_offerings(
 
     campus_sec_by_course: Dict[str, List[Dict[str, Any]]]= {}
     planned_capacity_by_course: Dict[str, int] = {}
-    active_special_section_ids = await _active_special_class_section_ids(term_id)
 
     for cid in allowed_course_ids:
         lvl = (c_map_all.get(cid) or {}).get("program_level")
@@ -5776,15 +5714,18 @@ async def get_course_offerings(
 
         secs = [s async for s in db[COL_SECTIONS].find(
             sec_q, {"_id": 0, "section_id": 1, "section_code": 1, "enrollment_cap": 1, "remarks": 1, "batch_number": 1,
-                    "course_id": 1, "fulfilled_placeholder_course_id": 1,
+                    "course_id": 1, "fulfilled_placeholder_course_id": 1, "is_dissolved": 1, "class_retention_status": 1,
                     # preserve user-intended placement in Offerings UI
                     "owner_batch_id": 1, "owner_program_id": 1}
         )]
-        if active_special_section_ids:
-            secs = [s for s in secs if _safe_str(s.get("section_id")) not in active_special_section_ids]
+        active_special_section_ids = await _active_special_section_ids_for_term(term_id)
         secs = [
             s for s in secs
-            if "SPECIAL CLASS" not in _safe_str(s.get("remarks")).upper()
+            if str(s.get("section_id") or "").strip() not in active_special_section_ids
+            and not bool(s.get("is_dissolved"))
+            and str(s.get("class_retention_status") or "").strip().lower() != "dissolved"
+            and "DISSOLVED" not in str(s.get("remarks") or "").upper()
+            and "SPECIAL CLASS" not in str(s.get("remarks") or "").upper()
         ]
         campus_sec_by_course[cid] = secs
         planned_capacity_by_course[cid] = sum(int(s.get("enrollment_cap") or DEFAULT_CAP) for s in secs)

@@ -131,6 +131,8 @@ async def _upsert_generated_special_class_from_retention(
 
     special_id = f"CRSC{rid.upper()}"
 
+    binding = await _binding_from_section(section_id)
+
     await db[COL_SPECIAL].update_one(
         {"generated_from_class_retention": True, "retention_id": rid},
         {
@@ -138,7 +140,11 @@ async def _upsert_generated_special_class_from_retention(
                 "term_id": term_id,
                 "course_id": course_id,
                 "department_id": dept_id,
-                "section_id": section_id,
+                "section_id": binding.get("section_id") or section_id,
+                "assignment_id": binding.get("assignment_id"),
+                "schedule_id1": binding.get("schedule_id1"),
+                "schedule_id2": binding.get("schedule_id2"),
+                "schedule_cleared": False,
                 "updated_at": now,
                 "generated_from_class_retention": True,
                 "retention_id": rid,
@@ -155,10 +161,6 @@ async def _upsert_generated_special_class_from_retention(
                 "remarks": "",
                 "submitted_at": now,
                 "created_at": now,
-                "assignment_id": None,
-                "schedule_id1": None,
-                "schedule_id2": None,
-                "schedule_cleared": False,
             },
         },
         upsert=True,
@@ -172,6 +174,29 @@ async def _delete_generated_special_class_from_retention(retention_id: str) -> N
     await db[COL_SPECIAL].delete_many(
         {"generated_from_class_retention": True, "retention_id": rid}
     )
+
+
+async def _binding_from_section(section_id: str) -> Dict[str, Optional[str]]:
+    sid = str(section_id or "").strip()
+    if not sid:
+        return {"section_id": None, "schedule_id1": None, "schedule_id2": None, "assignment_id": None}
+
+    schedule_rows = await db["section_schedules"].find(
+        {"section_id": sid},
+        {"_id": 0, "schedule_id": 1},
+    ).sort("schedule_id", ASCENDING).to_list(50)
+    schedule_ids = [r.get("schedule_id") for r in schedule_rows if r.get("schedule_id")]
+    asg = await db[COL_FAC_ASSIGN].find(
+        {"section_id": sid, "is_archived": {"$ne": True}},
+        {"_id": 0, "assignment_id": 1},
+    ).sort([("created_at", -1)]).limit(1).to_list(1)
+    assignment_id = (asg[0] or {}).get("assignment_id") if asg else None
+    return {
+        "section_id": sid,
+        "schedule_id1": schedule_ids[0] if len(schedule_ids) >= 1 else None,
+        "schedule_id2": schedule_ids[1] if len(schedule_ids) >= 2 else None,
+        "assignment_id": assignment_id or None,
+    }
 
 
 async def _broadcast_dissolved_to_students(*, term_id: str, course_id: str, section_id: str, enrolled: Any = None) -> None:
@@ -1197,10 +1222,11 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             if "enrolled" in payload:
                 section_id = section_id_for_fac
                 if section_id:
-                    await db[COL_SECTIONS].update_one(
-                        {"section_id": section_id},
-                        {"$set": {"enrolled": payload["enrolled"], "updated_at": now}},
-                    )
+                    for _col in (COL_SECTIONS, COL_SECTIONS_SUBMITTED):
+                        await db[_col].update_one(
+                            {"section_id": section_id},
+                            {"$set": {"enrolled": payload["enrolled"], "updated_at": now}},
+                        )
 
             # If status is Dissolved, auto-write a marker into sections.remarks
             # so APO_CourseOfferings + OM_LoadAssignment can display it.
@@ -1280,10 +1306,11 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
 
         # mirror enrolled → section
         if doc.get("enrolled") is not None:
-            await db[COL_SECTIONS].update_one(
-                {"section_id": doc["section_id"]},
-                {"$set": {"enrolled": doc["enrolled"], "updated_at": now}},
-            )
+            for _col in (COL_SECTIONS, COL_SECTIONS_SUBMITTED):
+                await db[_col].update_one(
+                    {"section_id": doc["section_id"]},
+                    {"$set": {"enrolled": doc["enrolled"], "updated_at": now}},
+                )
 
         # If status is Dissolved, auto-write a marker into sections.remarks
         # so APO_CourseOfferings + OM_LoadAssignment can display it.
@@ -1333,8 +1360,10 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
             _id = ObjectId(rid)
         except Exception:
             raise HTTPException(status_code=400, detail="Invalid retention_id")
+        existing = await db[COL_CLASS_RETENTION].find_one({"_id": _id}, {"_id": 0, "section_id": 1}) or {}
         await db[COL_CLASS_RETENTION].delete_one({"_id": _id})
         await _delete_generated_special_class_from_retention(str(rid))
+        await _ensure_section_remarks_tag(str(existing.get("section_id") or ""), "", datetime.utcnow())
         return {"ok": True}
 
     if action == "forward":

@@ -1738,6 +1738,8 @@ export default function OM_SpecialClass({
         remarks: draft.remarks,
       };
 
+      const statusOnlySave = draft.status === "Rejected" || draft.status === "Convert to Regular Class";
+
       if (didClearAll) {
         payload.section_id = "";
         payload.section_code = "";
@@ -1748,7 +1750,7 @@ export default function OM_SpecialClass({
         payload.day2 = "";
         payload.begin2 = "";
         payload.end2 = "";
-      } else {
+      } else if (!statusOnlySave) {
         const hasMeeting1 = !!draft.day1 && !!draft.begin1 && !!draft.end1;
         const hasAnyMeeting2 = !!draft.day2 || !!draft.begin2 || !!draft.end2;
         const hasMeeting2 = !!draft.day2 && !!draft.begin2 && !!draft.end2;
