@@ -25,6 +25,7 @@ COL_CAMPUSES = "campuses"
 COL_USERS = "users"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_FAC_ASSIGN = "faculty_assignments"
+COL_SECTION_SCHEDULES = "section_schedules"
 COL_PREEN_COUNT = "preenlistment_count" 
 COL_SPECIAL = "special_class"
 
@@ -99,6 +100,40 @@ async def _ensure_section_remarks_tag(section_id: Optional[str], status: str, no
     await _sync_collection(COL_SECTIONS_SUBMITTED)
 
 
+async def _binding_from_section(section_id: str) -> Dict[str, Optional[str]]:
+    sid = str(section_id or "").strip()
+    if not sid:
+        return {"assignment_id": None, "schedule_id1": None, "schedule_id2": None}
+
+    assignment_id = None
+    rows = await (
+        db[COL_FAC_ASSIGN]
+        .find(
+            {"section_id": sid, "is_archived": {"$ne": True}},
+            {"_id": 0, "assignment_id": 1},
+        )
+        .sort([("created_at", -1), ("assignment_id", -1)])
+        .limit(1)
+        .to_list(1)
+    )
+    if rows:
+        assignment_id = rows[0].get("assignment_id") or None
+
+    sched_rows = await (
+        db[COL_SECTION_SCHEDULES]
+        .find({"section_id": sid}, {"_id": 0, "schedule_id": 1})
+        .sort("schedule_id", ASCENDING)
+        .to_list(10)
+    )
+    sched_ids = [r.get("schedule_id") for r in sched_rows if r.get("schedule_id")]
+
+    return {
+        "assignment_id": assignment_id,
+        "schedule_id1": sched_ids[0] if len(sched_ids) >= 1 else None,
+        "schedule_id2": sched_ids[1] if len(sched_ids) >= 2 else None,
+    }
+
+
 async def _upsert_generated_special_class_from_retention(
     *,
     retention_id: str,
@@ -130,6 +165,7 @@ async def _upsert_generated_special_class_from_retention(
     dept_id = str(course.get("department_id") or "").strip()
 
     special_id = f"CRSC{rid.upper()}"
+    binding = await _binding_from_section(section_id)
 
     await db[COL_SPECIAL].update_one(
         {"generated_from_class_retention": True, "retention_id": rid},
@@ -143,6 +179,10 @@ async def _upsert_generated_special_class_from_retention(
                 "generated_from_class_retention": True,
                 "retention_id": rid,
                 "generated_source_status": "Convert to Special Class",
+                "assignment_id": binding.get("assignment_id"),
+                "schedule_id1": binding.get("schedule_id1"),
+                "schedule_id2": binding.get("schedule_id2"),
+                "schedule_cleared": False,
             },
             "$setOnInsert": {
                 "special_id": special_id,
@@ -155,9 +195,9 @@ async def _upsert_generated_special_class_from_retention(
                 "remarks": "",
                 "submitted_at": now,
                 "created_at": now,
-                "assignment_id": None,
-                "schedule_id1": None,
-                "schedule_id2": None,
+                "assignment_id": binding.get("assignment_id"),
+                "schedule_id1": binding.get("schedule_id1"),
+                "schedule_id2": binding.get("schedule_id2"),
                 "schedule_cleared": False,
             },
         },

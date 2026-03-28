@@ -2264,6 +2264,8 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
         dept_id = _safe_str(course.get("department_id"))
         now = datetime.utcnow()
         generated_special_id = f"CRSC{rid.upper()}"
+        fa = await _latest_faculty_assignment_for_section(section_id) if section_id else {"assignment_id": None}
+        sid1, sid2 = await _schedule_ids_for_section(section_id) if section_id else (None, None)
         base_set = {
             "term_id": term_id,
             "course_id": course_id,
@@ -2274,6 +2276,9 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
             "generated_from_class_retention": True,
             "retention_id": rid,
             "generated_source_status": "Convert to Special Class",
+            "assignment_id": fa.get("assignment_id"),
+            "schedule_id1": sid1,
+            "schedule_id2": sid2,
             "schedule_cleared": False,
         }
         existing = await db[COL_SPECIAL].find_one(
@@ -2302,9 +2307,6 @@ async def _sync_generated_special_classes_from_retention(term_id: str) -> None:
                 "remarks": "",
                 "submitted_at": now,
                 "created_at": now,
-                "assignment_id": None,
-                "schedule_id1": None,
-                "schedule_id2": None,
                 **base_set,
             }
             try:

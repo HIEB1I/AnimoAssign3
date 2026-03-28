@@ -17,6 +17,7 @@ COL_COURSES = "courses"
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
 COL_ROOMS = "rooms"
+COL_SPECIAL = "special_class"
 
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
@@ -26,6 +27,32 @@ COL_USERS = "users"
 # ---------------- helpers ----------------
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _special_class_section_ids(term_id: str) -> set[str]:
+    tid = str(term_id or "").strip()
+    if not tid:
+        return set()
+    rows = await db[COL_SPECIAL].find({"term_id": tid}, {"_id": 0, "section_id": 1}).to_list(None)
+    return {str(r.get("section_id") or "").strip() for r in rows if str(r.get("section_id") or "").strip()}
+
+
+def _is_visible_regular_section(doc: Dict[str, Any], special_section_ids: set[str]) -> bool:
+    sid = str(doc.get("section_id") or "").strip()
+    remarks = str(doc.get("remarks") or "").upper()
+    status = str(doc.get("status") or "").strip().lower()
+    class_retention_status = str(doc.get("class_retention_status") or "").strip().lower()
+    if status == "archived":
+        return False
+    if sid and sid in special_section_ids:
+        return False
+    if "SPECIAL CLASS" in remarks or "DISSOLVED" in remarks:
+        return False
+    if bool(doc.get("is_dissolved")):
+        return False
+    if class_retention_status == "dissolved":
+        return False
+    return True
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -210,7 +237,8 @@ async def student_course_offerings(
             return {"ok": True, "term": term, "course": {"course_code": code}, "sections": []}
 
         # sections for course + term
-        sec_docs = await db[COL_SECTIONS].find(
+        special_section_ids = await _special_class_section_ids(term_id)
+        sec_docs_all = await db[COL_SECTIONS].find(
             {"term_id": term_id, "course_id": course["course_id"]},
             {
                 "_id": 0,
@@ -220,8 +248,11 @@ async def student_course_offerings(
                 "enrolled": 1,
                 "status": 1,
                 "remarks": 1,
+                "is_dissolved": 1,
+                "class_retention_status": 1,
             },
         ).sort([("section_code", 1)]).to_list(None)
+        sec_docs = [s for s in sec_docs_all if _is_visible_regular_section(s, special_section_ids)]
 
         section_ids = [s.get("section_id") for s in sec_docs if s.get("section_id")]
         if not section_ids:

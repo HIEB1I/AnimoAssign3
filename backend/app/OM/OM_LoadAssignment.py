@@ -4937,16 +4937,53 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     """Notify a faculty that a course is added to their final schedule."""
     user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
     faculty_id = payload.get("faculty_id")
-    course_code = payload.get("course_code") or payload.get("course")
+    requested_course_code = payload.get("course_code") or payload.get("course")
     section = payload.get("section")
     term_id = payload.get("term_id")
 
-    if not user_id or not faculty_id or not course_code or not section:
+    if not user_id or not faculty_id or not requested_course_code or not section:
         raise HTTPException(status_code=400, detail="user_id, faculty_id, course_code and section are required")
 
     if not term_id:
         active = await _active_term()
         term_id = (active or {}).get("term_id")
+
+    resolved_course_code = str(requested_course_code or "").strip()
+    section_id = ""
+    try:
+        sec_doc = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "section_code": section},
+            {"_id": 0, "section_id": 1, "course_id": 1, "course_code": 1, "course": 1},
+        )
+
+        if (not sec_doc) and resolved_course_code:
+            c = await db[COL_COURSES].find_one(
+                {"$or": [{"course_code": resolved_course_code}, {"course_code": [resolved_course_code]}]},
+                {"_id": 0, "course_id": 1},
+            )
+            cid = str((c or {}).get("course_id") or "").strip()
+            if cid:
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id, "course_id": cid, "section_code": section},
+                    {"_id": 0, "section_id": 1, "course_id": 1, "course_code": 1, "course": 1},
+                )
+
+        section_id = str((sec_doc or {}).get("section_id") or "").strip()
+        if sec_doc:
+            cc = sec_doc.get("course_code") or sec_doc.get("course") or ""
+            if isinstance(cc, list):
+                cc = cc[0] if cc else ""
+            resolved_course_code = str(cc or "").strip() or resolved_course_code
+
+            cid = str((sec_doc or {}).get("course_id") or "").strip()
+            if (not resolved_course_code) and cid:
+                cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                cc2 = cdoc.get("course_code") or ""
+                if isinstance(cc2, list):
+                    cc2 = cc2[0] if cc2 else ""
+                resolved_course_code = str(cc2 or "").strip() or resolved_course_code
+    except Exception:
+        section_id = ""
 
     fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
     fac_user_id = (fac.get("user_id") or "").strip()
@@ -4955,50 +4992,17 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         # Backfill missing users.gmail (some Faculty accounts only have users.email).
         await _ensure_user_gmail_address(fac_user_id, db)
 
-        # Best-effort: include the specific course + section in the notification body
-        # so both in-app and Gmail messages are self-contained.
-        course_code = ""
-        section_code = ""
-        course_section_line = ""
-        if section_id:
-            try:
-                sec = await db[COL_SECTIONS].find_one(
-                    {"section_id": section_id},
-                    {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
-                ) or {}
-
-                section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
-
-                cc = sec.get("course_code") or sec.get("course") or ""
-                if isinstance(cc, list):
-                    cc = cc[0] if cc else ""
-                course_code = str(cc or "").strip()
-
-                cid = str(sec.get("course_id") or "").strip()
-                if not course_code and cid:
-                    cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
-                    cc2 = cdoc.get("course_code") or ""
-                    if isinstance(cc2, list):
-                        cc2 = cc2[0] if cc2 else ""
-                    course_code = str(cc2 or "").strip()
-
-                if course_code or section_code:
-                    label = " – ".join([p for p in [course_code, section_code] if p])
-                    course_section_line = f"Course/Section: {label}\n\n"
-            except Exception:
-                course_section_line = ""
-
         # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title="Load Assignment: Added to final schedule",
-            details=f"{course_code} – {section} has been added to your final schedule.",
+            details=f"{resolved_course_code} – {section} has been added to your final schedule.",
             meta={
                 "route": "/faculty/overview",
                 "kind": "load_course_finalized",
                 "term_id": term_id,
                 "faculty_id": faculty_id,
-                "course_code": course_code,
+                "course_code": resolved_course_code,
                 "section": section,
             },
             send_email=True,
@@ -5010,7 +5014,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": faculty_id, "term_id": term_id},
             {
-                "$addToSet": {"finalized": {"course_code": course_code, "section": section}},
+                "$addToSet": {"finalized": {"course_code": resolved_course_code, "section": section}},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
                 "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
             },
@@ -5019,7 +5023,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": faculty_id, "term_id": term_id},
             {"$set": {"rows.$[r].finalized": True}},
-            array_filters=[{"r.course": course_code, "r.section": section}],
+            array_filters=[{"r.course": resolved_course_code, "r.section": section}],
         )
     except Exception:
         pass
@@ -5030,7 +5034,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
             om_user_id=user_id,
             term_id=term_id,
             faculty_id=faculty_id,
-            course_code=course_code,
+            course_code=resolved_course_code,
             section_code=section,
         )
     except Exception:
@@ -5046,9 +5050,9 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         )
 
         # If section_code isn't unique across campuses, narrow by course_code when possible.
-        if (not sec_doc) and course_code:
+        if (not sec_doc) and resolved_course_code:
             c = await db[COL_COURSES].find_one(
-                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                {"$or": [{"course_code": resolved_course_code}, {"course_code": [resolved_course_code]}]},
                 {"_id": 0, "course_id": 1},
             )
             cid = (c or {}).get("course_id")
@@ -5110,13 +5114,13 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
                 await create_notification(
                     user_id=user_id,
                     title="Load Assignment Approved",
-                    details=f"{course_code} – {section} is approved and ready for room allocation.",
+                    details=f"{resolved_course_code} – {section} is approved and ready for room allocation.",
                     meta={
                         "route": "/om/load-assignment",
                         "kind": "om_load_approved",
                         "term_id": term_id,
                         "section_id": section_id,
-                        "course_code": course_code,
+                        "course_code": resolved_course_code,
                         "section_code": section,
                     },
                     send_email=True,
@@ -5127,7 +5131,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     except Exception:
         pass
 
-    return {"ok": True, "course_code": course_code, "section": section}
+    return {"ok": True, "course_code": resolved_course_code, "section": section}
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(

@@ -4733,7 +4733,12 @@ async def get_course_offerings(
         def _resolve_faculty_id(r: Dict[str, Any]) -> str:
             asg_id = _s(r.get("assignment_id"))
             if asg_id:
-                return _s((asg_map.get(asg_id) or {}).get("faculty_id"))
+                fid = _s((asg_map.get(asg_id) or {}).get("faculty_id"))
+                if fid:
+                    return fid
+            sid = _resolve_section_id_best(r)
+            if sid:
+                return _s((sec_assignment_map.get(sid) or {}).get("faculty_id"))
             return ""
 
         # Collect section_ids from either row.section_id OR assignment.section_id
@@ -4841,6 +4846,44 @@ async def get_course_offerings(
             sid = _resolve_section_id_best(r)
             if sid:
                 section_ids.add(sid)
+
+        # Fallback for generated Class Retention special-class rows: they may carry only section_id.
+        # Resolve the latest non-archived faculty assignment from section_id so APO Special Class can
+        # still display the inherited faculty even when special_class.assignment_id was not stored yet.
+        sec_assignment_map: Dict[str, Dict[str, str]] = {}
+        if section_ids:
+            async for a in db[COL_FAC_ASSIGN].find(
+                {"section_id": {"$in": sorted(section_ids)}, "is_archived": {"$ne": True}},
+                {"_id": 0, "section_id": 1, "faculty_id": 1, "assignment_id": 1, "created_at": 1},
+            ).sort([("created_at", -1), ("assignment_id", -1)]):
+                sec_id = _s(a.get("section_id"))
+                if not sec_id or sec_id in sec_assignment_map:
+                    continue
+                fac_id = _s(a.get("faculty_id"))
+                asg_id = _s(a.get("assignment_id"))
+                sec_assignment_map[sec_id] = {"faculty_id": fac_id, "assignment_id": asg_id}
+                if fac_id:
+                    faculty_ids.add(fac_id)
+
+            missing_faculty_ids = sorted(fid for fid in faculty_ids if fid and fid not in fac_profile_map)
+            if missing_faculty_ids:
+                new_fac_user_ids: set[str] = set()
+                async for fp in db[COL_FAC_PROFILES].find(
+                    {"faculty_id": {"$in": missing_faculty_ids}},
+                    {"_id": 0, "faculty_id": 1, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+                ):
+                    fid = _s(fp.get("faculty_id"))
+                    fac_profile_map[fid] = fp
+                    uid = _s(fp.get("user_id"))
+                    if uid and uid not in user_map:
+                        new_fac_user_ids.add(uid)
+
+                if new_fac_user_ids:
+                    async for u in db[COL_USERS].find(
+                        {"user_id": {"$in": sorted(new_fac_user_ids)}},
+                        {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+                    ):
+                        user_map[_s(u.get("user_id"))] = u
 
         # section_id -> section_code + remarks + enrollment_cap + OM approval flags
         sec_map: Dict[str, str] = {}
@@ -5060,6 +5103,10 @@ async def get_course_offerings(
                     r["section_code"] = sec_map.get(sid, "")
                 if "section_remarks" not in r:
                     r["section_remarks"] = sec_remarks_map.get(sid, "")
+                if not _s(r.get("assignment_id")):
+                    fallback_asg = _s((sec_assignment_map.get(sid) or {}).get("assignment_id"))
+                    if fallback_asg:
+                        r["assignment_id"] = fallback_asg
 
                 # OM approval / room readiness flags
                 r["om_approved"] = bool(sec_om_approved_map.get(sid, False))
