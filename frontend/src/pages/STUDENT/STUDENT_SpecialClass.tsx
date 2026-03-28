@@ -25,6 +25,8 @@ type ProfileData = {
   last_name: string;
   student_number: string;
   program_code?: string;
+  lock_student_number?: boolean;
+  lock_degree?: boolean;
 };
 
 type UserData = { userId: string; fullName: string; roles?: string[] };
@@ -683,9 +685,11 @@ export default function STUDENT_SpecialClass() {
 
         if (prof && prof.ok) {
           setProfile(prof);
-          if (prof.program_code) {
-            setForm((prev) => ({ ...prev, degree: prof.program_code || prev.degree }));
-          }
+          setForm((prev) => ({
+            ...prev,
+            degree: prof.program_code || prev.degree,
+            studentNumber: prof.student_number || prev.studentNumber,
+          }));
         } else {
           setProfile({ ok: false, first_name: "", last_name: "", student_number: "" });
         }
@@ -696,6 +700,9 @@ export default function STUDENT_SpecialClass() {
       }
     })();
   }, [userId]);
+
+  const studentNumberLocked = !!profile?.lock_student_number;
+  const degreeLocked = !!profile?.lock_degree;
 
   // Build a quick lookup: courseCode -> details (for autofill)
   const courseMap = useMemo(() => {
@@ -879,10 +886,11 @@ export default function STUDENT_SpecialClass() {
 
       if (res?.ok && res?.application) {
         setApplications((prev) => [res.application as StudentSpecialClassView, ...prev]);
+        setProfile((prev) => prev ? ({ ...prev, student_number: form.studentNumber || prev.student_number, program_code: form.degree || prev.program_code, lock_student_number: true, lock_degree: true }) : prev);
 
         setForm((prev) => ({
           ...prev,
-          studentNumber: "",
+          studentNumber: prev.studentNumber,
           unitsRemaining: "",
           graduatingAfterTerm: "",
           courseCode: "",
@@ -989,7 +997,7 @@ export default function STUDENT_SpecialClass() {
                         const onlyDigits = e.target.value.replace(/\D/g, "").slice(0, 8);
                         setForm((prev) => ({ ...prev, studentNumber: onlyDigits }));
                       }}
-                      disabled={editingLocked || submitting}
+                      disabled={editingLocked || submitting || studentNumberLocked}
                       placeholder="Enter 8-digit ID number"
                       className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                     />
@@ -1004,7 +1012,7 @@ export default function STUDENT_SpecialClass() {
                       onChange={(v) => setForm((prev) => ({ ...prev, degree: v }))}
                       options={options.programs.map((p) => p.program_code)}
                       placeholder="-- Select Degree Program --"
-                      disabled={editingLocked || submitting}
+                      disabled={editingLocked || submitting || degreeLocked}
                     />
                   </div>
                 </div>

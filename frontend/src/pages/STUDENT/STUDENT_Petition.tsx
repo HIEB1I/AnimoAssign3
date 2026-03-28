@@ -22,6 +22,8 @@ type ProfileData = {
   last_name: string;
   student_number: string;
   program_code?: string;
+  lock_student_number?: boolean;
+  lock_degree?: boolean;
 };
 
 type UserData = { userId: string; fullName: string; roles?: string[] };
@@ -238,7 +240,11 @@ export default function STUDENT_Petition() {
         setPetitions((pet?.petitions || []) as PetitionView[]);
         if (prof && prof.ok) {
           setProfile(prof);
-          setForm((prev) => ({ ...prev, degree: prof.program_code || prev.degree }));
+          setForm((prev) => ({
+            ...prev,
+            degree: prof.program_code || prev.degree,
+            studentNumber: prof.student_number || prev.studentNumber,
+          }));
         } else {
           setProfile({ ok: false, first_name: "", last_name: "", student_number: "" });
         }
@@ -254,6 +260,9 @@ export default function STUDENT_Petition() {
     if (!form.department) return [];
     return options.courses.filter((c) => c.dept_name === form.department).map((c) => c.course_code);
   }, [options.courses, form.department]);
+
+  const studentNumberLocked = !!profile?.lock_student_number;
+  const degreeLocked = !!profile?.lock_degree;
 
   const handleSubmit = async () => {
     if (!userId) {
@@ -278,7 +287,8 @@ export default function STUDENT_Petition() {
       const res = await submitStudentPetition(userId, form as PetitionSubmitPayload);
       if (res?.ok && res?.petition) {
         setPetitions((prev) => [res.petition as PetitionView, ...prev]);
-        setForm((prev) => ({ ...prev, department: "", courseCode: "", reason: "" }));
+        setProfile((prev) => prev ? ({ ...prev, student_number: form.studentNumber || prev.student_number, program_code: form.degree || prev.program_code, lock_student_number: true, lock_degree: true }) : prev);
+        setForm((prev) => ({ ...prev, department: "", courseCode: "", reason: "", studentNumber: prev.studentNumber, degree: prev.degree }));
       } else {
         throw new Error("Submission failed.");
       }
@@ -362,7 +372,7 @@ export default function STUDENT_Petition() {
                       const onlyDigits = e.target.value.replace(/\D/g, "").slice(0, 8);
                       setForm((prev) => ({ ...prev, studentNumber: onlyDigits }));
                     }}
-                    disabled={editingLocked || submitting}
+                    disabled={editingLocked || submitting || studentNumberLocked}
                     placeholder="Enter 8-digit student number"
                     className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                   />
@@ -375,7 +385,7 @@ export default function STUDENT_Petition() {
                     onChange={(v) => setForm((prev) => ({ ...prev, degree: v }))}
                     options={options.programs.map((p) => p.program_code)}
                     placeholder="-- Select Degree Program --"
-                    disabled={editingLocked || submitting}
+                    disabled={editingLocked || submitting || degreeLocked}
                   />
                 </div>
 

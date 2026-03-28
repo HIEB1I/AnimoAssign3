@@ -1936,7 +1936,7 @@ export async function getStudentOptions(userId: string): Promise<StudentOptions>
 }
 
 export async function getStudentProfile(userId: string): Promise<{
-  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string;
+  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string; lock_student_number?: boolean; lock_degree?: boolean;
 }> {
   const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "profile" },
@@ -2062,7 +2062,7 @@ export async function getStudentSpecialClassOptions(userId: string): Promise<Spe
 
 export async function getStudentSpecialClassProfile(
   userId: string
-): Promise<{ ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string }> {
+): Promise<{ ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string; lock_student_number?: boolean; lock_degree?: boolean }> {
   const { data } = await axios.post(
     `${API_BASE}/student/specialclass`,
     {},

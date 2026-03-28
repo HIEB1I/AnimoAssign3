@@ -19,10 +19,57 @@ COL_CURRICULUM = "curriculum"
 COL_ADMIN = "student_petitions_admin"      # optional, used by OM to pin status/remarks
 COL_PREEN_COUNT = "preenlistment_count" 
 COL_PETITION_WINDOWS = "student_petition_windows"
+COL_SPECIAL = "special_class"
 # ---------------- helpers ----------------
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+async def _resolve_student_identity(user_id: str) -> Dict[str, Any]:
+    user = await db[COL_USERS].find_one(
+        {"user_id": user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
+    ) or {}
+
+    first_name = str(user.get("first_name") or "")
+    last_name = str(user.get("last_name") or "")
+    student_number = str(user.get("student_number") or "").strip()
+    program_id = str(user.get("program_id") or "").strip()
+
+    async def _latest_identity(coll: str, id_field: str) -> Dict[str, Any]:
+        return await db[coll].find_one(
+            {"user_id": user_id, id_field: {"$exists": True}},
+            sort=[("submitted_at", -1)],
+            projection={"_id": 0, "student_number": 1, "program_id": 1},
+        ) or {}
+
+    for coll, id_field in ((COL_PETITIONS, "petition_id"), (COL_SPECIAL, "special_id")):
+        if student_number and program_id:
+            break
+        prev = await _latest_identity(coll, id_field)
+        if not student_number and prev.get("student_number") is not None:
+            student_number = str(prev.get("student_number") or "").strip()
+        if not program_id and prev.get("program_id"):
+            program_id = str(prev.get("program_id") or "").strip()
+
+    program_code = ""
+    if program_id:
+        prog = await db[COL_PROGRAMS].find_one(
+            {"program_id": program_id},
+            {"_id": 0, "program_code": 1},
+        ) or {}
+        program_code = str(prog.get("program_code") or "").strip()
+
+    return {
+        "ok": bool(user),
+        "first_name": first_name,
+        "last_name": last_name,
+        "student_number": student_number,
+        "program_id": program_id,
+        "program_code": program_code,
+        "lock_student_number": bool(student_number),
+        "lock_degree": bool(program_code),
+    }
 
 async def _active_term() -> Dict[str, Any]:
     """
@@ -302,17 +349,7 @@ async def petition_handler(
 
     # ---------- PROFILE ----------
     if action == "profile":
-        u = await db[COL_USERS].find_one(
-            {"user_id": userId},
-            {"_id": 0, "first_name": 1, "last_name": 1},
-        )
-        return {
-            "ok": bool(u),
-            "first_name": (u or {}).get("first_name", ""),
-            "last_name": (u or {}).get("last_name", ""),
-            "student_number": "",
-            "program_code": "",
-        }
+        return await _resolve_student_identity(userId)
 
     # ---------- OPTIONS ----------
     if action == "options":
@@ -406,34 +443,38 @@ async def petition_handler(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
-        # Required fields
-        for k in ["department", "courseCode", "reason", "studentNumber", "degree"]:
-            if not str(payload.get(k) or "").strip():
-                raise HTTPException(status_code=400, detail="All required fields must be filled.")
+        identity = await _resolve_student_identity(userId)
+        department = str(payload.get("department") or "").strip()
+        course_code = str(payload.get("courseCode") or "").strip()
+        reason_value = str(payload.get("reason") or "").strip()
+        sn = str(identity.get("student_number") or payload.get("studentNumber") or "").strip()
+        degree_code = str(identity.get("program_code") or payload.get("degree") or "").strip()
+
+        if not department or not course_code or not reason_value or not sn or not degree_code:
+            raise HTTPException(status_code=400, detail="All required fields must be filled.")
 
         # Student number guard
-        sn = str(payload["studentNumber"]).strip()
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
         # Config + reason validation
         cfg = await _get_petition_config()
-        if payload["reason"] not in set(cfg.get("reasons", [])):
+        if reason_value not in set(cfg.get("reasons", [])):
             raise HTTPException(status_code=400, detail="Invalid reason value.")
         statuses: List[str] = cfg.get("statuses", [])
         initial_status = next((s for s in statuses if s.lower().startswith("forwarded")),
                               (statuses[0] if statuses else "PENDING"))
 
         # Resolve entities
-        prog = await _get_program_by_code(str(payload["degree"]).strip())
+        prog = await _get_program_by_code(degree_code)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")
 
-        dept = await _get_department_by_name(str(payload["department"]).strip())
+        dept = await _get_department_by_name(department)
         if not dept:
             raise HTTPException(status_code=400, detail="Selected department not found.")
 
-        course = await _find_course_by_code(str(payload["courseCode"]).strip())
+        course = await _find_course_by_code(course_code)
         if not course:
             raise HTTPException(status_code=400, detail="Course code not found.")
 
@@ -504,7 +545,7 @@ async def petition_handler(
             "department_id": dept["department_id"],
             "course_id": course["course_id"],
             "student_number": int(sn),          # change to 'sn' (string) if your schema needs string
-            "reason": payload["reason"],
+            "reason": reason_value,
             "status": inherited_status,
             "remarks": inherited_remarks,
             "submitted_at": _now_dt(),
@@ -519,7 +560,7 @@ async def petition_handler(
             "course_id": course["course_id"],
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
-            "reason": payload["reason"],
+            "reason": reason_value,
             "status": doc["status"],
             "remarks": doc["remarks"],
             "submitted_at": doc["submitted_at"],

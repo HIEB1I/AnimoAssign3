@@ -26,6 +26,7 @@ COL_PROGRAMS = "programs"
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
 COL_SPECIAL_WINDOWS = "specialclass_windows"
+COL_PETITIONS = "student_petitions"
 
 SPECIAL_EAF_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads" / "specialclass_eaf"
 SPECIAL_EAF_MAX_BYTES = 5 * 1024 * 1024
@@ -54,6 +55,52 @@ def _upper_name(first: str, last: str) -> str:
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+async def _resolve_student_identity(user_id: str) -> Dict[str, Any]:
+    user = await db[COL_USERS].find_one(
+        {"user_id": user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
+    ) or {}
+
+    first_name = str(user.get("first_name") or "")
+    last_name = str(user.get("last_name") or "")
+    student_number = str(user.get("student_number") or "").strip()
+    program_id = str(user.get("program_id") or "").strip()
+
+    async def _latest_identity(coll: str, id_field: str) -> Dict[str, Any]:
+        return await db[coll].find_one(
+            {"user_id": user_id, id_field: {"$exists": True}},
+            sort=[("submitted_at", -1)],
+            projection={"_id": 0, "student_number": 1, "program_id": 1},
+        ) or {}
+
+    for coll, id_field in ((COL_SPECIAL, "special_id"), (COL_PETITIONS, "petition_id")):
+        if student_number and program_id:
+            break
+        prev = await _latest_identity(coll, id_field)
+        if not student_number and prev.get("student_number") is not None:
+            student_number = str(prev.get("student_number") or "").strip()
+        if not program_id and prev.get("program_id"):
+            program_id = str(prev.get("program_id") or "").strip()
+
+    program_code = ""
+    if program_id:
+        prog = await db[COL_PROGRAMS].find_one(
+            {"program_id": program_id},
+            {"_id": 0, "program_code": 1},
+        ) or {}
+        program_code = str(prog.get("program_code") or "").strip()
+
+    return {
+        "ok": bool(user),
+        "first_name": first_name,
+        "last_name": last_name,
+        "student_number": student_number,
+        "program_id": program_id,
+        "program_code": program_code,
+        "lock_student_number": bool(student_number),
+        "lock_degree": bool(program_code),
+    }
 
 async def _active_term() -> Dict[str, Any]:
     """
@@ -955,25 +1002,7 @@ async def special_class_handler(
 
     # ---------- PROFILE ----------
     if action == "profile":
-        u = await db[COL_USERS].find_one(
-            {"user_id": userId},
-            {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
-        )
-        program_code = ""
-        if u and u.get("program_id"):
-            p = await db[COL_PROGRAMS].find_one(
-                {"program_id": u["program_id"]},
-                {"_id": 0, "program_code": 1},
-            )
-            program_code = (p or {}).get("program_code", "") or ""
-
-        return {
-            "ok": bool(u),
-            "first_name": (u or {}).get("first_name", ""),
-            "last_name": (u or {}).get("last_name", ""),
-            "student_number": str((u or {}).get("student_number", "") or ""),
-            "program_code": program_code,
-        }
+        return await _resolve_student_identity(userId)
 
     # ---------- OPTIONS ----------
     if action == "options":
@@ -1074,9 +1103,11 @@ async def special_class_handler(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
+        identity = await _resolve_student_identity(userId)
+        sn = str(identity.get("student_number") or payload.get("studentNumber") or "").strip()
+        degree = str(identity.get("program_code") or payload.get("degree") or "").strip()
+
         required = [
-            "studentNumber",
-            "degree",
             "unitsRemaining",
             "graduatingAfterTerm",
             "courseCode",
@@ -1088,8 +1119,9 @@ async def special_class_handler(
         for k in required:
             if payload.get(k) is None or str(payload.get(k)).strip() == "":
                 raise HTTPException(status_code=400, detail="All required fields must be filled.")
+        if not sn or not degree:
+            raise HTTPException(status_code=400, detail="All required fields must be filled.")
 
-        sn = str(payload["studentNumber"]).strip()
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
@@ -1102,7 +1134,6 @@ async def special_class_handler(
             str(payload.get("eafBase64") or ""),
         )
 
-        degree = str(payload["degree"]).strip()
         prog = await _get_program_by_code(degree)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")
