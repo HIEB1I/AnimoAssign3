@@ -6644,15 +6644,20 @@ const openChairPlantillaPreview = useCallback(() => {
       row: Row;
     };
 
+    const normalizeDay = (d?: string) => {
+      const s = (d || "").trim().toUpperCase();
+      return s === "TH" ? "H" : s;
+    };
+    
     const byKey: Record<string, Interval[]> = {};
-
+    
     rows.forEach((r) => {
       const facultyKey = r.faculty_id || r.faculty;
       if (!facultyKey) return;
       const facultyName = r.faculty || facultyKey;
       const facultyId = r.faculty_id;
-
-      const d1 = (r.day1 || "").trim();
+    
+      const d1 = normalizeDay(r.day1);
       const b1 = toMinutes(r.begin1);
       const e1 = toMinutes(r.end1);
       if (d1 && b1 != null && e1 != null && e1 > b1) {
@@ -6667,8 +6672,8 @@ const openChairPlantillaPreview = useCallback(() => {
           row: r,
         });
       }
-
-      const d2 = (r.day2 || "").trim();
+    
+      const d2 = normalizeDay(r.day2);
       const b2 = toMinutes(r.begin2);
       const e2 = toMinutes(r.end2);
       if (d2 && b2 != null && e2 != null && e2 > b2) {
@@ -6688,7 +6693,7 @@ const openChairPlantillaPreview = useCallback(() => {
     const MAX_CONSEC = 4 * 60 + 30; // 4.5 hours
     const GAP_TOL = 15; // minutes
 
-    // 2) For each faculty+day, detect 4.5h+ consecutive teaching streaks
+    // 2) For each faculty+day, detect 4.5h-or-more consecutive teaching streaks
     Object.entries(byKey).forEach(([key, arr]) => {
       if (arr.length === 0) return;
       arr.sort((a, b) => a.start - b.start);
@@ -6716,7 +6721,7 @@ const openChairPlantillaPreview = useCallback(() => {
           streakIntervals = [iv];
         }
 
-        if (streakTeach > MAX_CONSEC) {
+        if (streakTeach >= MAX_CONSEC) {
           const sample = streakIntervals[0];
           const facultyName = sample.facultyName;
           const facultyId = sample.facultyId;
