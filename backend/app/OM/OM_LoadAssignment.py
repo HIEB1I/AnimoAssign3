@@ -7022,12 +7022,16 @@ def _streak_ok_for_day(
     gap_tol: int = MAX_GAP_FOR_STREAK,
 ) -> bool:
     """
-    Ensure that, on a single day, the total length of a 'teaching streak'
-    (blocks separated by <= gap_tol minutes) never exceeds max_minutes.
+    Ensure that, on a single day, the total length of a teaching streak
+    (blocks separated by <= gap_tol minutes) stays below max_minutes.
+
+    Rule:
+      4.5 hours (270 minutes) of consecutive teaching is already invalid.
 
     Example:
-      07:30–09:00, 09:15–10:45, 11:00–12:30 on the same day
-      → 3 x 90min = 270min teaching in a 5h window → REJECT when max_minutes=270.
+      07:30–09:00, 09:15–10:45, 11:00–12:30
+      -> 270 minutes total teaching with <=15-minute gaps
+      -> REJECT
     """
     intervals = [(s, e) for (s, e) in (existing + new_slots) if s >= 0 and e > s]
     if not intervals:
@@ -7042,11 +7046,9 @@ def _streak_ok_for_day(
         dur = en - st
 
         if gap <= gap_tol:
-            # extend current streak
             streak_end = en
             streak_teach += dur
         else:
-            # start a new streak
             streak_start, streak_end = st, en
             streak_teach = dur
 
