@@ -7677,13 +7677,23 @@ async def post_course_offerings(
         if shortage < 0:
             shortage = 0
 
+        # Frontend sends the visible shortage count from the Approval Required panel.
+        # Use it as a fallback because the recomputed pending list may temporarily miss
+        # the just-resolved course right after a delete/refresh cycle, which would
+        # otherwise store a suppression of 0 and cause the same prompt to remain visible.
+        requested_shortage = int(payload.get("keep_shortage_sections") or 0)
+        if requested_shortage < 0:
+            requested_shortage = 0
+
         if action == "planKeepCurrentIncrease":
             # Record suppression so this increase prompt stops appearing.
-            # Store the *current shortage*; future shortages larger than this will still prompt.
+            # Store the larger of the current recomputed shortage and the client-visible
+            # shortage so the exact item the user accepted is suppressed immediately.
+            effective_shortage = max(int(shortage or 0), int(requested_shortage or 0))
             plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
             sup = plan_state.get("increase_sections_suppression") or {}
             sup = {str(k): int(v or 0) for k, v in sup.items() if str(k).strip()}
-            sup[cid] = max(int(sup.get(cid, 0) or 0), int(shortage or 0))
+            sup[cid] = max(int(sup.get(cid, 0) or 0), int(effective_shortage or 0))
             await db[COL_PLANSTATE].update_one(
                 {"term_id": term_id, "campus_id": campus_id},
                 {"$set": {
@@ -7694,7 +7704,7 @@ async def post_course_offerings(
                 }},
                 upsert=True,
             )
-            return {"ok": True, "suppressed": int(shortage or 0)}
+            return {"ok": True, "suppressed": int(effective_shortage or 0)}
 
         # action == planApplyIncrease
         if not inc_item or shortage <= 0:
