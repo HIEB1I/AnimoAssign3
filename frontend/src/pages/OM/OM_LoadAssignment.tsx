@@ -1599,42 +1599,73 @@ function checkTimeMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
   const prefs = ctx.facultyPrefWindows[fid] || [];
   if (!prefs.length) return null;
 
+  const normalizeDay = (d?: string) => {
+    const s = (d || "").trim().toUpperCase();
+    return s === "TH" ? "H" : s;
+  };
+
   const toMin = (t?: string): number | null => {
     if (!t) return null;
     const s = t.trim();
-    const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
-    const mm = s.slice(-2);
-    const h = Number(hh);
-    const m = Number(mm);
+
+    if (s.includes(":")) {
+      const [hh, mm] = s.split(":");
+      const h = Number(hh);
+      const m = Number(mm);
+      if (Number.isNaN(h) || Number.isNaN(m)) return null;
+      return h * 60 + m;
+    }
+
+    const digits = s.replace(/\D/g, "");
+    if (!digits) return null;
+
+    const padded = digits.length === 3 ? `0${digits}` : digits;
+    if (padded.length !== 4) return null;
+
+    const h = Number(padded.slice(0, 2));
+    const m = Number(padded.slice(2));
     if (Number.isNaN(h) || Number.isNaN(m)) return null;
+
     return h * 60 + m;
   };
 
-  type Meet = { day: string; b: number; e: number };
+  type Meet = { day: string; b: number; e: number; label: string };
   const meets: Meet[] = [];
 
   const add = (d?: string, b?: string, e?: string) => {
-    const day = (d || "").toUpperCase();
+    const day = normalizeDay(d);
     const bb = toMin(b);
     const ee = toMin(e);
     if (!day || bb == null || ee == null || ee <= bb) return;
-    meets.push({ day, b: bb, e: ee });
+    meets.push({ day, b: bb, e: ee, label: `${b}-${e}` });
   };
 
   add(row.day1, row.begin1, row.end1);
   add(row.day2, row.begin2, row.end2);
 
   for (const m of meets) {
-    const sameDayPrefs = prefs.filter((p) => p.day === m.day);
-    if (!sameDayPrefs.length) continue; // day mismatch covered separately
+    const sameDayPrefs = prefs.filter((p) => normalizeDay(p.day) === m.day);
 
-    const ok = sameDayPrefs.some((p) => p.begin <= m.b && p.end >= m.e);
+    // First: normal same-day check
+    if (sameDayPrefs.length) {
+      const okSameDay = sameDayPrefs.some((p) => p.begin <= m.b && p.end >= m.e);
+      if (!okSameDay) {
+        return {
+          type: "TIME_MISMATCH",
+          severity: "warning",
+          message: `Time ${m.day} ${m.label} is outside preferred windows.`,
+        };
+      }
+      continue;
+    }
 
-    if (!ok) {
+    // Second: if no same-day prefs exist, still check if this time fits ANY preferred window at all
+    const okAnyDayTime = prefs.some((p) => p.begin <= m.b && p.end >= m.e);
+    if (!okAnyDayTime) {
       return {
         type: "TIME_MISMATCH",
         severity: "warning",
-        message: `Time ${m.day} ${row.begin1}-${row.end1} is outside preferred windows.`,
+        message: `Time ${m.day} ${m.label} is outside all preferred time windows.`,
       };
     }
   }

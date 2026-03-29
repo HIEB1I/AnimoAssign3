@@ -3436,6 +3436,8 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         windows: list[dict] = []
         for d in days:
             d_str = str(d or "").strip().upper()
+            if d_str == "TH":
+                d_str = "H"
             if not d_str:
                 continue
             for t in times:
@@ -7137,14 +7139,25 @@ def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
     if avail:
         allowed: set[int] = set()
         for d in avail:
-            if not d: continue
-            k = d[0].upper()
-            if k == "M": allowed.add(1)
-            elif k == "T": allowed.add(2)
-            elif k == "W": allowed.add(3)
-            elif k in ("H","T","TH"): allowed.add(4)
-            elif k == "F": allowed.add(5)
-            elif k == "S": allowed.add(6)
+            if not d:
+                continue
+
+            s = str(d).strip().upper()
+            if s == "TH":
+                s = "H"
+
+            if s == "M":
+                allowed.add(1)
+            elif s == "T":
+                allowed.add(2)
+            elif s == "W":
+                allowed.add(3)
+            elif s == "H":
+                allowed.add(4)
+            elif s == "F":
+                allowed.add(5)
+            elif s == "S":
+                allowed.add(6)
 
         if di not in allowed:
             # print(f"DEBUG-PREF: Day {di} not in availability_days {avail} → REJECT")
@@ -9992,6 +10005,8 @@ def _aa_pref_days(pref: dict | None) -> list[str]:
     vals = []
     for d in ((pref or {}).get("availability_days") or []):
         s = str(d or "").strip().upper()
+        if s == "TH":
+            s = "H"
         if s:
             vals.append(s)
     return vals
