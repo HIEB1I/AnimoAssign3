@@ -174,7 +174,7 @@ function TextBox({
 }
 
 const STATUS_PILL: Record<string, string> = {
-  "Less Than Minimum": "bg-amber-100 text-amber-800",
+  "Less Than Minimum": "bg-gray-200 text-gray-700",
   "Forwarded To Department": "bg-amber-50 text-amber-800",
   Rejected: "bg-red-100 text-red-800",
   "Wait For Frosh Block": "bg-purple-100 text-purple-800",

@@ -153,6 +153,56 @@ def _parse_date_any(dt):
     return parsed.astimezone(timezone.utc)
 
 
+def _effective_petition_status(raw_status: Any, petition_count: Any) -> str:
+    count = int(petition_count or 0)
+    raw = str(raw_status or "").strip()
+    threshold_managed_statuses = {"", "Less Than Minimum", "Forwarded To Department"}
+    if raw in threshold_managed_statuses:
+        return "Forwarded To Department" if count >= 15 else "Less Than Minimum"
+    return raw
+
+
+async def _effective_petition_status_map(pairs: List[Dict[str, str]]) -> Dict[tuple, str]:
+    normalized_pairs: List[Dict[str, str]] = []
+    seen = set()
+    for pair in pairs or []:
+        term_id = str((pair or {}).get("term_id") or "").strip()
+        course_id = str((pair or {}).get("course_id") or "").strip()
+        if not term_id or not course_id:
+            continue
+        key = (term_id, course_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_pairs.append({"term_id": term_id, "course_id": course_id})
+
+    if not normalized_pairs:
+        return {}
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {
+            "petition_id": {"$exists": True},
+            "$or": normalized_pairs,
+        }},
+        {"$sort": {"submitted_at": 1}},
+        {"$group": {
+            "_id": {"term_id": "$term_id", "course_id": "$course_id"},
+            "count": {"$sum": 1},
+            "last_status": {"$last": "$status"},
+        }},
+    ]
+
+    rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
+    status_map: Dict[tuple, str] = {}
+    for row in rows:
+        key_doc = row.get("_id") or {}
+        key = (str(key_doc.get("term_id") or "").strip(), str(key_doc.get("course_id") or "").strip())
+        if not key[0] or not key[1]:
+            continue
+        status_map[key] = _effective_petition_status(row.get("last_status"), row.get("count"))
+    return status_map
+
+
 async def _petition_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
     term = term or {}
     term_id = term.get("term_id")
@@ -322,10 +372,16 @@ async def petition_handler(
             {"$sort": {"submitted_at": -1}},
         ]
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
+        effective_status_map = await _effective_petition_status_map([
+            {"term_id": r.get("term_id"), "course_id": r.get("course_id")}
+            for r in rows
+        ])
 
         # Make a flat, UI-friendly shape
         def to_view(r: Dict[str, Any]) -> Dict[str, Any]:
             ay = r.get("terms", {}).get("acad_year_start")
+            pair_key = (str(r.get("term_id") or "").strip(), str(r.get("course_id") or "").strip())
+            effective_status = effective_status_map.get(pair_key, r.get("status", ""))
             return {
                 "petition_id": r.get("petition_id", ""),
                 "user_id": r.get("user_id", ""),
@@ -333,7 +389,7 @@ async def petition_handler(
                 "course_code": r.get("courses", {}).get("course_code", ""),
                 "course_title": r.get("courses", {}).get("course_title", ""),
                 "reason": r.get("reason", ""),
-                "status": r.get("status", ""),
+                "status": effective_status,
                 "remarks": r.get("remarks", ""),
                 "submitted_at": r.get("submitted_at"),
                 "acad_year_start": ay,
@@ -552,6 +608,12 @@ async def petition_handler(
         }
 
         await db[COL_PETITIONS].insert_one(doc)
+        post_submit_count = await db[COL_PETITIONS].count_documents({
+            "term_id": term_id,
+            "course_id": course["course_id"],
+            "petition_id": {"$exists": True},
+        })
+        effective_response_status = _effective_petition_status(doc["status"], post_submit_count)
 
         # Response (fast projection)
         return {"ok": True, "petition": {
@@ -561,7 +623,7 @@ async def petition_handler(
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
             "reason": reason_value,
-            "status": doc["status"],
+            "status": effective_response_status,
             "remarks": doc["remarks"],
             "submitted_at": doc["submitted_at"],
             "acad_year_start": active_term.get("acad_year_start"),
