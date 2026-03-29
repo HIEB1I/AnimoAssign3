@@ -128,13 +128,35 @@ async def _sync_regularized_special_sections(term_id: str) -> None:
 
     rows = await db[COL_SPECIAL].find(
         {"term_id": term_id, "status": "Convert to Regular Class"},
-        {"_id": 0, "section_id": 1, "assignment_id": 1, "course_id": 1},
+        {
+            "_id": 0,
+            "special_id": 1,
+            "pending_anchor_special_id": 1,
+            "section_id": 1,
+            "section_code": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "course_id": 1,
+            "courseId": 1,
+            "faculty_id": 1,
+            "day1": 1,
+            "begin1": 1,
+            "end1": 1,
+            "day2": 1,
+            "begin2": 1,
+            "end2": 1,
+            "schedule_entries": 1,
+        },
     ).to_list(5000)
 
     if not rows:
         return
 
-    assignment_ids = sorted({_safe_str(r.get("assignment_id")) for r in rows if _safe_str(r.get("assignment_id"))})
+    assignment_ids = sorted({
+        _safe_str(r.get("assignment_id") or r.get("faculty_assignment_id"))
+        for r in rows
+        if _safe_str(r.get("assignment_id") or r.get("faculty_assignment_id"))
+    })
     assignment_to_section: Dict[str, str] = {}
     if assignment_ids:
         asg_docs = await db[COL_FAC_ASSIGN].find(
@@ -147,17 +169,67 @@ async def _sync_regularized_special_sections(term_id: str) -> None:
             if _safe_str(a.get("assignment_id")) and _safe_str(a.get("section_id"))
         }
 
-    seen: set[tuple[str, str]] = set()
+    grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
     for row in rows:
-        course_id = _safe_str(row.get("course_id"))
-        section_id = _safe_str(row.get("section_id")) or assignment_to_section.get(_safe_str(row.get("assignment_id")), "")
-        if not section_id:
+        course_id = _safe_str(row.get("course_id") or row.get("courseId"))
+        if not course_id:
             continue
-        key = (section_id, course_id)
-        if key in seen:
+        resolved_section_id = _safe_str(row.get("section_id")) or assignment_to_section.get(
+            _safe_str(row.get("assignment_id") or row.get("faculty_assignment_id")),
+            "",
+        )
+        if resolved_section_id:
+            key = ("section:" + resolved_section_id, course_id)
+        else:
+            anchor_id = _safe_str(row.get("pending_anchor_special_id")) or _safe_str(row.get("special_id"))
+            if not anchor_id:
+                continue
+            key = ("pending:" + anchor_id, course_id)
+        grouped.setdefault(key, []).append(row)
+
+    for (group_key, course_id), docs in grouped.items():
+        resolved_section_id = ""
+        for row in docs:
+            resolved_section_id = _safe_str(row.get("section_id")) or assignment_to_section.get(
+                _safe_str(row.get("assignment_id") or row.get("faculty_assignment_id")),
+                "",
+            )
+            if resolved_section_id:
+                break
+
+        if resolved_section_id:
+            await _regularize_special_section_bundle(section_id=resolved_section_id, term_id=term_id, course_id=course_id)
             continue
-        seen.add(key)
-        await _regularize_special_section_bundle(section_id=section_id, term_id=term_id, course_id=course_id)
+
+        source_doc = next((d for d in docs if _has_direct_pending_bundle_values(d)), docs[0])
+        special_ids = [_safe_str(d.get("special_id")) for d in docs if _safe_str(d.get("special_id"))]
+        try:
+            created = await _materialize_regularized_pending_section_bundle(
+                term_id=term_id,
+                course_id=course_id,
+                special_doc=source_doc,
+                exclude_special_ids=special_ids,
+            )
+        except Exception:
+            continue
+
+        created_section_id = _safe_str(created.get("section_id"))
+        if not created_section_id:
+            continue
+
+        await db[COL_SPECIAL].update_many(
+            {"term_id": term_id, "special_id": {"$in": special_ids}},
+            {"$set": {
+                "section_id": created_section_id,
+                "section_code": _safe_str(created.get("section_code")),
+                "schedule_id1": created.get("schedule_id1"),
+                "schedule_id2": created.get("schedule_id2"),
+                "assignment_id": created.get("assignment_id"),
+                "schedule_cleared": False,
+                "updated_at": datetime.utcnow(),
+            }},
+        )
+        await _regularize_special_section_bundle(section_id=created_section_id, term_id=term_id, course_id=course_id)
 
 
 def _is_convert_to_special_status(value: Any) -> bool:
@@ -981,91 +1053,138 @@ async def _faculty_busy_slots(term_id: str, faculty_ids: List[str]) -> Dict[str,
         },
         {"_id": 0, "faculty_id": 1, "section_id": 1, "term_id": 1},
     ).to_list(20000)
-    if not assignments:
-        return result
 
-    section_ids = sorted({ _safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id")) })
-    if not section_ids:
-        return result
+    section_ids = sorted({_safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id"))})
 
-    valid_section_ids: set[str] = set()
-    for a in assignments:
-        sid = _safe_str(a.get("section_id"))
-        if sid and _safe_str(a.get("term_id")) == term_id:
-            valid_section_ids.add(sid)
-
-    try:
-        sub_docs = await db[COL_SECTIONS_SUBMITTED].find(
-            {"term_id": term_id, "section_id": {"$in": section_ids}},
-            {"_id": 0, "section_id": 1},
-        ).to_list(20000)
-        for sec in sub_docs or []:
-            sid = _safe_str(sec.get("section_id"))
-            if sid:
+    if section_ids:
+        valid_section_ids: set[str] = set()
+        for a in assignments:
+            sid = _safe_str(a.get("section_id"))
+            if sid and _safe_str(a.get("term_id")) == term_id:
                 valid_section_ids.add(sid)
-    except Exception:
-        pass
 
+        try:
+            sub_docs = await db[COL_SECTIONS_SUBMITTED].find(
+                {"term_id": term_id, "section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1},
+            ).to_list(20000)
+            for sec in sub_docs or []:
+                sid = _safe_str(sec.get("section_id"))
+                if sid:
+                    valid_section_ids.add(sid)
+        except Exception:
+            pass
+
+        try:
+            sec_docs = await db[COL_SECTIONS].find(
+                {"term_id": term_id, "section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1},
+            ).to_list(20000)
+            for sec in sec_docs or []:
+                sid = _safe_str(sec.get("section_id"))
+                if sid:
+                    valid_section_ids.add(sid)
+        except Exception:
+            pass
+
+        try:
+            sched_docs = await db[COL_SECTION_SCHEDULES].find(
+                {"term_id": term_id, "section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1},
+            ).to_list(20000)
+            for sched in sched_docs or []:
+                sid = _safe_str(sched.get("section_id"))
+                if sid:
+                    valid_section_ids.add(sid)
+        except Exception:
+            pass
+
+        assignments = [a for a in assignments if _safe_str(a.get("section_id")) in valid_section_ids]
+        scoped_section_ids = sorted({_safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id"))})
+
+        if scoped_section_ids:
+            schedules_by_section: Dict[str, List[Dict[str, Any]]] = {}
+            sched_cur = db[COL_SECTION_SCHEDULES].find(
+                {"section_id": {"$in": scoped_section_ids}},
+                {"_id": 0, "section_id": 1, "day": 1, "day_of_week": 1, "start_time": 1, "end_time": 1, "begin": 1, "end": 1},
+            )
+            async for sched in sched_cur:
+                sid = _safe_str(sched.get("section_id"))
+                if sid:
+                    schedules_by_section.setdefault(sid, []).append(sched)
+
+            for asg in assignments:
+                fid = _safe_str(asg.get("faculty_id"))
+                sid = _safe_str(asg.get("section_id"))
+                if not fid or not sid:
+                    continue
+                for sched in schedules_by_section.get(sid, []):
+                    day = _normalize_day_short(sched.get("day") or sched.get("day_of_week"))
+                    begin = _to_hhmm(sched.get("start_time") or sched.get("begin"))
+                    end = _to_hhmm(sched.get("end_time") or sched.get("end"))
+                    if not day or not begin or not end:
+                        continue
+                    result.setdefault(fid, []).append({
+                        "section_id": sid,
+                        "special_id": "",
+                        "day": day,
+                        "begin": begin,
+                        "end": end,
+                    })
+
+    # Pending special-class rows without an APO-assigned section can still carry
+    # faculty + schedule directly on the special_class document. Treat those as
+    # busy so faculty availability and conflict checks stay accurate.
     try:
-        sec_docs = await db[COL_SECTIONS].find(
-            {"term_id": term_id, "section_id": {"$in": section_ids}},
-            {"_id": 0, "section_id": 1},
+        pending_docs = await db[COL_SPECIAL].find(
+            {
+                "term_id": term_id,
+                "faculty_id": {"$in": faculty_ids},
+                "status": {"$nin": ["Rejected", "Convert to Regular Class"]},
+                "$or": [
+                    {"section_id": {"$exists": False}},
+                    {"section_id": None},
+                    {"section_id": ""},
+                ],
+            },
+            {
+                "_id": 0,
+                "special_id": 1,
+                "faculty_id": 1,
+                "day1": 1,
+                "begin1": 1,
+                "end1": 1,
+                "day2": 1,
+                "begin2": 1,
+                "end2": 1,
+            },
         ).to_list(20000)
-        for sec in sec_docs or []:
-            sid = _safe_str(sec.get("section_id"))
-            if sid:
-                valid_section_ids.add(sid)
     except Exception:
-        pass
+        pending_docs = []
 
-    try:
-        sched_docs = await db[COL_SECTION_SCHEDULES].find(
-            {"term_id": term_id, "section_id": {"$in": section_ids}},
-            {"_id": 0, "section_id": 1},
-        ).to_list(20000)
-        for sched in sched_docs or []:
-            sid = _safe_str(sched.get("section_id"))
-            if sid:
-                valid_section_ids.add(sid)
-    except Exception:
-        pass
-
-    assignments = [a for a in assignments if _safe_str(a.get("section_id")) in valid_section_ids]
-    scoped_section_ids = sorted({ _safe_str(a.get("section_id")) for a in assignments if _safe_str(a.get("section_id")) })
-    if not scoped_section_ids:
-        return result
-
-    schedules_by_section: Dict[str, List[Dict[str, Any]]] = {}
-    sched_cur = db[COL_SECTION_SCHEDULES].find(
-        {"section_id": {"$in": scoped_section_ids}},
-        {"_id": 0, "section_id": 1, "day": 1, "day_of_week": 1, "start_time": 1, "end_time": 1, "begin": 1, "end": 1},
-    )
-    async for sched in sched_cur:
-        sid = _safe_str(sched.get("section_id"))
-        if sid:
-            schedules_by_section.setdefault(sid, []).append(sched)
-
-    for asg in assignments:
-        fid = _safe_str(asg.get("faculty_id"))
-        sid = _safe_str(asg.get("section_id"))
-        if not fid or not sid:
+    for doc in pending_docs or []:
+        fid = _safe_str(doc.get("faculty_id"))
+        if not fid:
             continue
-        for sched in schedules_by_section.get(sid, []):
-            day = _normalize_day_short(sched.get("day") or sched.get("day_of_week"))
-            begin = _to_hhmm(sched.get("start_time") or sched.get("begin"))
-            end = _to_hhmm(sched.get("end_time") or sched.get("end"))
+        special_id = _safe_str(doc.get("special_id"))
+        for suffix in ("1", "2"):
+            day = _normalize_day_short(doc.get(f"day{suffix}"))
+            begin = _to_hhmm(doc.get(f"begin{suffix}"))
+            end = _to_hhmm(doc.get(f"end{suffix}"))
             if not day or not begin or not end:
                 continue
             result.setdefault(fid, []).append({
-                "section_id": sid,
+                "section_id": "",
+                "special_id": special_id,
                 "day": day,
                 "begin": begin,
                 "end": end,
             })
+
     return result
 
 
-async def _find_faculty_schedule_conflicts(*, term_id: str, faculty_id: str, payload: Dict[str, Any], exclude_section_id: Optional[str] = None, exclude_section_ids: Optional[List[str]] = None) -> List[str]:
+async def _find_faculty_schedule_conflicts(*, term_id: str, faculty_id: str, payload: Dict[str, Any], exclude_section_id: Optional[str] = None, exclude_section_ids: Optional[List[str]] = None, exclude_special_ids: Optional[List[str]] = None) -> List[str]:
     meetings = _meeting_slots_from_payload(payload)
     fid = _safe_str(faculty_id)
     if not term_id or not fid or not meetings:
@@ -1073,16 +1192,20 @@ async def _find_faculty_schedule_conflicts(*, term_id: str, faculty_id: str, pay
 
     busy_map = await _faculty_busy_slots(term_id, [fid])
     conflicts: List[str] = []
-    excluded_ids = { _safe_str(exclude_section_id) } if _safe_str(exclude_section_id) else set()
+    excluded_ids = {_safe_str(exclude_section_id)} if _safe_str(exclude_section_id) else set()
     for raw in (exclude_section_ids or []):
         sid = _safe_str(raw)
         if sid:
             excluded_ids.add(sid)
+    excluded_special_ids = {_safe_str(raw) for raw in (exclude_special_ids or []) if _safe_str(raw)}
 
     for meeting in meetings:
         for busy in busy_map.get(fid, []):
             sid = _safe_str(busy.get("section_id"))
+            special_id = _safe_str(busy.get("special_id"))
             if sid and sid in excluded_ids:
+                continue
+            if special_id and special_id in excluded_special_ids:
                 continue
             if _normalize_day_short(busy.get("day")) != meeting["day"]:
                 continue
@@ -1477,6 +1600,126 @@ async def _next_seq_id(coll: str, id_field: str, prefix: str, width: int) -> str
     return f"{prefix}{n:0{width}d}"
 
 
+def _extract_section_numeric_suffix(section_code: str) -> int:
+    import re
+
+    s = str(section_code or "").strip().upper()
+    m = re.search(r"(\d+)$", s)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+def _extract_section_prefix(section_code: str) -> str:
+    import re
+
+    s = str(section_code or "").strip().upper()
+    m = re.match(r"([A-Z]+)", s)
+    return m.group(1) if m else ""
+
+
+def _section_start_base(prefix: str) -> int:
+    p = str(prefix or "").strip().upper()
+    if p == "XX":
+        return 21
+    if p == "XC":
+        return 22
+    if p == "S":
+        return 10
+    if p == "G":
+        return 0
+    return 10
+
+
+def _format_section_code(prefix: str, number: int) -> str:
+    p = str(prefix or "").strip().upper()
+    if not p:
+        return ""
+    if p == "G":
+        return f"{p}{int(number):02d}"
+    return f"{p}{int(number)}"
+
+
+def _is_grad_level(level_or_code: Any) -> bool:
+    raw = str(level_or_code or "").strip()
+    up = raw.upper()
+    if up in {"GSM", "GS", "G", "GRAD", "GRADUATE"}:
+        return True
+    return raw.lower().startswith("graduate")
+
+
+async def _auto_section_prefix_candidates(course_id: str, campus_id: str) -> List[str]:
+    course_id = _safe_str(course_id)
+    campus_id = _safe_str(campus_id).upper()
+    course = await db[COL_COURSES].find_one({"course_id": course_id}, {"_id": 0, "program_level": 1}) or {}
+    is_grad = _is_grad_level(course.get("program_level"))
+
+    if campus_id == "CMPS0002":
+        return ["XX"] if is_grad else ["XX", "XC"]
+    return ["G"] if is_grad else ["S"]
+
+
+async def _existing_section_codes_for_course(term_id: str, course_id: str) -> List[str]:
+    term_id = _safe_str(term_id)
+    course_id = _safe_str(course_id)
+    if not term_id or not course_id:
+        return []
+
+    codes: List[str] = []
+    query = {
+        "term_id": term_id,
+        "course_id": course_id,
+        "section_code": {"$exists": True, "$ne": ""},
+    }
+
+    for coll in (COL_SECTIONS_SUBMITTED, COL_SECTIONS):
+        async for doc in db[coll].find(query, {"_id": 0, "section_code": 1}):
+            code = _safe_str(doc.get("section_code")).upper()
+            if code:
+                codes.append(code)
+    return codes
+
+
+async def _next_auto_section_code(
+    *,
+    db,
+    term_id: str,
+    course_id: str,
+    campus_id: str,
+) -> str:
+    """Use the latest valid section code for this course, then continue it.
+
+    This mirrors APO/Load Assignment numbering more closely than the earlier
+    placeholder logic:
+      - choose the campus/level-appropriate prefix set
+      - inspect existing sections + submitted sections for the same course/term
+      - continue from the highest existing numeric suffix for the chosen prefix
+      - if none exist yet, start from the APO base (S11, G01, XX22, XC23)
+    """
+
+    allowed_prefixes = await _auto_section_prefix_candidates(course_id, campus_id)
+    preferred_prefix = allowed_prefixes[0] if allowed_prefixes else ("XX" if _safe_str(campus_id).upper() == "CMPS0002" else "S")
+
+    best_prefix = ""
+    best_num = 0
+    existing_codes = await _existing_section_codes_for_course(term_id, course_id)
+    for code in existing_codes:
+        prefix = _extract_section_prefix(code)
+        if allowed_prefixes and prefix not in allowed_prefixes:
+            continue
+        num = _extract_section_numeric_suffix(code)
+        if num > best_num:
+            best_num = num
+            best_prefix = prefix
+
+    prefix = best_prefix or preferred_prefix
+    next_num = max(best_num, _section_start_base(prefix)) + 1
+    return _format_section_code(prefix, next_num)
+
+
 async def _maybe_load_id_for_faculty(term_id: str, faculty_id: str) -> str:
     # best-effort: get dept_id from faculty_profiles then find faculty_loads for that dept+term
     prof = await db[COL_FAC_PROFILES].find_one(
@@ -1492,6 +1735,143 @@ async def _maybe_load_id_for_faculty(term_id: str, faculty_id: str) -> str:
         {"_id": 0, "load_id": 1},
     )
     return (load or {}).get("load_id") or ""
+
+
+async def _create_pending_section_bundle(
+    *,
+    term_id: str,
+    course_id: str,
+    section_code: str,
+    sched: Dict[str, str],
+    faculty_id: str,
+) -> Dict[str, Optional[str]]:
+    """Create a section shell first, then add schedule and/or faculty only when present.
+
+    This is used when a Special Class is converted to a regular class before APO has manually
+    allocated a section. It mirrors OM Load Assignment's section-code generation but keeps the
+    already-declared faculty/schedule whenever they exist.
+    """
+    section_code = (section_code or "").strip().upper()
+    if not section_code:
+        raise HTTPException(status_code=400, detail="section_code is required.")
+
+    faculty_id = (faculty_id or "").strip()
+    sched = _validate_day_fields(sched or {})
+
+    now = datetime.utcnow()
+    campus_id = await _department_campus_id_for_course(course_id)
+
+    section_id = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
+    sec_doc = {
+        "section_id": section_id,
+        "section_code": section_code,
+        "term_id": term_id,
+        "course_id": course_id,
+        "campus_id": campus_id or None,
+        "enrollment_cap": 45,
+        "enrolled": 0,
+        "batch_number": 0,
+        "status": "active",
+        "remarks": "SPECIAL CLASS",
+        "created_at": now,
+        "updated_at": now,
+    }
+    await db[COL_SECTIONS].insert_one(sec_doc)
+
+    await db[COL_SECTIONS_SUBMITTED].insert_one({
+        "section_id": section_id,
+        "term_id": term_id,
+        "course_id": course_id,
+        "section_code": section_code,
+        "submitted_for_scheduling": True,
+        "campus_id": campus_id or "",
+        "mode": "HYB",
+        "enrollment_cap": 45,
+        "batch_number": 0,
+        "remarks": "SPECIAL CLASS",
+        "created_at": now,
+        "updated_at": now,
+    })
+
+    def _hhmm_to_db(hhmm: str) -> str:
+        s = _to_hhmm(hhmm)
+        if not s:
+            return ""
+        try:
+            return str(int(s))
+        except Exception:
+            return s
+
+    try:
+        sec_num = int(section_id.replace("SEC", ""))
+    except Exception:
+        sec_num = 0
+    sch_base = f"SCH{sec_num:04d}"
+
+    schedule_id1: Optional[str] = None
+    schedule_id2: Optional[str] = None
+    sched_docs: List[Dict[str, Any]] = []
+
+    if sched.get("day1") and sched.get("begin1") and sched.get("end1"):
+        schedule_id1 = f"{sch_base}-01"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id1,
+                "section_id": section_id,
+                "term_id": term_id,
+                "day": sched["day1"],
+                "start_time": _hhmm_to_db(sched["begin1"]),
+                "end_time": _hhmm_to_db(sched["end1"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched.get("day2") and sched.get("begin2") and sched.get("end2"):
+        schedule_id2 = f"{sch_base}-02"
+        sched_docs.append(
+            {
+                "schedule_id": schedule_id2,
+                "section_id": section_id,
+                "term_id": term_id,
+                "day": sched["day2"],
+                "start_time": _hhmm_to_db(sched["begin2"]),
+                "end_time": _hhmm_to_db(sched["end2"]),
+                "room_id": None,
+                "room_type": "Online",
+                "created_at": now,
+                "updated_at": now,
+            }
+        )
+
+    if sched_docs:
+        await db[COL_SECTION_SCHEDULES].insert_many(sched_docs)
+
+    assignment_id: Optional[str] = None
+    if faculty_id:
+        assignment_id = await _next_seq_id(COL_FAC_ASSIGN, "assignment_id", "ASG", 4)
+        load_id = await _maybe_load_id_for_faculty(term_id, faculty_id)
+        await db[COL_FAC_ASSIGN].insert_one(
+            {
+                "assignment_id": assignment_id,
+                "load_id": load_id,
+                "section_id": section_id,
+                "faculty_id": faculty_id,
+                "created_at": now,
+                "updated_at": now,
+                "is_archived": False,
+            }
+        )
+
+    return {
+        "section_id": section_id,
+        "section_code": section_code,
+        "schedule_id1": schedule_id1,
+        "schedule_id2": schedule_id2,
+        "assignment_id": assignment_id,
+    }
 
 
 async def _create_custom_section_bundle(
@@ -1641,6 +2021,64 @@ async def _create_custom_section_bundle(
     }
 
 
+def _has_direct_pending_bundle_values(doc: Dict[str, Any]) -> bool:
+    if not isinstance(doc, dict):
+        return False
+    for key in ["faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2", "section_code"]:
+        if _safe_str(doc.get(key)):
+            return True
+    return bool(doc.get("schedule_entries"))
+
+
+async def _materialize_regularized_pending_section_bundle(
+    *,
+    term_id: str,
+    course_id: str,
+    special_doc: Dict[str, Any],
+    exclude_special_ids: Optional[List[str]] = None,
+) -> Dict[str, Optional[str]]:
+    """Create a real section bundle for a Convert-to-Regular row that still has no section yet."""
+    course_id = _safe_str(course_id or (special_doc or {}).get("course_id") or (special_doc or {}).get("courseId"))
+    if not course_id:
+        raise HTTPException(status_code=400, detail="course_id is required for automatic section allocation.")
+
+    campus_id = await _department_campus_id_for_course(course_id)
+    if not campus_id:
+        raise HTTPException(status_code=409, detail="Unable to resolve campus for automatic section allocation.")
+
+    sched_valid = _validate_day_fields(special_doc or {})
+    faculty_id = _safe_str((special_doc or {}).get("faculty_id"))
+    has_schedule = any(
+        sched_valid.get(k)
+        for k in ["day1", "begin1", "end1", "day2", "begin2", "end2"]
+    )
+
+    if faculty_id and has_schedule:
+        conflicts = await _find_faculty_schedule_conflicts(
+            term_id=term_id,
+            faculty_id=faculty_id,
+            payload=sched_valid,
+            exclude_special_ids=exclude_special_ids,
+        )
+        if conflicts:
+            raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
+
+    section_code = await _next_auto_section_code(
+        db=db,
+        term_id=term_id,
+        course_id=course_id,
+        campus_id=campus_id,
+    )
+
+    return await _create_pending_section_bundle(
+        term_id=term_id,
+        course_id=course_id,
+        section_code=section_code,
+        sched=sched_valid,
+        faculty_id=faculty_id,
+    )
+
+
 async def _update_existing_special_section_bundle(
     *,
     section_id: str,
@@ -1655,6 +2093,9 @@ async def _update_existing_special_section_bundle(
     faculty_id = _safe_str(faculty_id)
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required.")
+    if not section_code:
+        existing_sec = await db[COL_SECTIONS].find_one({"section_id": section_id}, {"_id": 0, "section_code": 1}) or {}
+        section_code = _safe_str(existing_sec.get("section_code")).upper()
     if not section_code:
         raise HTTPException(status_code=400, detail="section_code is required for special class schedule.")
     if not faculty_id:
@@ -1766,6 +2207,62 @@ async def _update_existing_special_section_bundle(
         "schedule_id2": schedule_id2,
         "assignment_id": assignment_id,
     }
+
+
+async def _special_section_bundle_can_delete_section(section_id: str) -> bool:
+    section_id = _safe_str(section_id)
+    if not section_id:
+        return False
+
+    sec = await db[COL_SECTIONS].find_one(
+        {"section_id": section_id},
+        {"_id": 0, "remarks": 1, "status": 1},
+    ) or {}
+    sub = await db[COL_SECTIONS_SUBMITTED].find_one(
+        {"section_id": section_id},
+        {"_id": 0, "remarks": 1, "status": 1},
+    ) or {}
+    remarks = " ".join([
+        _safe_str(sec.get("remarks")),
+        _safe_str(sub.get("remarks")),
+    ]).upper()
+    statuses = " ".join([
+        _safe_str(sec.get("status")),
+        _safe_str(sub.get("status")),
+    ]).upper()
+
+    # Delete shells that were generated from Special Class even after they were
+    # regularized. This keeps OM Load Assignment and APO Course Offerings in sync
+    # when a converted special class is deleted later.
+    return (
+        "SPECIAL CLASS" in remarks
+        or "REGULAR CLASS" in remarks
+        or "SPECIAL CLASS" in statuses
+        or "REGULAR CLASS" in statuses
+    )
+
+
+async def _clear_section_schedule_records(section_id: str) -> None:
+    section_id = _safe_str(section_id)
+    if not section_id:
+        return
+    await db[COL_SECTION_SCHEDULES].delete_many({"section_id": section_id})
+
+
+async def _release_special_section_bundle(section_id: str, *, delete_section_shell: bool = False) -> None:
+    section_id = _safe_str(section_id)
+    if not section_id:
+        return
+
+    now = datetime.utcnow()
+    await _clear_section_schedule_records(section_id)
+    await db[COL_FAC_ASSIGN].update_many(
+        {"section_id": section_id, "is_archived": {"$ne": True}},
+        {"$set": {"is_archived": True, "updated_at": now}},
+    )
+    if delete_section_shell:
+        await db[COL_SECTIONS_SUBMITTED].delete_many({"section_id": section_id})
+        await db[COL_SECTIONS].delete_many({"section_id": section_id})
 
 
 async def _regularize_special_section_bundle(*, section_id: str, term_id: str, course_id: str) -> None:
@@ -2177,6 +2674,8 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         elif sid:
             fa = await _latest_faculty_assignment_for_section(sid)
             faculty_id = fa.get("faculty_id")
+        else:
+            faculty_id = _safe_str(r.get("faculty_id")) or None
 
         faculty_name = await _faculty_name_from_id(faculty_id)
 
@@ -2232,6 +2731,7 @@ async def _shape_row(r: Dict[str, Any], maps: Dict[str, Any]) -> Dict[str, Any]:
         "eaf_uploaded_at": r.get("eaf_uploaded_at"),
         "generated_from_class_retention": generated_from_class_retention,
         "manual_special_class": bool(r.get("manual_special_class")),
+        "pending_anchor_special_id": _safe_str(r.get("pending_anchor_special_id")),
         "retention_id": _safe_str(r.get("retention_id")),
         "eaf_view_url": _build_admin_eaf_view_url("om", r.get("special_id") or ""),
     }
@@ -2386,6 +2886,7 @@ async def _create_manual_special_class_row(term_id: str, payload: Dict[str, Any]
         "schedule_id2": None,
         "assignment_id": None,
         "schedule_cleared": False,
+        "pending_anchor_special_id": special_id,
     }
 
     has_custom_schedule_fields = any(
@@ -2394,34 +2895,7 @@ async def _create_manual_special_class_row(term_id: str, payload: Dict[str, Any]
     )
 
     if has_custom_schedule_fields:
-        section_code = _safe_str(payload.get("section_code")).upper()
-        faculty_id = _safe_str(payload.get("faculty_id"))
-        if not section_code:
-            raise HTTPException(status_code=400, detail="section_code is required when adding a class schedule.")
-        if not faculty_id:
-            raise HTTPException(status_code=400, detail="faculty_id is required when adding a class schedule.")
-
-        sched_valid = _validate_day_fields(payload)
-        conflicts = await _find_faculty_schedule_conflicts(
-            term_id=term_id,
-            faculty_id=faculty_id,
-            payload=sched_valid,
-            exclude_section_ids=[],
-        )
-        if conflicts:
-            raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
-
-        created = await _create_custom_section_bundle(
-            term_id=term_id,
-            course_id=course_id,
-            section_code=section_code,
-            sched=sched_valid,
-            faculty_id=faculty_id,
-        )
-        doc["section_id"] = created.get("section_id")
-        doc["schedule_id1"] = created.get("schedule_id1")
-        doc["schedule_id2"] = created.get("schedule_id2")
-        doc["assignment_id"] = created.get("assignment_id")
+        raise HTTPException(status_code=400, detail="Only APO can assign the section, faculty, and schedule when creating a special class.")
 
     await db[COL_SPECIAL].insert_one(doc)
     return doc
@@ -2445,10 +2919,21 @@ async def _eligible_special_class_students(term_id: str, target_special_id: str)
             "manual_special_class": {"$ne": True},
             "generated_from_class_retention": {"$ne": True},
             "status": {"$nin": ["Convert to Regular Class", "Rejected"]},
-            "$or": [
-                {"section_id": {"$exists": False}},
-                {"section_id": None},
-                {"section_id": ""},
+            "$and": [
+                {
+                    "$or": [
+                        {"section_id": {"$exists": False}},
+                        {"section_id": None},
+                        {"section_id": ""},
+                    ]
+                },
+                {
+                    "$or": [
+                        {"pending_anchor_special_id": {"$exists": False}},
+                        {"pending_anchor_special_id": None},
+                        {"pending_anchor_special_id": ""},
+                    ]
+                },
             ],
         },
         {"_id": 0, "special_id": 1, "user_id": 1, "student_number": 1, "status": 1},
@@ -3111,6 +3596,60 @@ def _build_pdf(rows: List[Dict[str, Any]], active_term: Dict[str, Any]) -> bytes
     return buf.getvalue()
 
 
+async def _create_manual_anchor_from_special_doc(term_id: str, source_doc: Dict[str, Any]) -> Dict[str, Any]:
+    course_id = _safe_str(source_doc.get("course_id") or source_doc.get("courseId"))
+    if not course_id:
+        raise HTTPException(status_code=400, detail="Missing course_id on source special class record.")
+
+    course = await db[COL_COURSES].find_one(
+        {"course_id": course_id},
+        {"_id": 0, "department_id": 1, "units": 1},
+    ) or {}
+
+    special_id = await _next_special_id()
+    now = datetime.utcnow()
+    anchor_pending_id = special_id
+
+    doc: Dict[str, Any] = {
+        "special_id": special_id,
+        "term_id": term_id,
+        "user_id": "",
+        "course_id": course_id,
+        "department_id": _safe_str(source_doc.get("department_id") or course.get("department_id")),
+        "status": _safe_str(source_doc.get("status")) or "Forwarded To Department",
+        "remarks": _safe_str(source_doc.get("remarks")),
+        "manual_special_class": True,
+        "submitted_at": now,
+        "updated_at": now,
+        "student_number": None,
+        "reason": "",
+        "reason_other": "",
+        "units_remaining": "",
+        "graduating_after_term": False,
+        "course_units": source_doc.get("course_units") or course.get("units") or "",
+        "section_id": _safe_str(source_doc.get("section_id")) or None,
+        "section_code": _safe_str(source_doc.get("section_code")),
+        "schedule_id1": _safe_str(source_doc.get("schedule_id1")) or None,
+        "schedule_id2": _safe_str(source_doc.get("schedule_id2")) or None,
+        "assignment_id": _safe_str(source_doc.get("assignment_id") or source_doc.get("faculty_assignment_id")) or None,
+        "schedule_cleared": bool(source_doc.get("schedule_cleared", False)),
+        "faculty_id": _safe_str(source_doc.get("faculty_id")),
+        "faculty_name": _safe_str(source_doc.get("faculty_name")),
+        "day1": _normalize_day(source_doc.get("day1")),
+        "begin1": _to_hhmm(source_doc.get("begin1")),
+        "end1": _to_hhmm(source_doc.get("end1")),
+        "day2": _normalize_day(source_doc.get("day2")),
+        "begin2": _to_hhmm(source_doc.get("begin2")),
+        "end2": _to_hhmm(source_doc.get("end2")),
+        "schedule_entries": source_doc.get("schedule_entries") or [],
+        "schedule_text": _safe_str(source_doc.get("schedule_text")),
+        "pending_anchor_special_id": anchor_pending_id,
+    }
+
+    await db[COL_SPECIAL].insert_one(doc)
+    return doc
+
+
 # ---------------- routes (GET) ----------------
 async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str, Any]:
     term_id = _safe_str(term_id)
@@ -3128,8 +3667,15 @@ async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str
     is_generated = bool(target.get("generated_from_class_retention"))
     is_manual = bool(target.get("manual_special_class"))
 
+    pending_anchor_special_id = _safe_str(target.get("pending_anchor_special_id"))
+
     if section_id:
         group_docs = await db[COL_SPECIAL].find({"term_id": term_id, "section_id": section_id}, {"_id": 0}).to_list(5000)
+    elif pending_anchor_special_id:
+        group_docs = await db[COL_SPECIAL].find(
+            {"term_id": term_id, "pending_anchor_special_id": pending_anchor_special_id},
+            {"_id": 0},
+        ).to_list(5000)
     elif is_generated and retention_id:
         group_docs = await db[COL_SPECIAL].find(
             {"term_id": term_id, "generated_from_class_retention": True, "retention_id": retention_id},
@@ -3171,6 +3717,7 @@ async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str
                     "schedule_cleared": False,
                     "status": "Forwarded To Department",
                     "updated_at": now,
+                    "pending_anchor_special_id": None,
                 },
                 "$unset": {
                     "faculty_assignment_id": "",
@@ -3183,6 +3730,8 @@ async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str
                     "faculty_id": "",
                     "faculty_name": "",
                     "section_code": "",
+                    "schedule_entries": "",
+                    "schedule_text": "",
                     "room_id1": "",
                     "room_id2": "",
                     "room1": "",
@@ -3232,6 +3781,17 @@ async def _delete_special_class_group(term_id: str, special_id: str) -> Dict[str
     if not applicant_ids and not is_generated and not is_manual and special_id:
         res = await db[COL_SPECIAL].delete_one({"term_id": term_id, "special_id": special_id})
         deleted_rows += int(res.deleted_count)
+
+    if section_id:
+        still_bound = await db[COL_SPECIAL].find_one(
+            {"term_id": term_id, "section_id": section_id},
+            {"_id": 1},
+        )
+        if not still_bound:
+            await _release_special_section_bundle(
+                section_id,
+                delete_section_shell=await _special_section_bundle_can_delete_section(section_id),
+            )
 
     message = "Special Class deleted."
     if kept_row and applicant_ids:
@@ -3440,6 +4000,43 @@ async def om_specialclass_post(
         if bool(doc.get("manual_special_class")) or bool(doc.get("generated_from_class_retention")) or not _safe_str(doc.get("user_id")):
             raise HTTPException(status_code=400, detail="Only actual student applications can be removed from a class.")
 
+        source_section_id = _safe_str(doc.get("section_id"))
+        source_pending_anchor_id = _safe_str(doc.get("pending_anchor_special_id"))
+        source_has_direct_bundle = bool(
+            _safe_str(doc.get("faculty_id"))
+            or _safe_str(doc.get("day1"))
+            or _safe_str(doc.get("begin1"))
+            or _safe_str(doc.get("end1"))
+            or _safe_str(doc.get("day2"))
+            or _safe_str(doc.get("begin2"))
+            or _safe_str(doc.get("end2"))
+            or (doc.get("schedule_entries") or [])
+        )
+
+        related_docs: List[Dict[str, Any]] = []
+        if source_section_id:
+            related_docs = await db[COL_SPECIAL].find(
+                {"term_id": current_term_id, "section_id": source_section_id},
+                {"_id": 0},
+            ).to_list(5000)
+        elif source_pending_anchor_id:
+            related_docs = await db[COL_SPECIAL].find(
+                {"term_id": current_term_id, "pending_anchor_special_id": source_pending_anchor_id},
+                {"_id": 0},
+            ).to_list(5000)
+
+        other_related_docs = [
+            d for d in (related_docs or [])
+            if _safe_str(d.get("special_id")) and _safe_str(d.get("special_id")) != specialId
+        ]
+        has_other_related = bool(other_related_docs)
+
+        preserve_class = bool(source_section_id or source_pending_anchor_id or source_has_direct_bundle)
+        created_anchor = False
+        if preserve_class and not has_other_related:
+            await _create_manual_anchor_from_special_doc(current_term_id, doc)
+            created_anchor = True
+
         res = await db[COL_SPECIAL].update_one(
             {"term_id": current_term_id, "special_id": specialId},
             {
@@ -3452,6 +4049,7 @@ async def om_specialclass_post(
                     "status": "Forwarded To Department",
                     "unassigned_by_admin": True,
                     "updated_at": datetime.utcnow(),
+                    "pending_anchor_special_id": None,
                 },
                 "$unset": {
                     "faculty_assignment_id": "",
@@ -3464,10 +4062,29 @@ async def om_specialclass_post(
                     "faculty_id": "",
                     "faculty_name": "",
                     "section_code": "",
+                    "schedule_entries": "",
+                    "schedule_text": "",
                 },
             },
         )
-        return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
+
+        if source_section_id and not created_anchor:
+            still_bound = await db[COL_SPECIAL].find_one(
+                {"term_id": current_term_id, "section_id": source_section_id},
+                {"_id": 1},
+            )
+            if not still_bound:
+                await _release_special_section_bundle(
+                    source_section_id,
+                    delete_section_shell=await _special_section_bundle_can_delete_section(source_section_id),
+                )
+
+        return {
+            "ok": True,
+            "matched": res.matched_count,
+            "modified": res.modified_count,
+            "retained_class": created_anchor,
+        }
 
     if action == "assignStudent":
         target_sid = _safe_str(targetSpecialId or specialId)
@@ -3490,27 +4107,73 @@ async def om_specialclass_post(
         section_id = _safe_str(target_doc.get("section_id")) or None
         section_code = _safe_str(target_doc.get("section_code"))
         assignment_id = _safe_str(target_doc.get("assignment_id") or target_doc.get("faculty_assignment_id")) or None
-        if not section_id and not assignment_id:
-            raise HTTPException(status_code=400, detail="Target special class must have a section/faculty schedule before adding students.")
-
-        res = await db[COL_SPECIAL].update_one(
-            {"term_id": current_term_id, "special_id": student_sid},
-            {
-                "$set": {
-                    "section_id": section_id or None,
-                    "section_code": section_code,
-                    "schedule_id1": _safe_str(target_doc.get("schedule_id1")) or None,
-                    "schedule_id2": _safe_str(target_doc.get("schedule_id2")) or None,
-                    "assignment_id": assignment_id,
-                    "schedule_cleared": bool(target_doc.get("schedule_cleared", False)),
-                    "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
-                    "updated_at": datetime.utcnow(),
-                },
-                "$unset": {
-                    "unassigned_by_admin": "",
-                },
-            },
+        pending_anchor_special_id = _safe_str(target_doc.get("pending_anchor_special_id")) or _safe_str(target_doc.get("special_id"))
+        has_direct_pending_bundle = bool(
+            _safe_str(target_doc.get("faculty_id"))
+            or _safe_str(target_doc.get("day1"))
+            or _safe_str(target_doc.get("begin1"))
+            or _safe_str(target_doc.get("end1"))
+            or _safe_str(target_doc.get("day2"))
+            or _safe_str(target_doc.get("begin2"))
+            or _safe_str(target_doc.get("end2"))
+            or (target_doc.get("schedule_entries") or [])
+            or pending_anchor_special_id
         )
+        if not section_id and not assignment_id and not has_direct_pending_bundle:
+            raise HTTPException(status_code=400, detail="Target special class must have at least a saved class row before adding students.")
+
+        if section_id or assignment_id:
+            res = await db[COL_SPECIAL].update_one(
+                {"term_id": current_term_id, "special_id": student_sid},
+                {
+                    "$set": {
+                        "section_id": section_id or None,
+                        "section_code": section_code,
+                        "schedule_id1": _safe_str(target_doc.get("schedule_id1")) or None,
+                        "schedule_id2": _safe_str(target_doc.get("schedule_id2")) or None,
+                        "assignment_id": assignment_id,
+                        "schedule_cleared": bool(target_doc.get("schedule_cleared", False)),
+                        "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
+                        "updated_at": datetime.utcnow(),
+                        "pending_anchor_special_id": None,
+                    },
+                    "$unset": {
+                        "unassigned_by_admin": "",
+                    },
+                },
+            )
+        else:
+            res = await db[COL_SPECIAL].update_one(
+                {"term_id": current_term_id, "special_id": student_sid},
+                {
+                    "$set": {
+                        "section_id": None,
+                        "section_code": "",
+                        "schedule_id1": None,
+                        "schedule_id2": None,
+                        "assignment_id": None,
+                        "schedule_cleared": False,
+                        "status": _safe_str(target_doc.get("status")) or "Forwarded To Department",
+                        "updated_at": datetime.utcnow(),
+                        "faculty_id": _safe_str(target_doc.get("faculty_id")) or None,
+                        "faculty_name": _safe_str(target_doc.get("faculty_name")) or "UNASSIGNED",
+                        "day1": _safe_str(target_doc.get("day1")),
+                        "begin1": _safe_str(target_doc.get("begin1")),
+                        "end1": _safe_str(target_doc.get("end1")),
+                        "day2": _safe_str(target_doc.get("day2")),
+                        "begin2": _safe_str(target_doc.get("begin2")),
+                        "end2": _safe_str(target_doc.get("end2")),
+                        "schedule_entries": target_doc.get("schedule_entries") or [],
+                        "schedule_text": _safe_str(target_doc.get("schedule_text")),
+                        "pending_anchor_special_id": pending_anchor_special_id,
+                    },
+                    "$unset": {
+                        "unassigned_by_admin": "",
+                        "faculty_assignment_id": "",
+                    },
+                },
+            )
+
         return {"ok": True, "matched": res.matched_count, "modified": res.modified_count}
 
     if action == "deleteClass":
@@ -3670,43 +4333,49 @@ async def om_specialclass_post(
         req_section_id_raw = payload.get("section_id") if ("section_id" in payload) else None
         req_section_id = (str(req_section_id_raw).strip() if req_section_id_raw is not None else "")
 
-        is_custom_request = (
-            ("section_id" in payload and not req_section_id) and any(
-                (payload.get(k) not in (None, "", [], {}))
-                for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
-            )
+        has_bundle_payload = any(
+            (payload.get(k) not in (None, "", [], {}))
+            for k in ["section_code", "faculty_id", "day1", "begin1", "end1", "day2", "begin2", "end2"]
         )
+        is_direct_pending_bundle = (not req_section_id) and has_bundle_payload
 
-        # always remove any legacy stored schedule/faculty fields from special_class
-        updates_unset.update(
-            {
-                "day1": "",
-                "begin1": "",
-                "end1": "",
-                "day2": "",
-                "begin2": "",
-                "end2": "",
-                "schedule_entries": "",
-                "schedule_text": "",
-                "faculty_id": "",
-                "faculty_name": "",
-                "section_code": "",
-                "faculty_assignment_id": "",  # old field name (cleanup)
-            }
-        )
+        def _clear_legacy_pending_bundle() -> None:
+            updates_unset.update(
+                {
+                    "day1": "",
+                    "begin1": "",
+                    "end1": "",
+                    "day2": "",
+                    "begin2": "",
+                    "end2": "",
+                    "schedule_entries": "",
+                    "schedule_text": "",
+                    "faculty_id": "",
+                    "faculty_name": "",
+                    "section_code": "",
+                    "faculty_assignment_id": "",
+                }
+            )
 
         clear_schedule_only = bool(payload.get("clear_schedule_only", False))
 
+        existing_group_section_ids = sorted({
+            _safe_str((d or {}).get("section_id")) for d in (existing_docs or []) if _safe_str((d or {}).get("section_id"))
+        })
+        section_id_to_release = _safe_str(existing_doc_full.get("section_id")) if ("section_id" in payload and not req_section_id) else None
+        clear_schedule_target = req_section_id if clear_schedule_only and req_section_id else None
+
         if clear_schedule_only and req_section_id:
+            _clear_legacy_pending_bundle()
             # Clear ONLY the schedule (day/time) while keeping section & faculty binding.
-            # We achieve this by clearing schedule_id1/2 and setting schedule_cleared=true so _shape_row
-            # does not re-derive schedule from the section.
+            await _clear_section_schedule_records(req_section_id)
             updates_set["section_id"] = req_section_id
             updates_set["schedule_id1"] = None
             updates_set["schedule_id2"] = None
             updates_set["schedule_cleared"] = True
 
         elif "section_id" in payload and req_section_id:
+            _clear_legacy_pending_bundle()
             # Existing reflected section: if schedule/faculty fields are provided, update the linked bundle in-place.
             sid = req_section_id
             has_custom_schedule_fields = any(
@@ -3717,16 +4386,15 @@ async def om_specialclass_post(
             if has_custom_schedule_fields:
                 sched_valid = _validate_day_fields(payload)
                 faculty_id_for_update = _safe_str(payload.get("faculty_id"))
-                section_code_for_update = _safe_str(payload.get("section_code"))
-                group_section_ids = sorted({
-                    _safe_str((d or {}).get("section_id")) for d in (existing_docs or []) if _safe_str((d or {}).get("section_id"))
-                })
+                existing_sec = await db[COL_SECTIONS].find_one({"section_id": sid}, {"_id": 0, "section_code": 1}) or {}
+                section_code_for_update = _safe_str(existing_sec.get("section_code")) or _safe_str(payload.get("section_code"))
                 conflicts = await _find_faculty_schedule_conflicts(
                     term_id=current_term_id,
                     faculty_id=faculty_id_for_update,
                     payload=sched_valid,
                     exclude_section_id=sid,
-                    exclude_section_ids=group_section_ids,
+                    exclude_section_ids=existing_group_section_ids,
+                    exclude_special_ids=target_special_ids,
                 )
                 if conflicts:
                     raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
@@ -3754,39 +4422,67 @@ async def om_specialclass_post(
 
             updates_set["schedule_cleared"] = False
 
-        elif is_custom_request:
-            # ✅ CUSTOM path: create docs in sections / section_schedules / faculty_assignments
-            section_code = (payload.get("section_code") or "").strip()
-            fid = (payload.get("faculty_id") or "").strip()
+        elif is_direct_pending_bundle:
             sched_valid = _validate_day_fields(payload)
-            group_section_ids = sorted({
-                _safe_str((d or {}).get("section_id")) for d in (existing_docs or []) if _safe_str((d or {}).get("section_id"))
-            })
+            faculty_id_for_update = _safe_str(payload.get("faculty_id"))
+            if not faculty_id_for_update:
+                raise HTTPException(status_code=400, detail="faculty_id is required for special class schedule.")
+            if not (sched_valid.get("day1") and sched_valid.get("begin1") and sched_valid.get("end1")):
+                raise HTTPException(status_code=400, detail="Meeting 1 must include day, begin time, and end time.")
+
             conflicts = await _find_faculty_schedule_conflicts(
                 term_id=current_term_id,
-                faculty_id=fid,
+                faculty_id=faculty_id_for_update,
                 payload=sched_valid,
-                exclude_section_ids=group_section_ids,
+                exclude_special_ids=target_special_ids,
             )
             if conflicts:
                 raise HTTPException(status_code=400, detail=f"Faculty already has an assigned schedule at: {', '.join(conflicts)}")
 
-            created = await _create_custom_section_bundle(
-                term_id=current_term_id,
-                course_id=course_id_base,
-                section_code=section_code,
-                sched=sched_valid,
-                faculty_id=fid,
-            )
+            faculty_name_for_update = await _faculty_name_from_id(faculty_id_for_update)
+            schedule_entries = []
+            for suffix in ("1", "2"):
+                day_val = _safe_str(sched_valid.get(f"day{suffix}"))
+                begin_val = _safe_str(sched_valid.get(f"begin{suffix}"))
+                end_val = _safe_str(sched_valid.get(f"end{suffix}"))
+                if not (day_val and begin_val and end_val):
+                    continue
+                schedule_entries.append(
+                    {
+                        "schedule_id": None,
+                        "day": day_val,
+                        "start_time": begin_val,
+                        "end_time": end_val,
+                        "room_id": None,
+                        "room_type": None,
+                        "room_number": "TBA",
+                    }
+                )
+            schedule_text_parts = [
+                f"{entry['day']} {entry['start_time'][:2]}:{entry['start_time'][2:]}-{entry['end_time'][:2]}:{entry['end_time'][2:]} TBA"
+                for entry in schedule_entries
+            ]
 
-            updates_set["section_id"] = created.get("section_id")
-            updates_set["schedule_id1"] = created.get("schedule_id1")
-            updates_set["schedule_id2"] = created.get("schedule_id2")
-            updates_set["assignment_id"] = created.get("assignment_id")
-
+            updates_set["section_id"] = None
+            updates_set["schedule_id1"] = None
+            updates_set["schedule_id2"] = None
+            updates_set["assignment_id"] = None
             updates_set["schedule_cleared"] = False
+            updates_set["faculty_id"] = faculty_id_for_update
+            updates_set["faculty_name"] = faculty_name_for_update or "UNASSIGNED"
+            updates_set["section_code"] = ""
+            updates_set["day1"] = sched_valid.get("day1") or ""
+            updates_set["begin1"] = sched_valid.get("begin1") or ""
+            updates_set["end1"] = sched_valid.get("end1") or ""
+            updates_set["day2"] = sched_valid.get("day2") or ""
+            updates_set["begin2"] = sched_valid.get("begin2") or ""
+            updates_set["end2"] = sched_valid.get("end2") or ""
+            updates_set["schedule_entries"] = schedule_entries
+            updates_set["schedule_text"] = " / ".join(schedule_text_parts)
+            updates_unset.pop("faculty_assignment_id", None)
 
         elif "section_id" in payload and not req_section_id:
+            _clear_legacy_pending_bundle()
             # clearing ALL binding (section/faculty/schedule) with NO custom data
             updates_set["section_id"] = None
             updates_set["schedule_id1"] = None
@@ -3816,6 +4512,33 @@ async def om_specialclass_post(
                 if binding.get("faculty_rejected_at"):
                     updates_set["faculty_rejected_at"] = None
 
+        if target_status_for_update == "Convert to Regular Class":
+            preview_source_doc = existing_doc_full
+            for sid in target_special_ids:
+                doc_candidate = existing_by_id.get(sid) or {}
+                if _has_direct_pending_bundle_values(doc_candidate):
+                    preview_source_doc = doc_candidate
+                    break
+            preview_doc = dict(preview_source_doc or {})
+            preview_doc.update(updates_set)
+            for key in list(updates_unset.keys()):
+                preview_doc.pop(key, None)
+
+            preview_section_id = _safe_str(preview_doc.get("section_id"))
+            if not preview_section_id:
+                created = await _materialize_regularized_pending_section_bundle(
+                    term_id=current_term_id,
+                    course_id=course_id_base,
+                    special_doc=preview_doc,
+                    exclude_special_ids=target_special_ids,
+                )
+                updates_set["section_id"] = created.get("section_id")
+                updates_set["section_code"] = _safe_str(created.get("section_code"))
+                updates_set["schedule_id1"] = created.get("schedule_id1")
+                updates_set["schedule_id2"] = created.get("schedule_id2")
+                updates_set["assignment_id"] = created.get("assignment_id")
+                updates_set["schedule_cleared"] = False
+
         if not updates_set and not updates_unset:
             return {"ok": False, "message": "Nothing to update."}
 
@@ -3825,6 +4548,17 @@ async def om_specialclass_post(
             {"term_id": current_term_id, "special_id": {"$in": target_special_ids}},
             {"$set": updates_set, "$unset": updates_unset},
         )
+
+        if res.modified_count and section_id_to_release:
+            still_bound = await db[COL_SPECIAL].find_one(
+                {"term_id": current_term_id, "section_id": section_id_to_release, "special_id": {"$nin": target_special_ids}},
+                {"_id": 1},
+            )
+            if not still_bound:
+                await _release_special_section_bundle(
+                    section_id_to_release,
+                    delete_section_shell=await _special_section_bundle_can_delete_section(section_id_to_release),
+                )
 
         converted_docs: List[Dict[str, Any]] = []
         try:

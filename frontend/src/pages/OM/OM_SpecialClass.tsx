@@ -710,11 +710,14 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
   const groups = new Map<string, OMSpecialClassRow[]>();
   input.forEach((row) => {
     const sectionId = String(row.section_id || '').trim();
+    const pendingAnchorId = String((row as any).pending_anchor_special_id || '').trim();
     const generated = Boolean(row.generated_from_class_retention);
     const manual = Boolean(row.manual_special_class);
     const courseId = String(row.course_id || '').trim();
     const key = sectionId
       ? `SEC:${sectionId}`
+      : pendingAnchorId
+      ? `PENDANCHOR:${pendingAnchorId}`
       : generated
       ? `RET:${String(row.retention_id || row.special_id || row.course_id || '').trim()}`
       : manual
@@ -792,6 +795,7 @@ function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
         room2: consensusText(rows, (r) => r.room2, 'Multiple'),
         rfc_needs_om: rows.some((r) => Boolean((r as any).rfc_needs_om)),
         manual_special_class: rows.some((r) => Boolean(r.manual_special_class)),
+        pending_anchor_special_id: consensusNullable(rows, (r) => (r as any).pending_anchor_special_id),
       } as SpecialClassGroupRow;
     })
     .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.section_code || '').localeCompare(String(b.section_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
@@ -853,7 +857,7 @@ export default function OM_SpecialClass({
   // add class
   const [adding, setAdding] = useState(false);
   const [addDraft, setAddDraft] = useState<Partial<OMSpecialClassRow>>({ status: "Forwarded To Department" });
-  const [addFacultyInput, setAddFacultyInput] = useState("");
+  const [addFacultyInput, setAddFacultyInput] = useState<string>("");
 
   // student movement
   const [pendingMove, setPendingMove] = useState<null | {
@@ -977,7 +981,7 @@ export default function OM_SpecialClass({
     if (row.group_key === pendingMove.sourceGroupKey) return false;
     if (String(row.course_id || "") !== pendingMove.courseId) return false;
     if (!row.primary_special_id) return false;
-    return !!String(row.section_id || (row as any).assignment_id || "").trim();
+    return !!String(row.section_id || (row as any).assignment_id || (row as any).pending_anchor_special_id || "").trim();
   };
 
   const openConfirm = (payload: {
@@ -1114,65 +1118,66 @@ export default function OM_SpecialClass({
     }
   };
 
+  const loadOptions = async () => {
+    try {
+      const opt: OMSpecialClassOptions = await apiFns.getOptions();
+      if (!opt.ok) throw new Error("Failed to load options");
+      setStatuses(["All Status", ...(opt.statuses || [])]);
+
+      setActiveTerm(opt.activeTerm || null);
+      const ay = opt.activeTerm?.acad_year_start;
+      const tn = opt.activeTerm?.term_number;
+      setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+      const win = opt.submission_window || {};
+      const nextWindow = { openISO: win.openISO || "", deadlineISO: win.deadlineISO || "" };
+      setSubmissionWindow(nextWindow);
+      if (nextWindow.deadlineISO) {
+        setDeadlineDraft(toLocalInput(nextWindow.deadlineISO));
+      } else {
+        const base = nextMinuteFrom();
+        const plus7 = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
+        setDeadlineDraft(toLocalInput(plus7.toISOString()));
+      }
+
+      const names = (opt.facultyOptions || [])
+        .map((f) => (f.faculty_name || "").trim())
+        .filter(Boolean);
+
+      const mapUpper: Record<string, string> = {};
+      (opt.facultyOptions || []).forEach((f) => {
+        const nm = (f.faculty_name || "").trim();
+        if (!nm) return;
+        mapUpper[nm.toUpperCase()] = f.faculty_id;
+      });
+
+      setFacultyNames(["UNASSIGNED", ...names]);
+      setFacultyNameToIdUpper(mapUpper);
+      setFacultyAvailability(((opt as any).facultyAvailability || {}) as FacultyAvailabilityMap);
+      setCourseOptions((((opt as any).courseOptions || []) as Array<{ course_id: string; course_code: string; course_title?: string }>));
+
+      const rm: Record<string, any> = {};
+      (opt.roomOptions || []).forEach((x: any) => {
+        const rid = String(x?.room_id || "").trim();
+        const rn = String(x?.room_number || "").trim();
+        if (!rid) return;
+        rm[rid] = {
+          room_number: rn,
+          building: x?.building,
+          capacity: x?.capacity,
+          room_type: x?.room_type,
+          campus_id: x?.campus_id,
+        };
+      });
+      setRoomIdToInfo(rm);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
+    }
+  };
+
   // load options
   useEffect(() => {
-    (async () => {
-      try {
-        const opt: OMSpecialClassOptions = await apiFns.getOptions();
-        if (!opt.ok) throw new Error("Failed to load options");
-        setStatuses(["All Status", ...(opt.statuses || [])]);
-
-        setActiveTerm(opt.activeTerm || null);
-        const ay = opt.activeTerm?.acad_year_start;
-        const tn = opt.activeTerm?.term_number;
-        setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
-        const win = opt.submission_window || {};
-        const nextWindow = { openISO: win.openISO || "", deadlineISO: win.deadlineISO || "" };
-        setSubmissionWindow(nextWindow);
-        if (nextWindow.deadlineISO) {
-          setDeadlineDraft(toLocalInput(nextWindow.deadlineISO));
-        } else {
-          const base = nextMinuteFrom();
-          const plus7 = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
-          setDeadlineDraft(toLocalInput(plus7.toISOString()));
-        }
-
-        const names = (opt.facultyOptions || [])
-          .map((f) => (f.faculty_name || "").trim())
-          .filter(Boolean);
-
-        const mapUpper: Record<string, string> = {};
-        (opt.facultyOptions || []).forEach((f) => {
-          const nm = (f.faculty_name || "").trim();
-          if (!nm) return;
-          mapUpper[nm.toUpperCase()] = f.faculty_id;
-        });
-
-        setFacultyNames(["UNASSIGNED", ...names]);
-        setFacultyNameToIdUpper(mapUpper);
-        setFacultyAvailability(((opt as any).facultyAvailability || {}) as FacultyAvailabilityMap);
-        setCourseOptions((((opt as any).courseOptions || []) as Array<{ course_id: string; course_code: string; course_title?: string }>));
-
-        // rooms map for display-only columns
-        const rm: Record<string, any> = {};
-        (opt.roomOptions || []).forEach((x: any) => {
-          const rid = String(x?.room_id || "").trim();
-          const rn = String(x?.room_number || "").trim();
-          if (!rid) return;
-          rm[rid] = {
-            room_number: rn,
-            building: x?.building,
-            capacity: x?.capacity,
-            room_type: x?.room_type,
-            campus_id: x?.campus_id,
-          };
-        });
-        setRoomIdToInfo(rm);
-      } catch (e: any) {
-        setErrKind("error");
-        setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
-      }
-    })();
+    void loadOptions();
   }, [apiFns]);
 
   // debounce search
@@ -1454,16 +1459,6 @@ export default function OM_SpecialClass({
     }));
   };
 
-
-
-  const cancelEdit = () => {
-    setEditId(null);
-    setEditTargetIds([]);
-    setDraft({});
-    setFacultyInput("");
-    setDidClearAll(false);
-  };
-
   const setAddSlotFromBand = (slot: 1 | 2, bandLabel: string) => {
     const found = GE_TIME_SLOTS.find((x) => x.label === bandLabel);
     if (!found) {
@@ -1475,12 +1470,25 @@ export default function OM_SpecialClass({
     }
     setAddDraft((d) => ({
       ...d,
-      ...(slot === 1 ? { begin1: found.start, end1: found.end } : { begin2: found.start, end2: found.end }),
+      ...(slot === 1
+        ? { begin1: found.start, end1: found.end }
+        : { begin2: found.start, end2: found.end }),
     }));
+  };
+
+
+
+  const cancelEdit = () => {
+    setEditId(null);
+    setEditTargetIds([]);
+    setDraft({});
+    setFacultyInput("");
+    setDidClearAll(false);
   };
 
   const openAddClass = () => {
     setAdding(true);
+    setAddFacultyInput("");
     setAddDraft({
       status: "Forwarded To Department",
       remarks: "",
@@ -1494,7 +1502,6 @@ export default function OM_SpecialClass({
       begin2: "",
       end2: "",
     });
-    setAddFacultyInput("");
   };
 
   const closeAddClass = () => {
@@ -1509,9 +1516,17 @@ export default function OM_SpecialClass({
       if (!courseId) throw new Error("Please select a course.");
 
       const typedName = (addFacultyInput || "").trim();
-      const payloadFacultyId = typedName && typedName.toUpperCase() !== "UNASSIGNED"
-        ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
-        : "";
+      const payloadFacultyId =
+        typedName && typedName.toUpperCase() !== "UNASSIGNED"
+          ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
+          : "";
+
+      const hasMeeting1 = !!addDraft.day1 && !!addDraft.begin1 && !!addDraft.end1;
+      const hasAnyMeeting2 = !!addDraft.day2 || !!addDraft.begin2 || !!addDraft.end2;
+      const hasMeeting2 = !!addDraft.day2 && !!addDraft.begin2 && !!addDraft.end2;
+      const attemptedBundleEdit = !!(
+        (addFacultyInput || "").trim() || addDraft.day1 || addDraft.begin1 || addDraft.end1 || addDraft.day2 || addDraft.begin2 || addDraft.end2
+      );
 
       const payload: any = {
         course_id: courseId,
@@ -1519,32 +1534,32 @@ export default function OM_SpecialClass({
         remarks: addDraft.remarks || "",
       };
 
-      const hasAnyScheduleField = !!(addDraft.section_code || typedName || addDraft.day1 || addDraft.begin1 || addDraft.end1 || addDraft.day2 || addDraft.begin2 || addDraft.end2);
-      if (hasAnyScheduleField) {
-        const hasMeeting1 = !!addDraft.day1 && !!addDraft.begin1 && !!addDraft.end1;
-        const hasAnyMeeting2 = !!addDraft.day2 || !!addDraft.begin2 || !!addDraft.end2;
-        const hasMeeting2 = !!addDraft.day2 && !!addDraft.begin2 && !!addDraft.end2;
-        if (!String(addDraft.section_code || "").trim()) throw new Error("Please provide a section code.");
+      setLoading(true);
+      setErr("");
+      const created = await apiFns.create(payload, getSessionUserId() || userId || undefined);
+
+      if (attemptedBundleEdit) {
         if (!payloadFacultyId) throw new Error("Please select an available faculty.");
         if (!hasMeeting1) throw new Error("Meeting 1 must include day, begin time, and end time.");
         if (hasAnyMeeting2 && !hasMeeting2) throw new Error("Meeting 2 must include day, begin time, and end time.");
 
-        payload.section_code = String(addDraft.section_code || "").trim();
-        payload.faculty_id = payloadFacultyId;
-        payload.day1 = addDraft.day1 || "";
-        payload.begin1 = addDraft.begin1 || "";
-        payload.end1 = addDraft.end1 || "";
-        payload.day2 = hasMeeting2 ? (addDraft.day2 || "") : "";
-        payload.begin2 = hasMeeting2 ? (addDraft.begin2 || "") : "";
-        payload.end2 = hasMeeting2 ? (addDraft.end2 || "") : "";
+        await apiFns.update(created.special_id, ({
+          special_ids: [created.special_id],
+          status: addDraft.status || "Forwarded To Department",
+          remarks: addDraft.remarks || "",
+          faculty_id: payloadFacultyId,
+          day1: (addDraft.day1 || "") as any,
+          begin1: addDraft.begin1 || "",
+          end1: addDraft.end1 || "",
+          day2: hasMeeting2 ? ((addDraft.day2 || "") as any) : "",
+          begin2: hasMeeting2 ? (addDraft.begin2 || "") : "",
+          end2: hasMeeting2 ? (addDraft.end2 || "") : "",
+        } as any), getSessionUserId() || userId || undefined);
       }
 
-      setLoading(true);
-      setErr("");
-      await apiFns.create(payload, getSessionUserId() || userId || undefined);
       closeAddClass();
-      toast("Special class added.", "success");
-      await load();
+      toast(attemptedBundleEdit ? "Special class added with faculty and schedule. APO can assign the section later." : "Special class added. APO can assign the section later.", "success");
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to add special class.");
@@ -1598,7 +1613,7 @@ export default function OM_SpecialClass({
       await apiFns.assignStudent(inlineAssignState.targetSpecialId, inlineAssignState.selectedStudentId, getSessionUserId() || userId || undefined);
       setInlineAssignState(null);
       toast("Student added to class.", "success");
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to add student to class.");
@@ -1653,7 +1668,7 @@ export default function OM_SpecialClass({
       setPendingMove(null);
       setInlineAssignState(null);
       toast(`${movedStudentName} moved successfully.`, "success");
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to move student.");
@@ -1671,7 +1686,7 @@ export default function OM_SpecialClass({
       setPendingMove(null);
       setInlineAssignState(null);
       toast(`${movedStudentName} unassigned successfully.`, "success");
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to unassign student.");
@@ -1711,7 +1726,7 @@ export default function OM_SpecialClass({
       closeInlineAssign();
       cancelPendingMove();
       toast(res?.message || (res?.kept_row ? "Special class cleared." : "Special class deleted."), "success");
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to delete special class.");
@@ -1738,11 +1753,17 @@ export default function OM_SpecialClass({
         remarks: draft.remarks,
       };
 
-      const statusOnlySave = draft.status === "Rejected" || draft.status === "Convert to Regular Class";
+      const currentSectionId = String((draft.section_id || "") as string).trim();
+      const hasAssignedSection = !!currentSectionId;
+      const hasMeeting1 = !!draft.day1 && !!draft.begin1 && !!draft.end1;
+      const hasAnyMeeting2 = !!draft.day2 || !!draft.begin2 || !!draft.end2;
+      const hasMeeting2 = !!draft.day2 && !!draft.begin2 && !!draft.end2;
+      const attemptedBundleEdit = !!(
+        (facultyInput || "").trim() || draft.day1 || draft.begin1 || draft.end1 || draft.day2 || draft.begin2 || draft.end2
+      );
 
       if (didClearAll) {
         payload.section_id = "";
-        payload.section_code = "";
         payload.faculty_id = null;
         payload.day1 = "";
         payload.begin1 = "";
@@ -1750,17 +1771,12 @@ export default function OM_SpecialClass({
         payload.day2 = "";
         payload.begin2 = "";
         payload.end2 = "";
-      } else if (!statusOnlySave) {
-        const hasMeeting1 = !!draft.day1 && !!draft.begin1 && !!draft.end1;
-        const hasAnyMeeting2 = !!draft.day2 || !!draft.begin2 || !!draft.end2;
-        const hasMeeting2 = !!draft.day2 && !!draft.begin2 && !!draft.end2;
-
+      } else if (attemptedBundleEdit || hasAssignedSection) {
         if (!payloadFacultyId) throw new Error("Please select an available faculty.");
         if (!hasMeeting1) throw new Error("Meeting 1 must include day, begin time, and end time.");
         if (hasAnyMeeting2 && !hasMeeting2) throw new Error("Meeting 2 must include day, begin time, and end time.");
 
-        payload.section_id = draft.section_id || null;
-        payload.section_code = (draft.section_code || "").toString().trim();
+        if (hasAssignedSection) payload.section_id = currentSectionId;
         payload.faculty_id = payloadFacultyId;
         payload.day1 = (draft.day1 || "") as any;
         payload.begin1 = draft.begin1 || "";
@@ -1779,7 +1795,7 @@ export default function OM_SpecialClass({
       setDraft({});
       setFacultyInput("");
       setDidClearAll(false);
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to update special class.");
@@ -1818,6 +1834,69 @@ export default function OM_SpecialClass({
   };
 
   const allVisibleSelected = groupedRows.length > 0 && groupedRows.every((r) => !!selectedIds[r.group_key]);
+  const addSelectedFacultyId = String((
+    (addFacultyInput.trim() && addFacultyInput.toUpperCase() !== "UNASSIGNED"
+      ? (facultyNameToIdUpper[addFacultyInput.trim().toUpperCase()] || "")
+      : "")
+    || addDraft.faculty_id
+    || ""
+  )).trim();
+  const addPeerMeetings = buildMeetingSlots({
+    day1: addDraft.day1 as string | undefined,
+    begin1: addDraft.begin1 as string | undefined,
+    end1: addDraft.end1 as string | undefined,
+    day2: addDraft.day2 as string | undefined,
+    begin2: addDraft.begin2 as string | undefined,
+    end2: addDraft.end2 as string | undefined,
+  });
+  const addSlot1PeerMeetings = addPeerMeetings.filter((m) => m.slot !== 1);
+  const addSlot2PeerMeetings = addPeerMeetings.filter((m) => m.slot !== 2);
+  const availableAddFacultyNames = facultyNames.filter((name) => {
+    if (name === "UNASSIGNED") return true;
+    const fid = facultyNameToIdUpper[name.toUpperCase()] || "";
+    if (!fid) return false;
+    return !facultyHasConflictForMeetings({
+      facultyId: fid,
+      meetings: addPeerMeetings,
+      busySlots: facultyAvailability,
+    });
+  });
+  const availableAddDay1Options = DAY_OPTS_LABELS.filter((label) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: DAY_FROM_LABEL[label],
+      begin: String(addDraft.begin1 || ""),
+      peerMeetings: addSlot1PeerMeetings,
+      busySlots: facultyAvailability,
+    })
+  );
+  const availableAddBegin1Options = GE_TIME_SLOTS.filter((slot) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: String(addDraft.day1 || ""),
+      begin: slot.start,
+      peerMeetings: addSlot1PeerMeetings,
+      busySlots: facultyAvailability,
+    })
+  );
+  const availableAddDay2Options = DAY_OPTS_LABELS.filter((label) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: DAY_FROM_LABEL[label],
+      begin: String(addDraft.begin2 || ""),
+      peerMeetings: addSlot2PeerMeetings,
+      busySlots: facultyAvailability,
+    })
+  );
+  const availableAddBegin2Options = GE_TIME_SLOTS.filter((slot) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: String(addDraft.day2 || ""),
+      begin: slot.start,
+      peerMeetings: addSlot2PeerMeetings,
+      busySlots: facultyAvailability,
+    })
+  );
   const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
 
   return (
@@ -2026,63 +2105,137 @@ export default function OM_SpecialClass({
                   </td>
 
                   <td className="px-4 py-3 text-center align-top">
-                    <input
-                      value={String(addDraft.section_code || "")}
-                      onChange={(e) => setAddDraft((d) => ({ ...d, section_code: e.target.value }))}
-                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:ring-2 focus:ring-emerald-500/30"
-                      placeholder="e.g. SS2"
-                    />
+                    <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">—</div>
                   </td>
 
-                  <td className="px-4 py-3 text-left align-top">
+                  <td className="px-4 py-3 min-w-[240px] align-top">
                     <ComboSelect
-                      value={addFacultyInput}
+                      value={addFacultyInput?.trim() ? addFacultyInput : ""}
                       onChange={(v) => {
                         const t = (v || "").trim();
+                        if (t === "" || t.toUpperCase() === "UNASSIGNED") {
+                          setAddFacultyInput("");
+                          setAddDraft((d) => ({ ...d, faculty_id: null }));
+                          return;
+                        }
                         setAddFacultyInput(t);
-                        const fid = t && t.toUpperCase() !== "UNASSIGNED" ? facultyNameToIdUpper[t.toUpperCase()] || "" : "";
-                        setAddDraft((d) => ({ ...d, faculty_id: fid || null }));
+                        const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
+                        setAddDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
                       }}
-                      options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
-                      placeholder="Select Faculty"
+                      options={["", "UNASSIGNED", ...availableAddFacultyNames.filter((n) => n !== "UNASSIGNED")]}
+                      placeholder={facultyNames.length > 1 ? (availableAddFacultyNames.length > 1 ? "Select Faculty" : "No available faculty") : "Loading…"}
                     />
                   </td>
 
-                  <td className="px-4 py-3 text-center align-top">
-                    <div className="space-y-2 min-w-[150px]">
-                      <SelectBox
-                        value={addDraft.day1 ? DAY_LABELS[addDraft.day1 as DayCode] : DAY_PLACEHOLDER}
-                        onChange={(lbl) => setAddDraft((d) => ({ ...d, day1: lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "") as any }))}
-                        options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
-                      />
-                      <SelectBox
-                        value={addDraft.day2 ? DAY_LABELS[addDraft.day2 as DayCode] : DAY_PLACEHOLDER}
-                        onChange={(lbl) => setAddDraft((d) => ({ ...d, day2: lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "") as any }))}
-                        options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
-                      />
-                    </div>
-                  </td>
-
-                  <td className="px-4 py-3 text-center align-top">
-                    <div className="space-y-2 min-w-[180px]">
-                      <div className="space-y-1">
-                        <SelectBox
-                          value={prettyHHMM(addDraft.begin1 || "") || "Select time…"}
-                          onChange={(band) => setAddSlotFromBand(1, band === "Select time…" ? "" : band)}
-                          options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                        />
-                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 text-left">
-                          End 1: {prettyHHMM(addDraft.end1 || "") || "—"}
+                  <td className="px-4 py-3 align-top min-w-[620px]" colSpan={2}>
+                    <div className="rounded-xl border border-neutral-200 bg-white px-4 py-4">
+                      <div className="space-y-5">
+                        <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                          Section stays blank here until APO assigns the section and room. OM/CHAIR can already save faculty, schedule, status, and remarks.
                         </div>
-                      </div>
-                      <div className="space-y-1">
-                        <SelectBox
-                          value={prettyHHMM(addDraft.begin2 || "") || "Select time…"}
-                          onChange={(band) => setAddSlotFromBand(2, band === "Select time…" ? "" : band)}
-                          options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                        />
-                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-600 text-left">
-                          End 2: {prettyHHMM(addDraft.end2 || "") || "—"}
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Day 1</div>
+                              <SelectBox
+                                value={addDraft.day1 ? DAY_LABELS[addDraft.day1 as DayCode] : DAY_PLACEHOLDER}
+                                onChange={(lbl) => {
+                                  const nextDay1 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                  const autoDay2 = nextDay1 ? (DAY_PAIR[nextDay1] || "") : "";
+                                  setAddDraft((d) => {
+                                    const next = { ...d, day1: nextDay1 as any, day2: autoDay2 as any };
+                                    if (addSelectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: addSlot1PeerMeetings, busySlots: facultyAvailability })) {
+                                      next.begin1 = "";
+                                      next.end1 = "";
+                                    }
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: facultyAvailability })) {
+                                      next.begin2 = "";
+                                      next.end2 = "";
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                options={[DAY_PLACEHOLDER, ...(addSelectedFacultyId ? availableAddDay1Options : DAY_OPTS_LABELS)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Begin 1</div>
+                              <SelectBox
+                                value={prettyHHMM(addDraft.begin1 || "") || "Select time…"}
+                                onChange={(band) => {
+                                  if (band === "Select time…") {
+                                    setAddSlotFromBand(1, "");
+                                    return;
+                                  }
+                                  setAddSlotFromBand(1, band);
+                                }}
+                                options={["Select time…", ...(addSelectedFacultyId ? availableAddBegin1Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">End 1</div>
+                              <input
+                                value={prettyHHMM(addDraft.end1 || "")}
+                                disabled
+                                className={cls(
+                                  "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                  "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                )}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 border-t border-neutral-200 pt-5">
+                          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Day 2</div>
+                              <SelectBox
+                                value={addDraft.day2 ? DAY_LABELS[addDraft.day2 as DayCode] : DAY_PLACEHOLDER}
+                                onChange={(lbl) => {
+                                  const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                  setAddDraft((d) => {
+                                    const next = { ...d, day2: nextDay2 as any };
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: facultyAvailability })) {
+                                      next.begin2 = "";
+                                      next.end2 = "";
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                options={[DAY_PLACEHOLDER, ...(addSelectedFacultyId ? availableAddDay2Options : DAY_OPTS_LABELS)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Begin 2</div>
+                              <SelectBox
+                                value={prettyHHMM(addDraft.begin2 || "") || "Select time…"}
+                                onChange={(band) => {
+                                  if (band === "Select time…") {
+                                    setAddSlotFromBand(2, "");
+                                    return;
+                                  }
+                                  setAddSlotFromBand(2, band);
+                                }}
+                                options={["Select time…", ...(addSelectedFacultyId ? availableAddBegin2Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">End 2</div>
+                              <input
+                                value={prettyHHMM(addDraft.end2 || "")}
+                                disabled
+                                className={cls(
+                                  "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                  "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                )}
+                              />
+                            </div>
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -2155,7 +2308,7 @@ export default function OM_SpecialClass({
               ) : (
                 groupedRows.map((r) => {
                   const editing = editId === r.group_key;
-                  const canEditSectionFaculty = true;
+                  const canEditFacultySchedule = true;
                   const visibleStudents = visibleStudentsForRow(r);
                   const displayCount = visibleCountForRow(r);
                   const moveSourceRow = pendingMove?.sourceGroupKey === r.group_key;
@@ -2359,24 +2512,9 @@ export default function OM_SpecialClass({
                           <>
                             <td className="px-4 py-3 text-center">
                               {editing ? (
-                                canEditSectionFaculty ? (
-                                  <input
-                                    value={(draft.section_code || "") as string}
-                                    onChange={(e) => {
-                                      setDraft((d) => ({ ...d, section_code: e.target.value }));
-                                    }}
-                                    placeholder=" "
-                                    className={cls(
-                                      "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                      "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition",
-                                      "min-w-[60px]"
-                                    )}
-                                  />
-                                ) : (
-                                  <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
-                                    {(draft.section_code || r.section_code || "—") as string}
-                                  </div>
-                                )
+                                <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+                                  {(draft.section_code || r.section_code || "—") as string}
+                                </div>
                               ) : (
                                 <div className="font-medium">{r.section_code?.trim() ? r.section_code : "—"}</div>
                               )}
@@ -2387,7 +2525,7 @@ export default function OM_SpecialClass({
                                 <ComboSelect
                                   value={facultyInput?.trim() ? facultyInput : ""}
                                   onChange={(v) => {
-                                    if (!canEditSectionFaculty) return;
+                                    if (!canEditFacultySchedule) return;
                                     const t = (v || "").trim();
                                     if (t === "" || t.toUpperCase() === "UNASSIGNED") {
                                       setFacultyInput("");
@@ -2400,7 +2538,7 @@ export default function OM_SpecialClass({
                                   }}
                                   options={["", "UNASSIGNED", ...availableFacultyNames.filter((n) => n !== "UNASSIGNED")]}
                                   placeholder={facultyNames.length > 1 ? (availableFacultyNames.length > 1 ? "Select Faculty" : "No available faculty") : "Loading…"}
-                                  disabled={!canEditSectionFaculty}
+                                  disabled={!canEditFacultySchedule}
                                 />
                               ) : (
                                 <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
@@ -2412,11 +2550,15 @@ export default function OM_SpecialClass({
                                 <td className="px-4 py-3 align-top min-w-[620px]" colSpan={2}>
                                   <div className="rounded-xl border border-neutral-200 bg-white px-4 py-4">
                                     <div className="space-y-5">
+                                      <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                                        Section stays blank here until APO assigns the section and room. OM/CHAIR can still save faculty, schedule, status, and remarks.
+                                      </div>
                                       <div className="space-y-2">
                                         <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
                                           <div className="space-y-1.5">
                                             <div className="text-[12px] font-semibold text-emerald-800">Day 1</div>
                                             <SelectBox
+                                              disabled={!canEditFacultySchedule}
                                               value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : DAY_PLACEHOLDER}
                                               onChange={(lbl) => {
                                                 const nextDay1 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
@@ -2441,6 +2583,7 @@ export default function OM_SpecialClass({
                                           <div className="space-y-1.5">
                                             <div className="text-[12px] font-semibold text-emerald-800">Begin 1</div>
                                             <SelectBox
+                                              disabled={!canEditFacultySchedule}
                                               value={prettyHHMM(draft.begin1 || "") || "Select time…"}
                                               onChange={(band) => {
                                                 if (band === "Select time…") {
@@ -2472,6 +2615,7 @@ export default function OM_SpecialClass({
                                           <div className="space-y-1.5">
                                             <div className="text-[12px] font-semibold text-emerald-800">Day 2</div>
                                             <SelectBox
+                                              disabled={!canEditFacultySchedule}
                                               value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : DAY_PLACEHOLDER}
                                               onChange={(lbl) => {
                                                 const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
@@ -2491,6 +2635,7 @@ export default function OM_SpecialClass({
                                           <div className="space-y-1.5">
                                             <div className="text-[12px] font-semibold text-emerald-800">Begin 2</div>
                                             <SelectBox
+                                              disabled={!canEditFacultySchedule}
                                               value={prettyHHMM(draft.begin2 || "") || "Select time…"}
                                               onChange={(band) => {
                                                 if (band === "Select time…") {
