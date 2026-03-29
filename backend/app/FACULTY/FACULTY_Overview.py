@@ -2472,6 +2472,57 @@ def _serviced_mode_from_rooms(room1: str | None, room2: str | None) -> str:
     # Otherwise default to FOL.
     return "HYB" if (_is_real_room_label(room1 or "") or _is_real_room_label(room2 or "")) else "FOL"
 
+def _section_doc_is_dissolved(doc: Optional[Dict[str, Any]]) -> bool:
+    row = doc or {}
+    if bool(row.get("is_dissolved")):
+        return True
+    if str(row.get("class_retention_status") or "").strip().lower() == "dissolved":
+        return True
+    remarks = str(row.get("remarks") or "")
+    return "dissolved" in remarks.lower()
+
+
+async def _dissolved_section_ids(section_ids: List[str]) -> set[str]:
+    ids = sorted({str(s or "").strip() for s in (section_ids or []) if str(s or "").strip()})
+    if not ids:
+        return set()
+
+    q = {
+        "section_id": {"$in": ids},
+        "$or": [
+            {"is_dissolved": True},
+            {"class_retention_status": {"$regex": r"^dissolved$", "$options": "i"}},
+            {"remarks": {"$regex": r"(^|\|)\s*DISSOLVED\s*(\||$)", "$options": "i"}},
+        ],
+    }
+    docs = []
+    try:
+        docs.extend(await db[COL_SECTIONS].find(q, {"_id": 0, "section_id": 1}).to_list(None))
+    except Exception:
+        pass
+    try:
+        docs.extend(await db["sections_submitted"].find(q, {"_id": 0, "section_id": 1}).to_list(None))
+    except Exception:
+        pass
+    return {str((d or {}).get("section_id") or "").strip() for d in (docs or []) if str((d or {}).get("section_id") or "").strip()}
+
+
+async def _filter_out_dissolved_regular_rows(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    regular_ids = [
+        str(r.get("section_id") or r.get("sectionId") or "").strip()
+        for r in (rows or [])
+        if not bool((r or {}).get("is_special_class")) and str(r.get("section_id") or r.get("sectionId") or "").strip()
+    ]
+    dissolved = await _dissolved_section_ids(regular_ids)
+    if not dissolved:
+        return list(rows or [])
+    return [
+        r for r in (rows or [])
+        if bool((r or {}).get("is_special_class"))
+        or str(r.get("section_id") or r.get("sectionId") or "").strip() not in dissolved
+    ]
+
+
 async def _serviced_section_map_for_faculty(*, term_id: str, faculty_id: str) -> Dict[str, str]:
     """Return section_id -> from_department for CHAIR-approved Faculty Service rows (status=responded).
 
@@ -2495,9 +2546,13 @@ async def _serviced_section_map_for_faculty(*, term_id: str, faculty_id: str) ->
 
     sec_docs = await db[COL_SECTIONS].find(
         {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
-        {"_id": 0, "section_id": 1},
+        {"_id": 0, "section_id": 1, "is_dissolved": 1, "class_retention_status": 1, "remarks": 1},
     ).to_list(None)
-    valid = {str(s.get("section_id") or "").strip() for s in (sec_docs or []) if s and s.get("section_id")}
+    valid = {
+        str(s.get("section_id") or "").strip()
+        for s in (sec_docs or [])
+        if s and s.get("section_id") and not _section_doc_is_dissolved(s)
+    }
 
     out: Dict[str, str] = {}
     for d in (docs or []):
@@ -2623,13 +2678,23 @@ async def _fetch_reflected_faculty_service_rows_for_faculty(
 
     sec_docs = await db[COL_SECTIONS].find(
         {"section_id": {"$in": sec_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
-        {"_id": 0, "section_id": 1, "section_code": 1, "section": 1, "section_name": 1, "course_id": 1},
+        {
+            "_id": 0,
+            "section_id": 1,
+            "section_code": 1,
+            "section": 1,
+            "section_name": 1,
+            "course_id": 1,
+            "is_dissolved": 1,
+            "class_retention_status": 1,
+            "remarks": 1,
+        },
     ).to_list(None)
 
     sec_by_id: Dict[str, Dict[str, Any]] = {
         str(s.get("section_id") or "").strip(): (s or {})
         for s in (sec_docs or [])
-        if s and s.get("section_id")
+        if s and s.get("section_id") and not _section_doc_is_dissolved(s)
     }
 
     valid_ids = [sid for sid in sec_ids if sid in sec_by_id]
@@ -2772,9 +2837,23 @@ async def _fetch_converted_special_regular_rows_for_faculty(
 
     sec_docs = await db[COL_SECTIONS].find(
         {"section_id": {"$in": section_ids}, "$or": [{"term_id": term_id}, {"termId": term_id}]},
-        {"_id": 0, "section_id": 1, "section_code": 1, "section": 1, "section_name": 1, "course_id": 1},
+        {
+            "_id": 0,
+            "section_id": 1,
+            "section_code": 1,
+            "section": 1,
+            "section_name": 1,
+            "course_id": 1,
+            "is_dissolved": 1,
+            "class_retention_status": 1,
+            "remarks": 1,
+        },
     ).to_list(None)
-    sec_by_id = {str(s.get("section_id") or "").strip(): (s or {}) for s in (sec_docs or []) if s and s.get("section_id")}
+    sec_by_id = {
+        str(s.get("section_id") or "").strip(): (s or {})
+        for s in (sec_docs or [])
+        if s and s.get("section_id") and not _section_doc_is_dissolved(s)
+    }
     valid_ids = [sid for sid in section_ids if sid in sec_by_id]
     if not valid_ids:
         return []
@@ -3974,10 +4053,7 @@ async def overview_handler(
                 "time2": time2,
                 "syllabus": r.get("syllabus", ""),
             })
-
-
-
-            
+        final_teaching_load = await _filter_out_dissolved_regular_rows(final_teaching_load)
         final_teaching_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", "")))
 
         # --- *** MODIFIED: Calculate units/preps with FALLBACK LOGIC *** ---
@@ -4121,6 +4197,8 @@ async def overview_handler(
                     {"_id": 0, "section_id": 1, "imported_at": 1, "created_at": 1, "createdAt": 1, "updated_at": 1, "updatedAt": 1},
                 )
                 if not sec_doc:
+                    continue
+                if _section_doc_is_dissolved(sec_doc):
                     continue
 
                 # Additional stale guard: if this proposal predates the current section snapshot (e.g., after DB restore/clean
@@ -4278,6 +4356,7 @@ async def overview_handler(
             proposal_status_l = "proposed"
             summary["load_status"] = "Proposed"
 
+        merged_load = await _filter_out_dissolved_regular_rows(merged_load)
         merged_load.sort(
             key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class"))))
         )
@@ -4442,6 +4521,7 @@ async def get_faculty_overview(userId: str = Query(...)):
 
 
         final_teaching_load.append({
+            "section_id": _as_code_str(r.get("_id") or r.get("section_id") or r.get("sectionId") or ""),
             "course_code": _as_code_str(r.get("course_code")),
             "course_title": r.get("course_title", ""),
             "section": r.get("section", ""),
@@ -4647,6 +4727,7 @@ async def get_faculty_overview(userId: str = Query(...)):
         if email_local:
             full_name = email_local.replace(".", " ").replace("_", " ").title()
             
+    merged_load = await _filter_out_dissolved_regular_rows(merged_load)
     merged_load.sort(key=lambda x: (x.get("course_code", ""), x.get("section", ""), str(bool(x.get("is_special_class")))))
 
     return {

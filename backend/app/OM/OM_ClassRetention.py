@@ -902,6 +902,133 @@ async def _derive_faculty_for_section(section_id: Optional[str]) -> Optional[str
     return fa.get("faculty_id") if fa else None
 
 
+async def _faculty_notification_targets_for_section(section_id: Optional[str], faculty_id: Optional[str] = None) -> List[Dict[str, str]]:
+    """Resolve faculty recipients for a section dissolution notification.
+
+    Best-effort strategy:
+    - latest non-archived faculty assignment for the section
+    - explicit faculty_id if already known
+    - faculty_profiles.user_id / users.email for delivery
+    """
+    resolved_faculty_id = str(faculty_id or "").strip()
+    if not resolved_faculty_id:
+        resolved_faculty_id = str(await _derive_faculty_for_section(section_id) or "").strip()
+    if not resolved_faculty_id:
+        return []
+
+    prof = await db[COL_FAC_PROFILES].find_one(
+        {"faculty_id": resolved_faculty_id},
+        {
+            "_id": 0,
+            "faculty_id": 1,
+            "user_id": 1,
+            "first_name": 1,
+            "last_name": 1,
+            "firstName": 1,
+            "lastName": 1,
+            "email": 1,
+        },
+    ) or {}
+
+    user_id = str(prof.get("user_id") or "").strip()
+    user_doc: Dict[str, Any] = {}
+    if user_id:
+        user_doc = await db[COL_USERS].find_one(
+            {"user_id": user_id},
+            {"_id": 0, "user_id": 1, "email": 1, "first_name": 1, "last_name": 1, "firstName": 1, "lastName": 1},
+        ) or {}
+
+    first_name = str(
+        prof.get("first_name") or prof.get("firstName") or user_doc.get("first_name") or user_doc.get("firstName") or ""
+    ).strip()
+    last_name = str(
+        prof.get("last_name") or prof.get("lastName") or user_doc.get("last_name") or user_doc.get("lastName") or ""
+    ).strip()
+    full_name = " ".join([x for x in [first_name, last_name] if x]).strip()
+
+    email = str(prof.get("email") or user_doc.get("email") or "").strip()
+
+    return [{
+        "faculty_id": resolved_faculty_id,
+        "user_id": user_id,
+        "email": email,
+        "full_name": full_name,
+    }]
+
+
+async def _notify_faculty_dissolved(
+    *,
+    term_id: str,
+    course_id: str,
+    section_id: str,
+    faculty_id: str | None = None,
+    enrolled: Any = None,
+    email_from_user_id: str | None = None,
+) -> None:
+    """Notify the assigned faculty in-app + Gmail that a class was dissolved.
+
+    This must work regardless of whether the faculty already accepted/finalized the
+    load assignment because dissolution happens upstream in Class Retention.
+    """
+    try:
+        recipients = await _faculty_notification_targets_for_section(section_id, faculty_id)
+        if not recipients:
+            return
+
+        course = await db[COL_COURSES].find_one(
+            {"course_id": course_id},
+            {"_id": 0, "course_code": 1, "course_title": 1},
+        ) or {}
+        cc = course.get("course_code")
+        course_code = (cc[0] if isinstance(cc, list) and cc else cc) or ""
+        course_code = str(course_code or "").strip()
+        course_title = str(course.get("course_title") or "").strip()
+
+        sec = await db[COL_SECTIONS].find_one(
+            {"section_id": section_id},
+            {"_id": 0, "section_code": 1, "enrolled": 1},
+        ) or {}
+        section_code = str(sec.get("section_code") or "").strip()
+        enrolled_val = enrolled if enrolled is not None else sec.get("enrolled")
+
+        title = "Class dissolved"
+        parts = ["A class assigned to you was dissolved in Class Retention and has been removed from your Faculty Overview and Load Assignment views."]
+        if course_code or course_title:
+            parts.append(f"Course: {course_code} — {course_title}".strip(" —"))
+        if section_code:
+            if enrolled_val is not None and str(enrolled_val) != "":
+                parts.append(f"Section: {section_code} (enrolled: {enrolled_val})")
+            else:
+                parts.append(f"Section: {section_code}")
+        details = "\n".join([p for p in parts if p])
+
+        meta = {
+            "route": "/faculty",
+            "kind": "faculty_class_dissolved",
+            "term_id": term_id,
+            "course_id": course_id,
+            "section_id": section_id,
+        }
+
+        for rec in recipients:
+            uid = str((rec or {}).get("user_id") or "").strip()
+            if not uid:
+                continue
+            try:
+                await create_notification(
+                    user_id=uid,
+                    title=title,
+                    details=details,
+                    meta=meta,
+                    send_email=True,
+                    email_from_user_id=email_from_user_id,
+                )
+            except Exception:
+                continue
+    except Exception:
+        return
+
+
 async def _course_units_for_course(course_id: Optional[str]) -> Dict[str, Optional[int]]:
     """Return canonical student/faculty units for a course.
 
@@ -1269,6 +1396,15 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                     email_from_user_id=(userId or None),
                 )
 
+                await _notify_faculty_dissolved(
+                    term_id=prev_term_id or str(out.get("term_id") or ""),
+                    course_id=prev_course_id or str(out.get("course_id") or ""),
+                    section_id=str(section_id_for_fac or "").strip(),
+                    faculty_id=str(update_doc.get("faculty_id") or existing.get("faculty_id") or "").strip() or None,
+                    enrolled=(payload.get("enrolled") if "enrolled" in payload else out.get("enrolled", prev_enrolled)),
+                    email_from_user_id=(userId or None),
+                )
+
             return {"ok": True, "retention_id": rid}
 
         # CREATE
@@ -1346,6 +1482,15 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                 term_id=str(doc.get("term_id") or ""),
                 course_id=str(doc.get("course_id") or ""),
                 section_id=str(doc.get("section_id") or ""),
+                enrolled=doc.get("enrolled"),
+                email_from_user_id=(userId or None),
+            )
+
+            await _notify_faculty_dissolved(
+                term_id=str(doc.get("term_id") or ""),
+                course_id=str(doc.get("course_id") or ""),
+                section_id=str(doc.get("section_id") or ""),
+                faculty_id=str(doc.get("faculty_id") or "").strip() or None,
                 enrolled=doc.get("enrolled"),
                 email_from_user_id=(userId or None),
             )
@@ -1444,6 +1589,15 @@ async def cr_post(action: str = Query(...), userId: Optional[str] = Query(None),
                         term_id=term_id,
                         course_id=course_id,
                         section_id=section_id,
+                        enrolled=(r or {}).get("enrolled"),
+                        email_from_user_id=(userId or None),
+                    )
+
+                    await _notify_faculty_dissolved(
+                        term_id=term_id,
+                        course_id=course_id,
+                        section_id=section_id,
+                        faculty_id=str((r or {}).get("faculty_id") or "").strip() or None,
                         enrolled=(r or {}).get("enrolled"),
                         email_from_user_id=(userId or None),
                     )

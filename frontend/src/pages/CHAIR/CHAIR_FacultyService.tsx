@@ -1113,6 +1113,105 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
   const getEditFrom = (all: Record<string, ReceiverEdit>, id: string): ReceiverEdit => all[id] || EMPTY_EDIT;
   const getEdit = (id: string): ReceiverEdit => getEditFrom(edits, id);
 
+  const refreshReceivedAvailability = async (dept: string) => {
+    if (!dept) return;
+    await ensureFacultyForDept(dept, true);
+  };
+
+  const sanitizeReceivedEdit = (row: FacultyServiceRow, edit: ReceiverEdit): ReceiverEdit => {
+    const dept = row.to_department || "";
+    const busySlots = facultyAvailabilityCache[dept] || {};
+    const sectionId = String((row as any)?.section_id || "").trim();
+    const next: ReceiverEdit = { ...edit };
+
+    if (next.begin1) next.end1 = END_BY_BEGIN[next.begin1 as keyof typeof END_BY_BEGIN] || next.end1 || "";
+    if (next.begin2) next.end2 = END_BY_BEGIN[next.begin2 as keyof typeof END_BY_BEGIN] || next.end2 || "";
+
+    const selectedFacultyId = String(next.faculty?.faculty_id || "").trim();
+    if (selectedFacultyId) {
+      const meetings = buildMeetingSlots({
+        day1: next.day1,
+        begin1: next.begin1,
+        end1: next.end1,
+        day2: next.day2,
+        begin2: next.begin2,
+        end2: next.end2,
+      });
+
+      if (
+        facultyHasConflictForMeetings({
+          facultyId: selectedFacultyId,
+          meetings,
+          busySlots,
+          excludeSectionId: sectionId,
+        })
+      ) {
+        next.faculty = undefined;
+      }
+    }
+
+    const activeFacultyId = String(next.faculty?.faculty_id || "").trim();
+    const slot1PeerMeetings = buildMeetingSlots({
+      day1: "",
+      begin1: "",
+      end1: "",
+      day2: next.day2,
+      begin2: next.begin2,
+      end2: next.end2,
+    });
+    const slot2PeerMeetings = buildMeetingSlots({
+      day1: next.day1,
+      begin1: next.begin1,
+      end1: next.end1,
+      day2: "",
+      begin2: "",
+      end2: "",
+    });
+
+    if (activeFacultyId && next.day1 && next.begin1) {
+      const slot1Valid = slotOptionIsAvailable({
+        facultyId: activeFacultyId,
+        slot: 1,
+        day: next.day1,
+        begin: next.begin1,
+        peerMeetings: slot1PeerMeetings,
+        busySlots,
+        excludeSectionId: sectionId,
+      });
+      if (!slot1Valid) {
+        next.begin1 = "";
+        next.end1 = "";
+      }
+    }
+
+    if (activeFacultyId && next.day2 && next.begin2) {
+      const slot2Valid = slotOptionIsAvailable({
+        facultyId: activeFacultyId,
+        slot: 2,
+        day: next.day2,
+        begin: next.begin2,
+        peerMeetings: slot2PeerMeetings,
+        busySlots,
+        excludeSectionId: sectionId,
+      });
+      if (!slot2Valid) {
+        next.begin2 = "";
+        next.end2 = "";
+      }
+    }
+
+    if (activeFacultyId && next.begin1 && !next.day1) {
+      next.begin1 = "";
+      next.end1 = "";
+    }
+    if (activeFacultyId && next.begin2 && !next.day2) {
+      next.begin2 = "";
+      next.end2 = "";
+    }
+
+    return next;
+  };
+
   /* -------------------- Undo / Redo (Received Requests edits) --------------------
      - Ctrl/Cmd+Z => Undo
      - Ctrl/Cmd+Y or Ctrl/Cmd+Shift+Z => Redo
@@ -1232,6 +1331,24 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
 
   const [sentRows, setSentRows] = useState<FacultyServiceRow[]>([]);
   const [receivedRows, setReceivedRows] = useState<FacultyServiceRow[]>([]);
+
+  useEffect(() => {
+    if (!receivedRows.length) return;
+    setEdits((prev) => {
+      let changed = false;
+      const next = { ...prev };
+      for (const row of receivedRows) {
+        const fsid = String((row as any)?.fs_id || (row as any)?.id || "").trim();
+        if (!fsid || !next[fsid]) continue;
+        const sanitized = sanitizeReceivedEdit(row, next[fsid]);
+        if (JSON.stringify(sanitized) !== JSON.stringify(next[fsid])) {
+          next[fsid] = sanitized;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [receivedRows, facultyAvailabilityCache]);
   const [loadingList, setLoadingList] = useState(false);
   const [collapsedReceivedRows, setCollapsedReceivedRows] = useState<Record<string, boolean>>({});
   const autoCollapsedReceivedRef = useRef<Record<string, boolean>>({});
@@ -1380,8 +1497,9 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
   }, [activeDeptName]);
 
   // Load faculty list per receiver dept
-  async function ensureFacultyForDept(dept: string) {
-    if (!dept || (facultyCache[dept] && facultyAvailabilityCache[dept])) return;
+  async function ensureFacultyForDept(dept: string, force = false) {
+    if (!dept) return;
+    if (!force && facultyCache[dept] && facultyAvailabilityCache[dept]) return;
     try {
       const rawOptions = await getFSOptions({ toDepartment: dept as any });
       const o: any = rawOptions;
@@ -1555,6 +1673,10 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
       setSentRows(sentList);
       setReceivedRows(receivedList);
 
+      if (activeDeptName) {
+        await ensureFacultyForDept(activeDeptName, true);
+      }
+
       // Populate RFC pending status for Received rows (Approve/Pending indicator).
       hydrateRfcPendingForReceived(receivedList).catch(() => {});
 
@@ -1682,6 +1804,17 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
 
   const canSendRow = (r: DraftRow) =>
     Boolean(r.course_code && r.section_id && r.course_title && r.units != null && r.to_department);
+
+  const selectedDraftSectionIds = useMemo(() => {
+    const selected = draftRows.filter((r) => (selectedDraftIds[r._tmpId] ?? true));
+    const counts: Record<string, number> = {};
+    selected.forEach((r) => {
+      const sid = String(r.section_id || "").trim();
+      if (!sid) return;
+      counts[sid] = (counts[sid] || 0) + 1;
+    });
+    return counts;
+  }, [draftRows, selectedDraftIds]);
 
   function friendlyError(e: any) {
     const m = e?.response?.data?.detail || e?.response?.data?.message || e?.message || "Something went wrong.";
@@ -1818,6 +1951,25 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
           type: "info",
           title: "Missing details",
           message: `Please complete required fields on Row ${invalidIdx + 1} (Course, Section, Units, and To Department).`,
+        });
+        return;
+      }
+
+      const duplicateSectionIds = Array.from(
+        selected.reduce((acc, r) => {
+          const sid = String(r.section_id || "").trim();
+          if (!sid) return acc;
+          acc.set(sid, (acc.get(sid) || 0) + 1);
+          return acc;
+        }, new Map<string, number>())
+      )
+        .filter(([, count]) => count > 1)
+        .map(([sid]) => sid);
+      if (duplicateSectionIds.length > 0) {
+        showToast({
+          type: "info",
+          title: "Duplicate section",
+          message: "You can only send one request per section.",
         });
         return;
       }
@@ -2048,7 +2200,13 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
             {draftRows.map((r) => {
               const checked = selectedDraftIds[r._tmpId] ?? true;
               const secs = sectionOptionsByCode[(r.course_code || "").trim()] || [];
-              const sectionCodes = Array.from(new Set(secs.map((s) => s.section_code))).sort();
+              const availableSectionRows = secs.filter((s) => {
+                const sid = String(s.section_id || "").trim();
+                if (!sid) return false;
+                if (sid === String(r.section_id || "").trim()) return true;
+                return !selectedDraftSectionIds[sid];
+              });
+              const sectionCodes = Array.from(new Set(availableSectionRows.map((s) => s.section_code))).sort();
               const sectionDisabled = !r.course_code || sectionCodes.length === 0;
 
               return (
@@ -2117,11 +2275,11 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                         <Dropdown
                           value={r.section}
                           onChange={(sec) => {
-                            const hit = secs.find((s) => s.section_code === sec);
+                            const hit = availableSectionRows.find((s) => s.section_code === sec) || secs.find((s) => s.section_code === sec);
                             updateDraftRow(r._tmpId, { section: sec, section_id: hit?.section_id || "" });
                           }}
                           options={sectionCodes}
-                          placeholder="— Select —"
+                          placeholder={r.course_code ? (sectionCodes.length ? "— Select —" : "No available sections") : "— Select —"}
                           className="w-full"
                           searchable={false}
                           disabled={sectionDisabled}
@@ -2413,7 +2571,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                   : facultyLabel(e.faculty)) || facultyLabel((r as any)?.faculty) || "—";
 
               return (
-                <div key={fsid} className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm" onMouseEnter={() => ensureFacultyForDept(dept)}>
+                <div key={fsid} className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm" onMouseEnter={() => void refreshReceivedAvailability(dept)}>
                   <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
                     <div>
                       <div className="text-lg font-semibold text-emerald-700">{r.course_code || "—"}</div>
@@ -2536,19 +2694,21 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                           onChange={(label) => {
                             const match = availableFacultyOptions.find((f) => f.label === label);
                             if (match) {
-                              patchEdit(fsid, {
+                              patchEdit(fsid, sanitizeReceivedEdit(r, {
+                                ...e,
                                 faculty: {
                                   faculty_id: match.faculty_id,
                                   first_name: match.first_name,
                                   last_name: match.last_name,
                                   email: match.email,
                                 },
-                              });
+                              }));
                             }
                           }}
                           options={facultyOptionsForDropdown}
                           placeholder={facultyOptions.length ? (facultyOptionsForDropdown.length ? "— Select Faculty —" : "No available faculty") : "Loading…"}
                           searchable
+                          onOpen={() => void refreshReceivedAvailability(dept)}
                         />
                       </div>
                     </div>
@@ -2571,46 +2731,19 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             onChange={(val) => {
                               const d1 = val as DayShort | "";
                               const nextDay2 = d1 ? (DAY2_BY_DAY1[d1 as DayShort] as DayShort) : "";
-                              const nextPatch: Partial<ReceiverEdit> = { day1: d1, day2: nextDay2 };
-                              if (
-                                selectedFacultyId &&
-                                e.begin2 &&
-                                nextDay2 &&
-                                !slotOptionIsAvailable({
-                                  facultyId: selectedFacultyId,
-                                  slot: 2,
-                                  day: nextDay2,
-                                  begin: e.begin2 || "",
-                                  peerMeetings: slot2PeerMeetings,
-                                  busySlots: facultyBusySlots,
-                                  excludeSectionId: sectionId,
+                              patchEdit(
+                                fsid,
+                                sanitizeReceivedEdit(r, {
+                                  ...e,
+                                  day1: d1,
+                                  day2: nextDay2,
                                 })
-                              ) {
-                                nextPatch.begin2 = "";
-                                nextPatch.end2 = "";
-                              }
-                              if (
-                                selectedFacultyId &&
-                                e.begin1 &&
-                                d1 &&
-                                !slotOptionIsAvailable({
-                                  facultyId: selectedFacultyId,
-                                  slot: 1,
-                                  day: d1,
-                                  begin: e.begin1 || "",
-                                  peerMeetings: slot1PeerMeetings,
-                                  busySlots: facultyBusySlots,
-                                  excludeSectionId: sectionId,
-                                })
-                              ) {
-                                nextPatch.begin1 = "";
-                                nextPatch.end1 = "";
-                              }
-                              patchEdit(fsid, nextPatch);
+                              );
                             }}
                             options={selectedFacultyId ? availableDay1Options : [...DAY1_OPTIONS]}
                             placeholder="— Select —"
                             searchable={false}
+                            onOpen={() => void refreshReceivedAvailability(dept)}
                           />
                         </div>
                       </div>
@@ -2622,14 +2755,19 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             value={e.begin1 || ""}
                             onChange={(val) => {
                               const v = val;
-                              patchEdit(fsid, {
-                                begin1: v,
-                                end1: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
-                              });
+                              patchEdit(
+                                fsid,
+                                sanitizeReceivedEdit(r, {
+                                  ...e,
+                                  begin1: v,
+                                  end1: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
+                                })
+                              );
                             }}
                             options={selectedFacultyId ? availableBegin1Options : timeBegins}
                             placeholder="— Select —"
                             searchable={false}
+                            onOpen={() => void refreshReceivedAvailability(dept)}
                           />
                         </div>
                       </div>
@@ -2639,7 +2777,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                         <div className="mt-1">
                           <Dropdown
                             value={e.end1 || ""}
-                            onChange={(v) => patchEdit(fsid, { end1: v })}
+                            onChange={(v) => patchEdit(fsid, sanitizeReceivedEdit(r, { ...e, end1: v }))}
                             options={e.begin1 ? [END_BY_BEGIN[e.begin1 as keyof typeof END_BY_BEGIN]].filter(Boolean) : Array.from(new Set(Object.values(END_BY_BEGIN)))}
                             placeholder="— Select —"
                             searchable={false}
@@ -2654,29 +2792,18 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             value={e.day2 || ""}
                             onChange={(v) => {
                               const nextDay2 = v as DayShort | "";
-                              const nextPatch: Partial<ReceiverEdit> = { day2: nextDay2 };
-                              if (
-                                selectedFacultyId &&
-                                e.begin2 &&
-                                nextDay2 &&
-                                !slotOptionIsAvailable({
-                                  facultyId: selectedFacultyId,
-                                  slot: 2,
-                                  day: nextDay2,
-                                  begin: e.begin2 || "",
-                                  peerMeetings: slot2PeerMeetings,
-                                  busySlots: facultyBusySlots,
-                                  excludeSectionId: sectionId,
+                              patchEdit(
+                                fsid,
+                                sanitizeReceivedEdit(r, {
+                                  ...e,
+                                  day2: nextDay2,
                                 })
-                              ) {
-                                nextPatch.begin2 = "";
-                                nextPatch.end2 = "";
-                              }
-                              patchEdit(fsid, nextPatch);
+                              );
                             }}
                             options={selectedFacultyId ? availableDay2Options : [...DAY1_OPTIONS]}
                             placeholder="— Select —"
                             searchable={false}
+                            onOpen={() => void refreshReceivedAvailability(dept)}
                           />
                         </div>
                       </div>
@@ -2688,14 +2815,19 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                             value={e.begin2 || ""}
                             onChange={(val) => {
                               const v = val;
-                              patchEdit(fsid, {
-                                begin2: v,
-                                end2: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
-                              });
+                              patchEdit(
+                                fsid,
+                                sanitizeReceivedEdit(r, {
+                                  ...e,
+                                  begin2: v,
+                                  end2: v ? END_BY_BEGIN[v as keyof typeof END_BY_BEGIN] : "",
+                                })
+                              );
                             }}
                             options={selectedFacultyId ? availableBegin2Options : timeBegins}
                             placeholder="— Select —"
                             searchable={false}
+                            onOpen={() => void refreshReceivedAvailability(dept)}
                           />
                         </div>
                       </div>
@@ -2705,7 +2837,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
                         <div className="mt-1">
                           <Dropdown
                             value={e.end2 || ""}
-                            onChange={(v) => patchEdit(fsid, { end2: v })}
+                            onChange={(v) => patchEdit(fsid, sanitizeReceivedEdit(r, { ...e, end2: v }))}
                             options={e.begin2 ? [END_BY_BEGIN[e.begin2 as keyof typeof END_BY_BEGIN]].filter(Boolean) : Array.from(new Set(Object.values(END_BY_BEGIN)))}
                             placeholder="— Select —"
                             searchable={false}

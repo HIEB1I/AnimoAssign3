@@ -1039,6 +1039,8 @@ async def _faculty_busy_slots(term_id: str, faculty_ids: List[str], db) -> Dict[
         if sid:
             schedules_by_section.setdefault(sid, []).append(sched)
 
+    seen_slots: Dict[str, set[tuple[str, str, str, str]]] = {fid: set() for fid in faculty_ids}
+
     for asg in assignments:
         fid = str(asg.get('faculty_id') or '').strip()
         sid = str(asg.get('section_id') or '').strip()
@@ -1052,12 +1054,65 @@ async def _faculty_busy_slots(term_id: str, faculty_ids: List[str], db) -> Dict[
                 end = END_BY_BEGIN.get(begin, end)
             if not day or not begin or not end:
                 continue
+            key = (sid, day, begin, end)
+            if key in seen_slots.setdefault(fid, set()):
+                continue
+            seen_slots[fid].add(key)
             result.setdefault(fid, []).append({
                 'section_id': sid,
                 'day': day,
                 'begin': begin,
                 'end': end,
             })
+
+    # Also include accepted Faculty Service schedules directly. This keeps the chair
+    # dropdown availability aligned with backend validation even if OM reflection
+    # is delayed or a previous response has not yet been mirrored into assignments.
+    try:
+        fs_cur = db.faculty_service.find(
+            {
+                'status': 'responded',
+                'faculty.faculty_id': {'$in': faculty_ids},
+                'section_id': {'$in': list(valid_section_ids)},
+            },
+            {
+                '_id': 0,
+                'section_id': 1,
+                'faculty': 1,
+                'day1': 1,
+                'begin1': 1,
+                'end1': 1,
+                'day2': 1,
+                'begin2': 1,
+                'end2': 1,
+            },
+        )
+        async for fs in fs_cur:
+            fid = str(((fs.get('faculty') or {}).get('faculty_id')) or '').strip()
+            sid = str(fs.get('section_id') or '').strip()
+            if not fid or not sid:
+                continue
+            for suffix in ('1', '2'):
+                day = _normalize_day_short(fs.get(f'day{suffix}'))
+                begin = str(fs.get(f'begin{suffix}') or '').strip()
+                end = str(fs.get(f'end{suffix}') or '').strip()
+                if begin and not end:
+                    end = END_BY_BEGIN.get(begin, end)
+                if not day or not begin or not end:
+                    continue
+                key = (sid, day, begin, end)
+                if key in seen_slots.setdefault(fid, set()):
+                    continue
+                seen_slots[fid].add(key)
+                result.setdefault(fid, []).append({
+                    'section_id': sid,
+                    'day': day,
+                    'begin': begin,
+                    'end': end,
+                })
+    except Exception:
+        pass
+
     return result
 
 
@@ -1097,6 +1152,33 @@ async def _find_faculty_schedule_conflicts(
                 if label not in conflicts:
                     conflicts.append(label)
     return conflicts
+
+
+async def _active_faculty_service_section_ids(*, term_id: str, section_ids: Optional[List[str]] = None) -> set[str]:
+    """Return section_ids that already have a non-terminal Faculty Service request.
+
+    A section should not be requestable again while there is already an existing
+    request for that same section waiting to be resolved/assigned.
+    """
+
+    q: Dict[str, Any] = {
+        "status": {"$in": ["sent", "responded"]},
+        "section_id": {"$nin": [None, ""]},
+    }
+    if section_ids is not None:
+        scoped = [str(s or '').strip() for s in section_ids if str(s or '').strip()]
+        if not scoped:
+            return set()
+        q["section_id"] = {"$in": scoped}
+
+    out: set[str] = set()
+    cur = db.faculty_service.find(q, {"_id": 0, "section_id": 1})
+    async for doc in cur:
+        sid = str(doc.get("section_id") or "").strip()
+        if sid:
+            out.add(sid)
+    return out
+
 # --------------------------- OPTIONS ---------------------------
 
 @router.get("/options")
@@ -1132,13 +1214,17 @@ async def fs_options(
     wants_courses = bool(requesterDepartment or q)
 
     if wants_courses and dept_id and active_term_id:
-        # Read from OM Load Assignment source (sections_submitted)
+        # Read from OM Load Assignment source (sections_submitted).
         #
         # IMPORTANT:
-        # Faculty Service (CHAIR) must only show course/sections that are *UNASSIGNED*
-        # in OM Load Assignment. We treat a section as assigned when there exists a
-        # non-archived faculty_assignments row for the section+term with a non-empty
-        # faculty_id.
+        # Faculty Service (CHAIR) must only show course/sections that are BOTH:
+        #   - unassigned in OM Load Assignment, and
+        #   - not already covered by an existing active Faculty Service request.
+        #
+        # We treat a section as unavailable when there exists either:
+        #   - a non-archived faculty_assignments row with a non-empty faculty_id, or
+        #   - a faculty_service row for the same section that is still active
+        #     (status in {sent, responded}).
         pipe: List[Dict[str, Any]] = [
             {
                 "$match": {
@@ -1169,7 +1255,24 @@ async def fs_options(
                     "as": "_assigned",
                 }
             },
-            {"$match": {"_assigned": {"$size": 0}}},
+            {
+                "$lookup": {
+                    "from": "faculty_service",
+                    "let": {"sid": "$section_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {"$eq": ["$section_id", "$$sid"]},
+                                "status": {"$in": ["sent", "responded"]},
+                            }
+                        },
+                        {"$project": {"_id": 1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "_active_fs",
+                }
+            },
+            {"$match": {"_assigned": {"$size": 0}, "_active_fs": {"$size": 0}}},
             {
                 "$lookup": {
                     "from": "courses",
@@ -1318,8 +1421,10 @@ async def fs_options(
                     if sid:
                         assigned.add(sid)
 
+                active_requested = await _active_faculty_service_section_ids(term_id=active_term_id, section_ids=sids)
+
                 for r in raw:
-                    if r["section_id"] in assigned:
+                    if r["section_id"] in assigned or r["section_id"] in active_requested:
                         continue
                     sections.append(r)
 
@@ -1510,6 +1615,16 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="course_code is required.")
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required.")
+
+    existing_active = await db.faculty_service.find_one(
+        {
+            "section_id": section_id,
+            "status": {"$in": ["sent", "responded"]},
+        },
+        {"_id": 0, "fs_id": 1},
+    )
+    if existing_active:
+        raise HTTPException(status_code=400, detail="A request already exists for this section.")
 
     # Validate section belongs to the selected course in the active/planning term when possible.
     try:
