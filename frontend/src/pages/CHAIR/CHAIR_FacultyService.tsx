@@ -2018,7 +2018,7 @@ export default function CHAIR_FacultyService({ chairDepartmentName, variant = "p
         </div>
 
         <SectionShell
-          title="Create Request & Sent Requests"
+          title="Create & Sent Requests"
           subtitle="Create request, then review previously sent requests."
           actions={(
             <>
