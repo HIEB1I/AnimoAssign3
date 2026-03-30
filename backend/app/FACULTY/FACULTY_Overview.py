@@ -72,6 +72,13 @@ COL_LOAD_RFC = "faculty_rfc"
 import uuid
 
 
+ACTIVE_SPECIAL_STATUSES = {"FORWARDED TO DEPARTMENT", "APPROVED"}
+
+
+def _is_active_special_status(value: Any) -> bool:
+    return str(value or "").strip().upper() in ACTIVE_SPECIAL_STATUSES
+
+
 def _safe_str(value: Any) -> str:
     return str(value).strip() if value is not None else ""
 
@@ -2059,6 +2066,7 @@ async def _expand_grouped_special_class_docs(
         "section_id": 1,
         "assignment_id": 1,
         "faculty_assignment_id": 1,
+        "faculty_id": 1,
         "faculty_response": 1,
         "faculty_status": 1,
         "user_id": 1,
@@ -2242,6 +2250,7 @@ async def faculty_special_class_bulk_message(payload: Dict[str, Any] = Body(...)
             "section_id": 1,
             "assignment_id": 1,
             "faculty_assignment_id": 1,
+            "faculty_id": 1,
             "faculty_response": 1,
             "faculty_status": 1,
             "schedule_id1": 1,
@@ -2470,13 +2479,56 @@ async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
     faculty = await db[COL_FACULTY].find_one({"user_id": user_id}, {"_id": 0, "faculty_id": 1}) or {}
     faculty_id = str(faculty.get("faculty_id") or "").strip()
 
-    sc_docs = await db[COL_SPECIAL_CLASS].find(
+    raw_sc_docs = await db[COL_SPECIAL_CLASS].find(
         {"special_id": {"$in": special_ids}, "status": "Approved"},
-        {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1, "user_id": 1, "student_user_id": 1,
-         "schedule_id1": 1, "schedule_id2": 1, "schedule_cleared": 1, "course_id": 1, "course_code": 1,
-         "course_title": 1, "section_code": 1, "section": 1, "om_user_id": 1, "chair_user_id": 1},
-    ).to_list(max(200, len(special_ids) * 2))
-    sc_docs = await _expand_grouped_special_class_docs(sc_docs=sc_docs, faculty_id=faculty_id)
+        {
+            "_id": 0,
+            "special_id": 1,
+            "term_id": 1,
+            "section_id": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "faculty_id": 1,
+            "user_id": 1,
+            "student_user_id": 1,
+            "schedule_id1": 1,
+            "schedule_id2": 1,
+            "schedule_cleared": 1,
+            "course_id": 1,
+            "courseId": 1,
+            "course_code": 1,
+            "courseCode": 1,
+            "course_title": 1,
+            "courseTitle": 1,
+            "section_code": 1,
+            "section": 1,
+            "om_user_id": 1,
+            "chair_user_id": 1,
+            "faculty_response": 1,
+            "faculty_status": 1,
+            "status": 1,
+            "updated_at": 1,
+            "submitted_at": 1,
+        },
+    ).sort([("updated_at", -1), ("submitted_at", -1)]).to_list(max(200, len(special_ids) * 4))
+
+    latest_by_special: Dict[str, Dict[str, Any]] = {}
+    for doc in (raw_sc_docs or []):
+        sid = str((doc or {}).get("special_id") or "").strip()
+        if not sid or sid in latest_by_special:
+            continue
+        latest_by_special[sid] = doc or {}
+
+    sc_docs: List[Dict[str, Any]] = []
+    for sid in special_ids:
+        doc = latest_by_special.get(sid)
+        if not doc:
+            continue
+        owner = await _owning_faculty_id_for_special_doc(doc)
+        if owner != faculty_id:
+            continue
+        sc_docs.append(doc)
+
     if not sc_docs:
         raise HTTPException(status_code=404, detail="Special class not found")
 
