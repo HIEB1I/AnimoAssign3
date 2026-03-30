@@ -827,6 +827,7 @@ export default function OM_SpecialClass({
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
   const [facultyNameToIdUpper, setFacultyNameToIdUpper] = useState<Record<string, string>>({});
   const [facultyAvailability, setFacultyAvailability] = useState<FacultyAvailabilityMap>({});
+
   const [courseOptions, setCourseOptions] = useState<Array<{ course_id: string; course_code: string; course_title?: string }>>([]);
 
   // Rooms (read-only display)
@@ -839,6 +840,48 @@ export default function OM_SpecialClass({
 
   // table
   const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
+  const effectiveFacultyAvailability = useMemo<FacultyAvailabilityMap>(() => {
+    const activeBlockingStatuses = new Set(["Forwarded To Department", "Approved"]);
+    const inactiveSectionIds = new Set<string>();
+    const activeSectionIds = new Set<string>();
+    const inactivePendingSpecialIds = new Set<string>();
+    const activePendingSpecialIds = new Set<string>();
+
+    rows.forEach((row) => {
+      const status = String(row.status || "").trim();
+      const facultyResponse = String(((row as any).faculty_response || (row as any).faculty_status || "")).trim().toUpperCase();
+      const scheduleCleared = Boolean((row as any).schedule_cleared);
+      const hasDirectSchedule = Boolean(
+        (String(row.day1 || "").trim() && String(row.begin1 || "").trim() && String(row.end1 || "").trim()) ||
+        (String(row.day2 || "").trim() && String(row.begin2 || "").trim() && String(row.end2 || "").trim())
+      );
+      const sectionId = String(row.section_id || "").trim();
+      const specialId = String(row.special_id || "").trim();
+      const blocks = activeBlockingStatuses.has(status) && !scheduleCleared && !["REJECTED", "REJECT"].includes(facultyResponse);
+
+      if (sectionId) {
+        if (blocks) activeSectionIds.add(sectionId);
+        else inactiveSectionIds.add(sectionId);
+      }
+      if (specialId && !sectionId && hasDirectSchedule) {
+        if (blocks) activePendingSpecialIds.add(specialId);
+        else inactivePendingSpecialIds.add(specialId);
+      }
+    });
+
+    const next: FacultyAvailabilityMap = {};
+    Object.entries(facultyAvailability || {}).forEach(([facultyId, slots]) => {
+      next[facultyId] = (slots || []).filter((slot) => {
+        const sectionId = String(slot.section_id || "").trim();
+        const specialId = String((slot as any).special_id || "").trim();
+
+        if (specialId && inactivePendingSpecialIds.has(specialId) && !activePendingSpecialIds.has(specialId)) return false;
+        if (sectionId && inactiveSectionIds.has(sectionId) && !activeSectionIds.has(sectionId)) return false;
+        return true;
+      });
+    });
+    return next;
+  }, [facultyAvailability, rows]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [errKind, setErrKind] = useState<"success" | "error">("error");
@@ -1858,7 +1901,7 @@ export default function OM_SpecialClass({
     return !facultyHasConflictForMeetings({
       facultyId: fid,
       meetings: addPeerMeetings,
-      busySlots: facultyAvailability,
+      busySlots: effectiveFacultyAvailability,
     });
   });
   const availableAddDay1Options = DAY_OPTS_LABELS.filter((label) =>
@@ -1867,7 +1910,7 @@ export default function OM_SpecialClass({
       day: DAY_FROM_LABEL[label],
       begin: String(addDraft.begin1 || ""),
       peerMeetings: addSlot1PeerMeetings,
-      busySlots: facultyAvailability,
+      busySlots: effectiveFacultyAvailability,
     })
   );
   const availableAddBegin1Options = GE_TIME_SLOTS.filter((slot) =>
@@ -1876,7 +1919,7 @@ export default function OM_SpecialClass({
       day: String(addDraft.day1 || ""),
       begin: slot.start,
       peerMeetings: addSlot1PeerMeetings,
-      busySlots: facultyAvailability,
+      busySlots: effectiveFacultyAvailability,
     })
   );
   const availableAddDay2Options = DAY_OPTS_LABELS.filter((label) =>
@@ -1885,7 +1928,7 @@ export default function OM_SpecialClass({
       day: DAY_FROM_LABEL[label],
       begin: String(addDraft.begin2 || ""),
       peerMeetings: addSlot2PeerMeetings,
-      busySlots: facultyAvailability,
+      busySlots: effectiveFacultyAvailability,
     })
   );
   const availableAddBegin2Options = GE_TIME_SLOTS.filter((slot) =>
@@ -1894,7 +1937,7 @@ export default function OM_SpecialClass({
       day: String(addDraft.day2 || ""),
       begin: slot.start,
       peerMeetings: addSlot2PeerMeetings,
-      busySlots: facultyAvailability,
+      busySlots: effectiveFacultyAvailability,
     })
   );
   const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
@@ -2144,11 +2187,11 @@ export default function OM_SpecialClass({
                                   const autoDay2 = nextDay1 ? (DAY_PAIR[nextDay1] || "") : "";
                                   setAddDraft((d) => {
                                     const next = { ...d, day1: nextDay1 as any, day2: autoDay2 as any };
-                                    if (addSelectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: addSlot1PeerMeetings, busySlots: facultyAvailability })) {
+                                    if (addSelectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: addSlot1PeerMeetings, busySlots: effectiveFacultyAvailability })) {
                                       next.begin1 = "";
                                       next.end1 = "";
                                     }
-                                    if (addSelectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: facultyAvailability })) {
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: effectiveFacultyAvailability })) {
                                       next.begin2 = "";
                                       next.end2 = "";
                                     }
@@ -2198,7 +2241,7 @@ export default function OM_SpecialClass({
                                   const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
                                   setAddDraft((d) => {
                                     const next = { ...d, day2: nextDay2 as any };
-                                    if (addSelectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: facultyAvailability })) {
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: effectiveFacultyAvailability })) {
                                       next.begin2 = "";
                                       next.end2 = "";
                                     }
@@ -2463,7 +2506,7 @@ export default function OM_SpecialClass({
                           return !facultyHasConflictForMeetings({
                             facultyId: fid,
                             meetings: peerMeetings,
-                            busySlots: facultyAvailability,
+                            busySlots: effectiveFacultyAvailability,
                             excludeSectionId: currentSectionId,
                           });
                         });
@@ -2473,7 +2516,7 @@ export default function OM_SpecialClass({
                             day: DAY_FROM_LABEL[label],
                             begin: String(draft.begin1 || ""),
                             peerMeetings: slot1PeerMeetings,
-                            busySlots: facultyAvailability,
+                            busySlots: effectiveFacultyAvailability,
                             excludeSectionId: currentSectionId,
                           })
                         );
@@ -2483,7 +2526,7 @@ export default function OM_SpecialClass({
                             day: String(draft.day1 || ""),
                             begin: slot.start,
                             peerMeetings: slot1PeerMeetings,
-                            busySlots: facultyAvailability,
+                            busySlots: effectiveFacultyAvailability,
                             excludeSectionId: currentSectionId,
                           })
                         );
@@ -2493,7 +2536,7 @@ export default function OM_SpecialClass({
                             day: DAY_FROM_LABEL[label],
                             begin: String(draft.begin2 || ""),
                             peerMeetings: slot2PeerMeetings,
-                            busySlots: facultyAvailability,
+                            busySlots: effectiveFacultyAvailability,
                             excludeSectionId: currentSectionId,
                           })
                         );
@@ -2503,7 +2546,7 @@ export default function OM_SpecialClass({
                             day: String(draft.day2 || ""),
                             begin: slot.start,
                             peerMeetings: slot2PeerMeetings,
-                            busySlots: facultyAvailability,
+                            busySlots: effectiveFacultyAvailability,
                             excludeSectionId: currentSectionId,
                           })
                         );
@@ -2565,11 +2608,11 @@ export default function OM_SpecialClass({
                                                 const autoDay2 = nextDay1 ? (DAY_PAIR[nextDay1] || "") : "";
                                                 setDraft((d) => {
                                                   const next = { ...d, day1: nextDay1 as any, day2: autoDay2 as any };
-                                                  if (selectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: slot1PeerMeetings, busySlots: facultyAvailability, excludeSectionId: currentSectionId })) {
+                                                  if (selectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: slot1PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
                                                     next.begin1 = "";
                                                     next.end1 = "";
                                                   }
-                                                  if (selectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: facultyAvailability, excludeSectionId: currentSectionId })) {
+                                                  if (selectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
                                                     next.begin2 = "";
                                                     next.end2 = "";
                                                   }
@@ -2621,7 +2664,7 @@ export default function OM_SpecialClass({
                                                 const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
                                                 setDraft((d) => {
                                                   const next = { ...d, day2: nextDay2 as any };
-                                                  if (selectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: facultyAvailability, excludeSectionId: currentSectionId })) {
+                                                  if (selectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
                                                     next.begin2 = "";
                                                     next.end2 = "";
                                                   }

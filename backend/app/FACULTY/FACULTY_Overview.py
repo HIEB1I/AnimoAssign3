@@ -1,5 +1,6 @@
 # backend/app/FACULTY/FACULTY_Overview.py
 from fastapi import APIRouter, Query, HTTPException, Body
+from fastapi.responses import Response
 from ..main import db
 
 # In-app bell notifications (shared Notifications collection)
@@ -16,6 +17,8 @@ from html import escape as _html_escape
 
 import os
 import base64
+import binascii
+from pathlib import Path
 from email.message import EmailMessage
 import httpx
 
@@ -1901,6 +1904,50 @@ async def _fetch_reflected_special_classes_for_faculty(
 async def _student_user_id_for_special(d: Dict[str, Any]) -> str:
     return str(d.get("user_id") or d.get("student_user_id") or "").strip()
 
+def _faculty_eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                return True
+        except Exception:
+            pass
+    return bool(str(doc.get("eaf_base64") or "").strip())
+
+
+def _faculty_inline_eaf_response(doc: Dict[str, Any]) -> Response:
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                data = file_path.read_bytes()
+                filename = str(doc.get("eaf_original_name") or file_path.name).strip() or file_path.name
+                return Response(
+                    content=data,
+                    media_type=str(doc.get("eaf_content_type") or "").strip() or "application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{filename}"'},
+                )
+        except Exception:
+            pass
+
+    b64 = str(doc.get("eaf_base64") or "").strip()
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        filename = str(doc.get("eaf_original_name") or "eaf.pdf").strip() or "eaf.pdf"
+        return Response(
+            content=data,
+            media_type=str(doc.get("eaf_content_type") or "").strip() or "application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{filename}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+
+
 async def _owning_faculty_id_for_special_doc(d: Dict[str, Any]) -> str:
     assignment_id = str((d or {}).get("assignment_id") or (d or {}).get("faculty_assignment_id") or "").strip()
     sec_id = str((d or {}).get("section_id") or "").strip()
@@ -2026,6 +2073,65 @@ def _special_class_schedule_summary_lines(sch: Dict[str, Any]) -> List[str]:
     _one(1, sch.get("day1"), sch.get("begin1"), sch.get("end1"), sch.get("room1"))
     _one(2, sch.get("day2"), sch.get("begin2"), sch.get("end2"), sch.get("room2"))
     return lines
+
+
+@router.get("/special-class/eaf")
+async def faculty_special_class_eaf(
+    user_id: str = Query(...),
+    special_id: str = Query(...),
+    term_id: Optional[str] = Query(None),
+):
+    user_id = str(user_id or "").strip()
+    special_id = str(special_id or "").strip()
+    term_id = str(term_id or "").strip()
+
+    if not user_id:
+        raise HTTPException(status_code=400, detail="user_id is required")
+    if not special_id:
+        raise HTTPException(status_code=400, detail="special_id is required")
+
+    faculty = await db[COL_FACULTY].find_one({"user_id": user_id}, {"_id": 0, "faculty_id": 1}) or {}
+    faculty_id = str(faculty.get("faculty_id") or "").strip()
+    if not faculty_id:
+        raise HTTPException(status_code=404, detail="Faculty not found")
+
+    match: Dict[str, Any] = {"special_id": special_id}
+    if term_id:
+        match["term_id"] = term_id
+
+    doc = await db[COL_SPECIAL_CLASS].find_one(
+        match,
+        {
+            "_id": 0,
+            "special_id": 1,
+            "term_id": 1,
+            "status": 1,
+            "faculty_id": 1,
+            "assignment_id": 1,
+            "faculty_assignment_id": 1,
+            "section_id": 1,
+            "schedule_cleared": 1,
+            "eaf_storage_path": 1,
+            "eaf_original_name": 1,
+            "eaf_content_type": 1,
+            "eaf_base64": 1,
+        },
+    ) or {}
+    if not doc:
+        raise HTTPException(status_code=404, detail="EAF not found.")
+
+    owning_faculty_id = await _owning_faculty_id_for_special_doc(doc)
+    if not owning_faculty_id:
+        owning_faculty_id = str(doc.get("faculty_id") or "").strip()
+    if owning_faculty_id != faculty_id:
+        raise HTTPException(status_code=403, detail="You are not allowed to view this EAF.")
+
+    if not _is_active_special_status(doc.get("status")):
+        raise HTTPException(status_code=404, detail="EAF not found.")
+    if not _faculty_eaf_available(doc):
+        raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+
+    return _faculty_inline_eaf_response(doc)
 
 
 @router.post("/special-class/bulk-message")
