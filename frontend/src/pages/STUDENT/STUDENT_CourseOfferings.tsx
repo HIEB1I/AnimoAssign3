@@ -113,11 +113,10 @@ export default function STUDENT_CourseOfferings() {
   const visibleSections = useMemo(() => {
     if (!result?.sections?.length) return [];
 
-    // Hide Special Class sections from Course Offerings (students have a dedicated Special Class tab).
-    // In the DB, special class-generated sections have remarks "SPECIAL CLASS".
+    // Hide Special Class and Dissolved sections from regular Course Offerings.
     return result.sections.filter((s) => {
       const r = String(s.remarks || "").toUpperCase();
-      return !r.includes("SPECIAL CLASS");
+      return !r.includes("SPECIAL CLASS") && !r.includes("DISSOLVED");
     });
   }, [result]);
 

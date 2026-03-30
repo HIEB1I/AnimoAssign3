@@ -21,6 +21,8 @@ from ..main import db
 
 # In-app bell notifications (same pattern as Faculty Service)
 from ..Notifications import create_notification
+from ..status_rules import get_active_special_section_ids
+from ..status_rules import get_active_special_section_ids
 
 async def _ensure_user_gmail_address(user_id: str, db) -> None:
     """Best-effort: ensure users.gmail is populated for email notifications.
@@ -86,112 +88,18 @@ COL_CAMPUSES = "campuses"
 COL_LEAVES = "leaves"
 COL_PREFERENCES = "faculty_preferences"
 COL_FACULTY_LOADS = "faculty_loads"
+COL_CLASS_RETENTION = "class_retention"
 
 # OM <-> Faculty proposal + RFC collections
 COL_LOAD_PROPOSALS = "faculty_load_proposals"
 COL_LOAD_RFC = "faculty_rfc"
 
 async def _special_class_section_ids(term_id: str, db) -> set[str]:
-    """Collect section_ids that belong to Special Class records for a term.
-
-    Requirement: OM_LoadAssignment must *not* reflect Special Classes in its
-    load assignment tables.
-
-    Special Class rows live in the `special_class` collection and may reference
-    a section via different legacy shapes:
-      - special_class.section_id
-      - special_class.assignment_id -> faculty_assignments.section_id
-      - schedule_id within schedule_entries / slot1 / slot2 -> section_schedules.section_id
-
-    We resolve all of the above best-effort and return a set of section_ids.
-    """
-
-    term_id = (term_id or "").strip()
-    if not term_id:
-        return set()
-
+    """Return only ACTIVE special-class section_ids for OM regular views."""
     try:
-        sc_rows = await db.get_collection("special_class").find(
-            {"term_id": term_id},
-            {
-                "_id": 0,
-                "section_id": 1,
-                "assignment_id": 1,
-                "schedule_entries": 1,
-                "slot1": 1,
-                "slot2": 1,
-            },
-        ).to_list(None)
+        return await get_active_special_section_ids(db, term_id)
     except Exception:
-        sc_rows = []
-
-    if not sc_rows:
         return set()
-
-    out: set[str] = set()
-    asg_ids: set[str] = set()
-    sched_ids: set[str] = set()
-
-    def _s(x: Any) -> str:
-        return (str(x).strip() if x is not None else "")
-
-    def _collect_schedule_ids(val: Any) -> None:
-        if not val:
-            return
-        if isinstance(val, dict):
-            sid = _s(val.get("schedule_id") or val.get("id"))
-            if sid:
-                sched_ids.add(sid)
-            return
-        if isinstance(val, list):
-            for e in val:
-                if isinstance(e, dict):
-                    sid = _s(e.get("schedule_id") or e.get("id"))
-                    if sid:
-                        sched_ids.add(sid)
-
-    for r in sc_rows:
-        sid = _s(r.get("section_id"))
-        if sid:
-            out.add(sid)
-
-        aid = _s(r.get("assignment_id"))
-        if aid:
-            asg_ids.add(aid)
-
-        _collect_schedule_ids(r.get("schedule_entries"))
-        _collect_schedule_ids(r.get("slot1"))
-        _collect_schedule_ids(r.get("slot2"))
-
-    # Resolve assignment_id -> section_id
-    if asg_ids:
-        try:
-            asg_docs = await db.get_collection(COL_ASSIGN).find(
-                {"assignment_id": {"$in": sorted(asg_ids)}, "is_archived": {"$ne": True}},
-                {"_id": 0, "assignment_id": 1, "section_id": 1},
-            ).to_list(None)
-            for a in asg_docs or []:
-                sid = _s(a.get("section_id"))
-                if sid:
-                    out.add(sid)
-        except Exception:
-            pass
-
-    # Resolve schedule_id -> section_id
-    if sched_ids:
-        try:
-            sched_docs = await db.get_collection(COL_SCHED).find(
-                {"schedule_id": {"$in": sorted(sched_ids)}},
-                {"_id": 0, "schedule_id": 1, "section_id": 1},
-            ).to_list(None)
-            for s in sched_docs or []:
-                sid = _s(s.get("section_id"))
-                if sid:
-                    out.add(sid)
-        except Exception:
-            pass
-
-    return out
 
 def _campus_name_to_id(val: str) -> str:
     """Map Campus column values to campus_id.
@@ -1511,6 +1419,35 @@ async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[
     rows: List[Dict[str, Any]] = []
     seen_fs_ids: set[str] = set()
 
+    # DEDUPE GUARD:
+    # If a Faculty Service request was already reflected into the real OM sources
+    # (faculty_assignments / section_schedules), then `_fetch_rows()` will already
+    # return the normal row for that section_id.
+    #
+    # In that case, do NOT create an extra display-only overlay row, otherwise
+    # the OM table shows 2 rows for the same assignment:
+    #   1) the real OM row
+    #   2) the FSR::<fs_id> overlay row
+    reflected_section_ids: set[str] = set()
+    if section_ids:
+        try:
+            reflected_assignments = await db[COL_ASSIGN].find(
+                {
+                    "section_id": {"$in": section_ids},
+                    "is_archived": {"$ne": True},
+                    "faculty_id": {"$nin": ["", None]},
+                    "synced_from_faculty_service": True,
+                },
+                {"_id": 0, "section_id": 1},
+            ).to_list(None)
+
+            for a in reflected_assignments or []:
+                rsid = str(a.get("section_id") or "").strip()
+                if rsid:
+                    reflected_section_ids.add(rsid)
+        except Exception:
+            reflected_section_ids = set()
+
     for d in fs_docs:
         fs_id = str(d.get('fs_id') or '').strip()
         if not fs_id or fs_id in seen_fs_ids:
@@ -1521,6 +1458,11 @@ async def _faculty_service_overlay_rows(user_id: str, term_id: str, db) -> List[
         if checked_term_membership:
             if not sid or sid not in valid_section_ids:
                 continue
+
+        # If this section already exists as a real reflected OM assignment row,
+        # skip the Faculty Service overlay row to avoid duplicates.
+        if sid and sid in reflected_section_ids:
+            continue
 
         faculty = (d.get('faculty') or {}) if isinstance(d.get('faculty'), dict) else {}
         faculty_name = (
@@ -1673,25 +1615,65 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
             # Best-effort only; keep existing behavior.
             docs = []
 
-    # Preload section remarks from the canonical `sections` collection.
-    # Remarks are stored in sections.remarks (not in sections_submitted).
+    # Preload remarks + dissolved flags from every relevant source.
+    # OM Load Assignment primarily renders from `sections_submitted`, while
+    # Class Retention updates the canonical `sections` row. For robustness,
+    # union dissolved state from:
+    #   1) sections
+    #   2) sections_submitted
+    #   3) class_retention rows with status=Dissolved
     section_ids_for_remarks = [
         (d.get("section_id") or "").strip() for d in docs if (d.get("section_id") or "").strip()
     ]
     remarks_by_section_id: dict[str, str] = {}
+    dissolved_section_ids: set[str] = set()
+
+    def _remarks_has_dissolved_tag(raw_remarks: Any) -> bool:
+        return any(
+            part.strip().casefold() == "dissolved"
+            for part in str(raw_remarks or "").split("|")
+            if part and part.strip()
+        )
+
+    def _doc_marks_dissolved(s: Dict[str, Any]) -> bool:
+        return bool(s.get("is_dissolved"))             or str(s.get("class_retention_status") or "").strip().lower() == "dissolved"             or _remarks_has_dissolved_tag(s.get("remarks"))
+
     if section_ids_for_remarks:
         try:
-            sec_docs = await db["sections"].find(
+            sec_docs = await db[COL_SECTIONS].find(
                 {"section_id": {"$in": section_ids_for_remarks}},
-                {"_id": 0, "section_id": 1, "remarks": 1},
+                {"_id": 0, "section_id": 1, "remarks": 1, "is_dissolved": 1, "class_retention_status": 1},
             ).to_list(None)
-            remarks_by_section_id = {
-                (s.get("section_id") or "").strip(): str(s.get("remarks") or "")
-                for s in (sec_docs or [])
-                if (s.get("section_id") or "").strip()
-            }
+            sub_docs = await db[COL_SECTIONS_SUBMITTED].find(
+                {"section_id": {"$in": section_ids_for_remarks}},
+                {"_id": 0, "section_id": 1, "remarks": 1, "is_dissolved": 1, "class_retention_status": 1},
+            ).to_list(None)
+            cr_docs = await db[COL_CLASS_RETENTION].find(
+                {
+                    "term_id": term_id,
+                    "section_id": {"$in": section_ids_for_remarks},
+                    "status": {"$regex": r"^dissolved$", "$options": "i"},
+                },
+                {"_id": 0, "section_id": 1},
+            ).to_list(None)
+
+            for source_docs in (sec_docs or [], sub_docs or []):
+                for s in source_docs:
+                    sid = (s.get("section_id") or "").strip()
+                    if not sid:
+                        continue
+                    if sid not in remarks_by_section_id or not remarks_by_section_id[sid].strip():
+                        remarks_by_section_id[sid] = str(s.get("remarks") or "")
+                    if _doc_marks_dissolved(s):
+                        dissolved_section_ids.add(sid)
+
+            for r in (cr_docs or []):
+                sid = (r.get("section_id") or "").strip()
+                if sid:
+                    dissolved_section_ids.add(sid)
         except Exception:
             remarks_by_section_id = {}
+            dissolved_section_ids = set()
 
     # --- Preload rooms into lookups (number + capacity) so OM table can reflect
     #     APO room/room-capacity changes without requiring manual edits. ---
@@ -1752,6 +1734,8 @@ async def _fetch_rows(user_id: str, term_id: str, db, archived_view: bool = Fals
     for d in docs:
         sid = d.get("section_id") or ""
         if not sid:
+            continue
+        if sid in dissolved_section_ids:
             continue
 
         course_doc = (d.get("course") or {})
@@ -2886,63 +2870,7 @@ async def loadassignment_handler(
                     "updated_at": ts,
                 })
 
-            try:
-                details = (
-                    f"A new SHS section was imported and may need room review.\n\n"
-                    f"Course: {course_code} — {course_title.strip()}\n"
-                    f"Section: {section_code}\n"
-                    f"Mode: {mode}\n"
-                    f"Capacity: {cap}"
-                ).strip()
-
-                meta = {
-                    "route": "/apo/courseofferings",
-                    "kind": "shs_import_added_section",
-                    "term_id": term_id,
-                    "section_id": section_id,
-                    "campus_id": campus_id,
-                    "course_id": course_id,
-                    "course_code": course_code,
-                    "section_code": section_code,
-                }
-
-                apo_uids: list[str] = []
-                try:
-                    if campus_id:
-                        apo_uids = await _apo_user_ids_for_campus(campus_id, db)
-                except Exception:
-                    apo_uids = []
-
-                # Fallback: if campus routing fails, notify all APO users (same as new-line)
-                if not apo_uids:
-                    try:
-                        apo_uids = await _all_apo_user_ids(db)
-                    except Exception:
-                        apo_uids = []
-
-                # De-duplicate and never notify the actor
-                apo_uids = sorted({uid for uid in (apo_uids or []) if uid and uid != userId})
-
-                for uid in apo_uids:
-                    try:
-                        try:
-                            await _ensure_user_gmail_address(uid, db)
-                        except Exception:
-                            pass
-
-                        await create_notification(
-                            user_id=uid,
-                            title="New SHS section imported",
-                            details=details,
-                            meta=meta,
-                            send_email=True,          # set False if you only want in-app
-                            email_from_user_id=userId,
-                        )
-                    except Exception:
-                        continue
-            except Exception:
-                # Never fail import due to notification issues
-                pass
+            # Per request: importing an SHS file should not notify APO.
 
             imported += 1
 
@@ -3414,6 +3342,8 @@ async def get_om_load_assignment_list(user_id: str, term_id: Optional[str] = Non
         windows: list[dict] = []
         for d in days:
             d_str = str(d or "").strip().upper()
+            if d_str == "TH":
+                d_str = "H"
             if not d_str:
                 continue
             for t in times:
@@ -3856,6 +3786,65 @@ async def om_get_submitted_course_offerings(
 
     return {"ok": True, "courses": out}
 
+def _extract_section_numeric_suffix(section_code: str) -> int:
+    s = str(section_code or "").strip().upper()
+    m = re.search(r"(\d+)$", s)
+    if not m:
+        return 0
+    try:
+        return int(m.group(1))
+    except Exception:
+        return 0
+
+
+async def _next_auto_section_code(
+    *,
+    db,
+    term_id: str,
+    course_id: str,
+    campus_id: str,
+) -> str:
+    """Auto-generate the next section code for OM Add Section."""
+    campus = str(campus_id or "").strip().upper()
+    default_prefix = "XX" if campus == "CMPS0002" else "S"
+
+    existing_codes: list[str] = []
+    q = {
+        "term_id": term_id,
+        "course_id": course_id,
+        "campus_id": campus_id,
+        "section_code": {"$exists": True, "$ne": ""},
+    }
+
+    cur = db[COL_SECTIONS_SUBMITTED].find(q, {"_id": 0, "section_code": 1})
+    async for d in cur:
+        code = str(d.get("section_code") or "").strip()
+        if code:
+            existing_codes.append(code)
+
+    cur2 = db[COL_SECTIONS].find(q, {"_id": 0, "section_code": 1})
+    async for d in cur2:
+        code = str(d.get("section_code") or "").strip()
+        if code:
+            existing_codes.append(code)
+
+    if existing_codes:
+        ranked = []
+        for code in existing_codes:
+            clean = str(code or "").strip().upper()
+            ranked.append((_extract_section_numeric_suffix(clean), clean))
+        ranked.sort(key=lambda x: x[0])
+        last_code = ranked[-1][1]
+        prefix_match = re.match(r"([A-Z]+)", last_code)
+        prefix = prefix_match.group(1) if prefix_match else default_prefix
+        next_num = ranked[-1][0] + 1
+    else:
+        prefix = default_prefix
+        next_num = 1
+
+    return f"{prefix}{next_num:02d}"
+
+
 @router.post("/load-assignment/new-line")
 async def om_save_new_line(
     user_id: str,
@@ -3886,14 +3875,13 @@ async def om_save_new_line(
 
     # Validate required payload fields
     course_code = str(payload.get("course_code") or "").strip()
-    section_code = str(payload.get("section_code") or "").strip()
     faculty_id = str(payload.get("faculty_id") or "").strip()
-    mode = str(payload.get("mode") or "").strip().upper()
+    mode = str(payload.get("mode") or "HYB").strip().upper() or "HYB"
     day1 = str(payload.get("day1") or "").strip().upper()
     begin1 = _norm_hhmm(str(payload.get("begin1") or "").strip())
     end1 = _norm_hhmm(str(payload.get("end1") or "").strip())
 
-    if not course_code or not section_code or not faculty_id or not mode or not day1 or not begin1 or not end1:
+    if not course_code or not faculty_id or not day1 or not begin1 or not end1:
         raise HTTPException(status_code=422, detail="Missing required fields")
 
     # Optional meeting 2
@@ -3918,65 +3906,6 @@ async def om_save_new_line(
     if not course_id:
         raise HTTPException(status_code=500, detail="Course is missing course_id")
 
-    # --- APO validation helpers ---
-    def _apo_from_section_prefix(sec: str) -> str:
-        """Return 'APO Manila' or 'APO Laguna' based on section prefix."""
-        s = (sec or "").strip().upper()
-        if s.startswith("XX") or s.startswith("XC"):
-            return "APO Laguna"
-        if s.startswith("S") or s.startswith("G"):
-            return "APO Manila"
-        return ""
-
-    def _apo_from_campus_id(cid: str) -> str:
-        """Best-effort mapping of campus_id -> APO name."""
-        c = (cid or "").strip().upper()
-        # Project convention observed in other modules: CMPS0001=Manila, CMPS0002=Laguna
-        if c == "CMPS0001":
-            return "APO Manila"
-        if c == "CMPS0002":
-            return "APO Laguna"
-        return ""
-
-    async def _infer_om_campus_id() -> str:
-        """Infer OM campus_id from payload, OM role scope, or term offerings."""
-        # 1) explicit payload override
-        cid = str(payload.get("campus_id") or "").strip()
-        if cid:
-            return cid
-
-        # 2) OM role scope (ROLE0006) may include campus scopes
-        ra = await db.get_collection("role_assignments").find_one(
-            {"user_id": user_id, "role_id": "ROLE0006"},
-            {"_id": 0, "scope": 1},
-        ) or {}
-        for sc in (ra.get("scope") or []):
-            if not isinstance(sc, dict):
-                continue
-            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
-            if typ in ("campus", "campuses") or "campus" in typ:
-                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
-                if v:
-                    return v
-
-        # 3) Infer from the submitted offerings for this OM's department scope in the term
-        try:
-            pipe = [
-                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
-                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
-                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
-                {"$match": {"course.department_id": {"$in": dept_ids}}},
-                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
-                {"$sort": {"n": -1}},
-                {"$limit": 1},
-            ]
-            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
-            if top and top[0].get("_id"):
-                return str(top[0]["_id"]).strip()
-        except Exception:
-            pass
-        return ""
-
     # Ensure this course exists in submitted offerings for this term (same source as OM table)
     # NOTE: campus_id from the submitted offering is the source of truth for which
     # APO/campus this course offering belongs to. This prevents false Manila/Laguna
@@ -3992,39 +3921,52 @@ async def om_save_new_line(
     if not offering_exists:
         raise HTTPException(status_code=409, detail="Course is not part of submitted course offerings")
 
-    # 1) Prevent duplicate sections per course (same course_code/course_id) for the active term
-    dup = await db[COL_SECTIONS_SUBMITTED].find_one(
-        {
-            "term_id": tid,
-            "submitted_for_scheduling": True,
-            "course_id": course_id,
-            "section_code": {"$regex": rf"^{re.escape(section_code)}$", "$options": "i"},
-        },
-        {"_id": 0, "section_id": 1},
-    )
-    if dup:
-        raise HTTPException(status_code=409, detail="Duplicate section: this section already exists for that course")
-
-    # 2) Enforce APO rules based on section prefix AND the course offering's campus.
-    # The submitted course offering (sections_submitted) is treated as the source of truth
-    # for which campus/APO the course belongs to.
-    section_apo = _apo_from_section_prefix(section_code)
-    if not section_apo:
-        raise HTTPException(
-            status_code=409,
-            detail="Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna)",
-        )
-
     expected_campus_id = (
         str(payload.get("campus_id") or "").strip()
         or str(offering_exists.get("campus_id") or "").strip()
     )
-    expected_apo = _apo_from_campus_id(expected_campus_id)
-    if expected_apo and section_apo != expected_apo:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Invalid section: This section belongs to {section_apo}, but you’re assigning for {expected_apo}.",
-        )
+
+    if not expected_campus_id:
+        ra = await db.get_collection("role_assignments").find_one(
+            {"user_id": user_id, "role_id": "ROLE0006"},
+            {"_id": 0, "scope": 1},
+        ) or {}
+        for sc in (ra.get("scope") or []):
+            if not isinstance(sc, dict):
+                continue
+            typ = str(sc.get("type") or sc.get("scope_type") or "").strip().lower()
+            if typ in ("campus", "campuses") or "campus" in typ:
+                v = str(sc.get("id") or sc.get("scope_id") or sc.get("campus_id") or "").strip()
+                if v:
+                    expected_campus_id = v
+                    break
+
+    if not expected_campus_id:
+        try:
+            pipe = [
+                {"$match": {"term_id": tid, "submitted_for_scheduling": True}},
+                {"$lookup": {"from": COL_COURSES, "localField": "course_id", "foreignField": "course_id", "as": "course"}},
+                {"$unwind": {"path": "$course", "preserveNullAndEmptyArrays": False}},
+                {"$match": {"course.department_id": {"$in": dept_ids}}},
+                {"$group": {"_id": "$campus_id", "n": {"$sum": 1}}},
+                {"$sort": {"n": -1}},
+                {"$limit": 1},
+            ]
+            top = [x async for x in db[COL_SECTIONS_SUBMITTED].aggregate(pipe)]
+            if top and top[0].get("_id"):
+                expected_campus_id = str(top[0]["_id"]).strip()
+        except Exception:
+            pass
+
+    if not expected_campus_id:
+        raise HTTPException(status_code=409, detail="Unable to resolve campus for new section")
+
+    section_code = await _next_auto_section_code(
+        db=db,
+        term_id=tid,
+        course_id=course_id,
+        campus_id=expected_campus_id,
+    )
 
     # Generate a new section_id in the existing SEC#### format
     ctx = await phase0_load(tid, db, department_id=None)
@@ -4035,9 +3977,8 @@ async def om_save_new_line(
         seq += 1
         section_id = f"SEC{seq:04d}"
 
-    # Campus routing: prefer the course offering's campus_id (source of truth),
-    # fall back to section-prefix inference for safety.
-    campus_id = expected_campus_id or _section_to_campus_id(section_code)
+    # Campus routing: use the resolved course offering / OM campus.
+    campus_id = expected_campus_id
 
     # NEW: Campus-specific deadline lock.
     # If the APO-set deadline has passed for this campus, OM may not add new sections for it.
@@ -4904,16 +4845,53 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     """Notify a faculty that a course is added to their final schedule."""
     user_id = (payload.get("user_id") or payload.get("userId") or "").strip()
     faculty_id = payload.get("faculty_id")
-    course_code = payload.get("course_code") or payload.get("course")
+    requested_course_code = payload.get("course_code") or payload.get("course")
     section = payload.get("section")
     term_id = payload.get("term_id")
 
-    if not user_id or not faculty_id or not course_code or not section:
+    if not user_id or not faculty_id or not requested_course_code or not section:
         raise HTTPException(status_code=400, detail="user_id, faculty_id, course_code and section are required")
 
     if not term_id:
         active = await _active_term()
         term_id = (active or {}).get("term_id")
+
+    resolved_course_code = str(requested_course_code or "").strip()
+    section_id = ""
+    try:
+        sec_doc = await db[COL_SECTIONS].find_one(
+            {"term_id": term_id, "section_code": section},
+            {"_id": 0, "section_id": 1, "course_id": 1, "course_code": 1, "course": 1},
+        )
+
+        if (not sec_doc) and resolved_course_code:
+            c = await db[COL_COURSES].find_one(
+                {"$or": [{"course_code": resolved_course_code}, {"course_code": [resolved_course_code]}]},
+                {"_id": 0, "course_id": 1},
+            )
+            cid = str((c or {}).get("course_id") or "").strip()
+            if cid:
+                sec_doc = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id, "course_id": cid, "section_code": section},
+                    {"_id": 0, "section_id": 1, "course_id": 1, "course_code": 1, "course": 1},
+                )
+
+        section_id = str((sec_doc or {}).get("section_id") or "").strip()
+        if sec_doc:
+            cc = sec_doc.get("course_code") or sec_doc.get("course") or ""
+            if isinstance(cc, list):
+                cc = cc[0] if cc else ""
+            resolved_course_code = str(cc or "").strip() or resolved_course_code
+
+            cid = str((sec_doc or {}).get("course_id") or "").strip()
+            if (not resolved_course_code) and cid:
+                cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
+                cc2 = cdoc.get("course_code") or ""
+                if isinstance(cc2, list):
+                    cc2 = cc2[0] if cc2 else ""
+                resolved_course_code = str(cc2 or "").strip() or resolved_course_code
+    except Exception:
+        section_id = ""
 
     fac = await db[COL_FACULTY].find_one({"faculty_id": faculty_id}, {"_id": 0, "user_id": 1}) or {}
     fac_user_id = (fac.get("user_id") or "").strip()
@@ -4922,50 +4900,17 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         # Backfill missing users.gmail (some Faculty accounts only have users.email).
         await _ensure_user_gmail_address(fac_user_id, db)
 
-        # Best-effort: include the specific course + section in the notification body
-        # so both in-app and Gmail messages are self-contained.
-        course_code = ""
-        section_code = ""
-        course_section_line = ""
-        if section_id:
-            try:
-                sec = await db[COL_SECTIONS].find_one(
-                    {"section_id": section_id},
-                    {"_id": 0, "section_code": 1, "course_id": 1, "course_code": 1, "section": 1, "course": 1},
-                ) or {}
-
-                section_code = str(sec.get("section_code") or sec.get("section") or "").strip()
-
-                cc = sec.get("course_code") or sec.get("course") or ""
-                if isinstance(cc, list):
-                    cc = cc[0] if cc else ""
-                course_code = str(cc or "").strip()
-
-                cid = str(sec.get("course_id") or "").strip()
-                if not course_code and cid:
-                    cdoc = await db[COL_COURSES].find_one({"course_id": cid}, {"_id": 0, "course_code": 1}) or {}
-                    cc2 = cdoc.get("course_code") or ""
-                    if isinstance(cc2, list):
-                        cc2 = cc2[0] if cc2 else ""
-                    course_code = str(cc2 or "").strip()
-
-                if course_code or section_code:
-                    label = " – ".join([p for p in [course_code, section_code] if p])
-                    course_section_line = f"Course/Section: {label}\n\n"
-            except Exception:
-                course_section_line = ""
-
         # Send BOTH in-app + Gmail notification (best-effort) using the OM's connected Gmail.
         await create_notification(
             user_id=fac_user_id,
             title="Load Assignment: Added to final schedule",
-            details=f"{course_code} – {section} has been added to your final schedule.",
+            details=f"{resolved_course_code} – {section} has been added to your final schedule.",
             meta={
                 "route": "/faculty/overview",
                 "kind": "load_course_finalized",
                 "term_id": term_id,
                 "faculty_id": faculty_id,
-                "course_code": course_code,
+                "course_code": resolved_course_code,
                 "section": section,
             },
             send_email=True,
@@ -4977,7 +4922,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": faculty_id, "term_id": term_id},
             {
-                "$addToSet": {"finalized": {"course_code": course_code, "section": section}},
+                "$addToSet": {"finalized": {"course_code": resolved_course_code, "section": section}},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
                 "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
             },
@@ -4986,7 +4931,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         await db[COL_LOAD_PROPOSALS].update_one(
             {"faculty_id": faculty_id, "term_id": term_id},
             {"$set": {"rows.$[r].finalized": True}},
-            array_filters=[{"r.course": course_code, "r.section": section}],
+            array_filters=[{"r.course": resolved_course_code, "r.section": section}],
         )
     except Exception:
         pass
@@ -4997,7 +4942,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
             om_user_id=user_id,
             term_id=term_id,
             faculty_id=faculty_id,
-            course_code=course_code,
+            course_code=resolved_course_code,
             section_code=section,
         )
     except Exception:
@@ -5013,9 +4958,9 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
         )
 
         # If section_code isn't unique across campuses, narrow by course_code when possible.
-        if (not sec_doc) and course_code:
+        if (not sec_doc) and resolved_course_code:
             c = await db[COL_COURSES].find_one(
-                {"$or": [{"course_code": course_code}, {"course_code": [course_code]}]},
+                {"$or": [{"course_code": resolved_course_code}, {"course_code": [resolved_course_code]}]},
                 {"_id": 0, "course_id": 1},
             )
             cid = (c or {}).get("course_id")
@@ -5077,13 +5022,13 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
                 await create_notification(
                     user_id=user_id,
                     title="Load Assignment Approved",
-                    details=f"{course_code} – {section} is approved and ready for room allocation.",
+                    details=f"{resolved_course_code} – {section} is approved and ready for room allocation.",
                     meta={
                         "route": "/om/load-assignment",
                         "kind": "om_load_approved",
                         "term_id": term_id,
                         "section_id": section_id,
-                        "course_code": course_code,
+                        "course_code": resolved_course_code,
                         "section_code": section,
                     },
                     send_email=True,
@@ -5094,7 +5039,7 @@ async def om_finalize_course(payload: Dict[str, Any] = Body(...), db=Depends(get
     except Exception:
         pass
 
-    return {"ok": True, "course_code": course_code, "section": section}
+    return {"ok": True, "course_code": resolved_course_code, "section": section}
 
 @router.post("/load-assignment/run")
 async def run_auto_assignment(
@@ -6985,12 +6930,16 @@ def _streak_ok_for_day(
     gap_tol: int = MAX_GAP_FOR_STREAK,
 ) -> bool:
     """
-    Ensure that, on a single day, the total length of a 'teaching streak'
-    (blocks separated by <= gap_tol minutes) never exceeds max_minutes.
+    Ensure that, on a single day, the total length of a teaching streak
+    (blocks separated by <= gap_tol minutes) stays below max_minutes.
+
+    Rule:
+      4.5 hours (270 minutes) of consecutive teaching is already invalid.
 
     Example:
-      07:30–09:00, 09:15–10:45, 11:00–12:30 on the same day
-      → 3 x 90min = 270min teaching in a 5h window → REJECT when max_minutes=270.
+      07:30–09:00, 09:15–10:45, 11:00–12:30
+      -> 270 minutes total teaching with <=15-minute gaps
+      -> REJECT
     """
     intervals = [(s, e) for (s, e) in (existing + new_slots) if s >= 0 and e > s]
     if not intervals:
@@ -7005,11 +6954,9 @@ def _streak_ok_for_day(
         dur = en - st
 
         if gap <= gap_tol:
-            # extend current streak
             streak_end = en
             streak_teach += dur
         else:
-            # start a new streak
             streak_start, streak_end = st, en
             streak_teach = dur
 
@@ -7098,14 +7045,25 @@ def _pref_accepts_slot(fpref: dict, di: int, interval: tuple[int,int]) -> bool:
     if avail:
         allowed: set[int] = set()
         for d in avail:
-            if not d: continue
-            k = d[0].upper()
-            if k == "M": allowed.add(1)
-            elif k == "T": allowed.add(2)
-            elif k == "W": allowed.add(3)
-            elif k in ("H","T","TH"): allowed.add(4)
-            elif k == "F": allowed.add(5)
-            elif k == "S": allowed.add(6)
+            if not d:
+                continue
+
+            s = str(d).strip().upper()
+            if s == "TH":
+                s = "H"
+
+            if s == "M":
+                allowed.add(1)
+            elif s == "T":
+                allowed.add(2)
+            elif s == "W":
+                allowed.add(3)
+            elif s == "H":
+                allowed.add(4)
+            elif s == "F":
+                allowed.add(5)
+            elif s == "S":
+                allowed.add(6)
 
         if di not in allowed:
             # print(f"DEBUG-PREF: Day {di} not in availability_days {avail} → REJECT")
@@ -8966,9 +8924,14 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
         t = (ctx.courses.get(cid) or {}).get("type") or (ctx.courses.get(cid) or {}).get("type_of_course")
         return str(t).strip().upper() == "SHS"
 
-    # Build a dict from section_id -> (faculty_id, course_id) using the latest compute run
-    sugg = await compute_load_recommendations(term_id=term_id, db=db, department_id=department_id, protected_section_ids=locked_section_ids)
-    by_sid = {a["section_id"]: a for a in (sugg.get("assignments") or [])}
+    # Persist exactly what the OM grid submitted. Re-running auto-assign here can
+    # drift from the approved rows and also required variables that are not in
+    # scope inside this persister. Use the incoming rows as the source of truth.
+    by_sid = {
+        str(r.get("section_id") or r.get("id") or "").strip(): r
+        for r in rows
+        if str(r.get("section_id") or r.get("id") or "").strip()
+    }
 
     # --- NEW: preflight used slots to prevent duplicates across the batch ---
     used: dict[str, set[tuple[str,str,str]]] = {}
@@ -8992,7 +8955,7 @@ async def _approve_and_persist(term_id: str, rows: list[dict], db):
 
         # Prefer the faculty manually chosen in the row; fall back to the latest compute suggestion.
         fid = r.get("faculty_id") or a.get("faculty_id")
-        cid = a.get("course_id") or section_to_course.get(sid)
+        cid = r.get("course_id") or a.get("course_id") or section_to_course.get(sid)
 
         # --- Allow SHS fallback: use the row faculty_id even if missing in compute output ---
         if not fid and _course_is_shs(cid):
@@ -9948,6 +9911,8 @@ def _aa_pref_days(pref: dict | None) -> list[str]:
     vals = []
     for d in ((pref or {}).get("availability_days") or []):
         s = str(d or "").strip().upper()
+        if s == "TH":
+            s = "H"
         if s:
             vals.append(s)
     return vals

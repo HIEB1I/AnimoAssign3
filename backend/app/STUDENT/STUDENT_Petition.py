@@ -18,10 +18,58 @@ COL_TERMS = "terms"
 COL_CURRICULUM = "curriculum"
 COL_ADMIN = "student_petitions_admin"      # optional, used by OM to pin status/remarks
 COL_PREEN_COUNT = "preenlistment_count" 
+COL_PETITION_WINDOWS = "student_petition_windows"
+COL_SPECIAL = "special_class"
 # ---------------- helpers ----------------
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+async def _resolve_student_identity(user_id: str) -> Dict[str, Any]:
+    user = await db[COL_USERS].find_one(
+        {"user_id": user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
+    ) or {}
+
+    first_name = str(user.get("first_name") or "")
+    last_name = str(user.get("last_name") or "")
+    student_number = str(user.get("student_number") or "").strip()
+    program_id = str(user.get("program_id") or "").strip()
+
+    async def _latest_identity(coll: str, id_field: str) -> Dict[str, Any]:
+        return await db[coll].find_one(
+            {"user_id": user_id, id_field: {"$exists": True}},
+            sort=[("submitted_at", -1)],
+            projection={"_id": 0, "student_number": 1, "program_id": 1},
+        ) or {}
+
+    for coll, id_field in ((COL_PETITIONS, "petition_id"), (COL_SPECIAL, "special_id")):
+        if student_number and program_id:
+            break
+        prev = await _latest_identity(coll, id_field)
+        if not student_number and prev.get("student_number") is not None:
+            student_number = str(prev.get("student_number") or "").strip()
+        if not program_id and prev.get("program_id"):
+            program_id = str(prev.get("program_id") or "").strip()
+
+    program_code = ""
+    if program_id:
+        prog = await db[COL_PROGRAMS].find_one(
+            {"program_id": program_id},
+            {"_id": 0, "program_code": 1},
+        ) or {}
+        program_code = str(prog.get("program_code") or "").strip()
+
+    return {
+        "ok": bool(user),
+        "first_name": first_name,
+        "last_name": last_name,
+        "student_number": student_number,
+        "program_id": program_id,
+        "program_code": program_code,
+        "lock_student_number": bool(student_number),
+        "lock_degree": bool(program_code),
+    }
 
 async def _active_term() -> Dict[str, Any]:
     """
@@ -86,6 +134,95 @@ async def _active_term() -> Dict[str, Any]:
 
     # If no next term, stick with current (still better than returning nothing)
     return current
+
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _effective_petition_status(raw_status: Any, petition_count: Any) -> str:
+    count = int(petition_count or 0)
+    raw = str(raw_status or "").strip()
+    threshold_managed_statuses = {"", "Less Than Minimum", "Forwarded To Department"}
+    if raw in threshold_managed_statuses:
+        return "Forwarded To Department" if count >= 15 else "Less Than Minimum"
+    return raw
+
+
+async def _effective_petition_status_map(pairs: List[Dict[str, str]]) -> Dict[tuple, str]:
+    normalized_pairs: List[Dict[str, str]] = []
+    seen = set()
+    for pair in pairs or []:
+        term_id = str((pair or {}).get("term_id") or "").strip()
+        course_id = str((pair or {}).get("course_id") or "").strip()
+        if not term_id or not course_id:
+            continue
+        key = (term_id, course_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized_pairs.append({"term_id": term_id, "course_id": course_id})
+
+    if not normalized_pairs:
+        return {}
+
+    pipeline: List[Dict[str, Any]] = [
+        {"$match": {
+            "petition_id": {"$exists": True},
+            "$or": normalized_pairs,
+        }},
+        {"$sort": {"submitted_at": 1}},
+        {"$group": {
+            "_id": {"term_id": "$term_id", "course_id": "$course_id"},
+            "count": {"$sum": 1},
+            "last_status": {"$last": "$status"},
+        }},
+    ]
+
+    rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
+    status_map: Dict[tuple, str] = {}
+    for row in rows:
+        key_doc = row.get("_id") or {}
+        key = (str(key_doc.get("term_id") or "").strip(), str(key_doc.get("course_id") or "").strip())
+        if not key[0] or not key[1]:
+            continue
+        status_map[key] = _effective_petition_status(row.get("last_status"), row.get("count"))
+    return status_map
+
+
+async def _petition_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_PETITION_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
 
 async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
     """
@@ -235,10 +372,16 @@ async def petition_handler(
             {"$sort": {"submitted_at": -1}},
         ]
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
+        effective_status_map = await _effective_petition_status_map([
+            {"term_id": r.get("term_id"), "course_id": r.get("course_id")}
+            for r in rows
+        ])
 
         # Make a flat, UI-friendly shape
         def to_view(r: Dict[str, Any]) -> Dict[str, Any]:
             ay = r.get("terms", {}).get("acad_year_start")
+            pair_key = (str(r.get("term_id") or "").strip(), str(r.get("course_id") or "").strip())
+            effective_status = effective_status_map.get(pair_key, r.get("status", ""))
             return {
                 "petition_id": r.get("petition_id", ""),
                 "user_id": r.get("user_id", ""),
@@ -246,7 +389,7 @@ async def petition_handler(
                 "course_code": r.get("courses", {}).get("course_code", ""),
                 "course_title": r.get("courses", {}).get("course_title", ""),
                 "reason": r.get("reason", ""),
-                "status": r.get("status", ""),
+                "status": effective_status,
                 "remarks": r.get("remarks", ""),
                 "submitted_at": r.get("submitted_at"),
                 "acad_year_start": ay,
@@ -262,17 +405,7 @@ async def petition_handler(
 
     # ---------- PROFILE ----------
     if action == "profile":
-        u = await db[COL_USERS].find_one(
-            {"user_id": userId},
-            {"_id": 0, "first_name": 1, "last_name": 1},
-        )
-        return {
-            "ok": bool(u),
-            "first_name": (u or {}).get("first_name", ""),
-            "last_name": (u or {}).get("last_name", ""),
-            "student_number": "",
-            "program_code": "",
-        }
+        return await _resolve_student_identity(userId)
 
     # ---------- OPTIONS ----------
     if action == "options":
@@ -296,8 +429,11 @@ async def petition_handler(
                 "programs": [],
                 "reasons": cfg.get("reasons", []),
                 "statuses": cfg.get("statuses", []),
+                "submission_window": {"openISO": "", "deadlineISO": "", "term_id": None},
                 "message": "No active term found. Please configure a current term."
             }
+
+        submission_window = await _petition_window_for_term(active)
 
         # courses offered this term (via curriculum.term_id + curriculum.course_list -> courses.course_id)
         pipeline = [
@@ -355,6 +491,7 @@ async def petition_handler(
             "programs": programs,      # {program_id, program_code}
             "reasons": cfg.get("reasons", []),
             "statuses": cfg.get("statuses", []),
+            "submission_window": submission_window,
         }
 
     # ---------- SUBMIT ----------
@@ -362,34 +499,38 @@ async def petition_handler(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
-        # Required fields
-        for k in ["department", "courseCode", "reason", "studentNumber", "degree"]:
-            if not str(payload.get(k) or "").strip():
-                raise HTTPException(status_code=400, detail="All required fields must be filled.")
+        identity = await _resolve_student_identity(userId)
+        department = str(payload.get("department") or "").strip()
+        course_code = str(payload.get("courseCode") or "").strip()
+        reason_value = str(payload.get("reason") or "").strip()
+        sn = str(identity.get("student_number") or payload.get("studentNumber") or "").strip()
+        degree_code = str(identity.get("program_code") or payload.get("degree") or "").strip()
+
+        if not department or not course_code or not reason_value or not sn or not degree_code:
+            raise HTTPException(status_code=400, detail="All required fields must be filled.")
 
         # Student number guard
-        sn = str(payload["studentNumber"]).strip()
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
         # Config + reason validation
         cfg = await _get_petition_config()
-        if payload["reason"] not in set(cfg.get("reasons", [])):
+        if reason_value not in set(cfg.get("reasons", [])):
             raise HTTPException(status_code=400, detail="Invalid reason value.")
         statuses: List[str] = cfg.get("statuses", [])
         initial_status = next((s for s in statuses if s.lower().startswith("forwarded")),
                               (statuses[0] if statuses else "PENDING"))
 
         # Resolve entities
-        prog = await _get_program_by_code(str(payload["degree"]).strip())
+        prog = await _get_program_by_code(degree_code)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")
 
-        dept = await _get_department_by_name(str(payload["department"]).strip())
+        dept = await _get_department_by_name(department)
         if not dept:
             raise HTTPException(status_code=400, detail="Selected department not found.")
 
-        course = await _find_course_by_code(str(payload["courseCode"]).strip())
+        course = await _find_course_by_code(course_code)
         if not course:
             raise HTTPException(status_code=400, detail="Course code not found.")
 
@@ -402,6 +543,21 @@ async def petition_handler(
         term_id = active_term.get("term_id", "")
         if not term_id:
             raise HTTPException(status_code=503, detail="No active term configured.")
+
+        submission_window = await _petition_window_for_term(active_term)
+        open_dt = _parse_date_any(submission_window.get("openISO"))
+        deadline_dt = _parse_date_any(submission_window.get("deadlineISO"))
+        now = _now_dt()
+        if not open_dt or not deadline_dt:
+            raise HTTPException(status_code=403, detail="Petition submission window has not been started.")
+        if open_dt.tzinfo is None:
+            open_dt = open_dt.replace(tzinfo=timezone.utc)
+        if deadline_dt.tzinfo is None:
+            deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+        if now < open_dt:
+            raise HTTPException(status_code=403, detail="Petition submission window has not started yet.")
+        if now > deadline_dt:
+            raise HTTPException(status_code=403, detail="Petition submission deadline has passed.")
 
         # Validate via curriculum that course is offered this term
         cur_hit = await db[COL_CURRICULUM].find_one({
@@ -445,13 +601,19 @@ async def petition_handler(
             "department_id": dept["department_id"],
             "course_id": course["course_id"],
             "student_number": int(sn),          # change to 'sn' (string) if your schema needs string
-            "reason": payload["reason"],
+            "reason": reason_value,
             "status": inherited_status,
             "remarks": inherited_remarks,
             "submitted_at": _now_dt(),
         }
 
         await db[COL_PETITIONS].insert_one(doc)
+        post_submit_count = await db[COL_PETITIONS].count_documents({
+            "term_id": term_id,
+            "course_id": course["course_id"],
+            "petition_id": {"$exists": True},
+        })
+        effective_response_status = _effective_petition_status(doc["status"], post_submit_count)
 
         # Response (fast projection)
         return {"ok": True, "petition": {
@@ -460,8 +622,8 @@ async def petition_handler(
             "course_id": course["course_id"],
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
-            "reason": payload["reason"],
-            "status": doc["status"],
+            "reason": reason_value,
+            "status": effective_response_status,
             "remarks": doc["remarks"],
             "submitted_at": doc["submitted_at"],
             "acad_year_start": active_term.get("acad_year_start"),

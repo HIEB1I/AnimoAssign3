@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Calendar, AlertCircle, Send } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import Tabs from "../../component/Tabs";
+import { cls } from "../../utilities/cls";
 
 import TopBar from "../../component/TopBar";
 import {
@@ -21,6 +22,8 @@ type ProfileData = {
   last_name: string;
   student_number: string;
   program_code?: string;
+  lock_student_number?: boolean;
+  lock_degree?: boolean;
 };
 
 type UserData = { userId: string; fullName: string; roles?: string[] };
@@ -33,9 +36,91 @@ type FormData = {
   studentNumber: string;
 };
 
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({ openISO, deadlineISO, className }: { openISO: string; deadlineISO: string; className?: string }) {
+  const hasWindow = !!openISO && !!deadlineISO;
+  if (!hasWindow) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 h-2.5 w-2.5 rounded-full bg-slate-400" />
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="mt-0.5 text-xs text-slate-600">The Office Manager has not started the submission window yet.</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: openPassed, label: openLabel } = useCountdown(openISO);
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (!openPassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Submissions Open In</div>
+          <div className="mt-0.5">
+            Opens: <span className="font-medium">{openISO ? new Date(openISO).toLocaleString() : "—"}</span>{" "}
+            • <span className="font-bold text-amber-700">{openLabel}</span>
+          </div>
+          <div className="mt-1 text-[12px] opacity-80">Editing is locked until the window opens.</div>
+        </div>
+      </div>
+    );
+  }
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-red-300 bg-red-50 text-red-800", className)}>
+        <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-red-500" />
+        <div className="text-sm">
+          <div className="font-semibold">Editing Locked</div>
+          <div className="mt-0.5">
+            Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
+            • <span className="font-bold text-red-700">Deadline passed</span>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 flex items-start gap-3 rounded-xl border p-4 border-amber-300 bg-amber-50 text-amber-900", className)}>
+      <div className="mt-0.5 h-2.5 w-2.5 shrink-0 rounded-full bg-amber-500" />
+      <div className="text-sm">
+        <div className="font-semibold">Submission Deadline Approaching</div>
+        <div className="mt-0.5">
+          Deadline: <span className="font-medium">{deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</span>{" "}
+          • <span className="font-bold text-amber-700">{deadlineLabel}</span>
+        </div>
+        <div className="mt-1 text-[12px] opacity-80">Please finalize your preferences before the deadline.</div>
+      </div>
+    </div>
+  );
+}
+
 /* ---------------- Status Card ---------------- */
 const STATUS_PILL: Record<string, string> = {
-  "Less Than Minimum": "bg-amber-100 text-amber-800",
+  "Less Than Minimum": "bg-gray-200 text-gray-700",
   "Forwarded To Department": "bg-amber-50 text-amber-800",
   "Rejected": "bg-red-100 text-red-800",
   "Wait For Frosh Block": "bg-purple-100 text-purple-800",
@@ -131,6 +216,11 @@ export default function STUDENT_Petition() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string>("");
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+
+  const { past: openPassedPage } = useCountdown(submissionWindow.openISO || "");
+  const { past: deadlinePassedPage } = useCountdown(submissionWindow.deadlineISO || "");
+  const editingLocked = !submissionWindow.openISO || !submissionWindow.deadlineISO || !openPassedPage || deadlinePassedPage;
 
   useEffect(() => {
     if (!userId) return;
@@ -143,10 +233,18 @@ export default function STUDENT_Petition() {
           getStudentProfile(userId),
         ]);
         setOptions(opt);
+        setSubmissionWindow({
+          openISO: opt?.submission_window?.openISO || "",
+          deadlineISO: opt?.submission_window?.deadlineISO || "",
+        });
         setPetitions((pet?.petitions || []) as PetitionView[]);
         if (prof && prof.ok) {
           setProfile(prof);
-          setForm((prev) => ({ ...prev, degree: prof.program_code || prev.degree }));
+          setForm((prev) => ({
+            ...prev,
+            degree: prof.program_code || prev.degree,
+            studentNumber: prof.student_number || prev.studentNumber,
+          }));
         } else {
           setProfile({ ok: false, first_name: "", last_name: "", student_number: "" });
         }
@@ -163,9 +261,16 @@ export default function STUDENT_Petition() {
     return options.courses.filter((c) => c.dept_name === form.department).map((c) => c.course_code);
   }, [options.courses, form.department]);
 
+  const studentNumberLocked = !!profile?.lock_student_number;
+  const degreeLocked = !!profile?.lock_degree;
+
   const handleSubmit = async () => {
     if (!userId) {
       setError("User not logged in.");
+      return;
+    }
+    if (editingLocked) {
+      setError("Petition submissions are currently locked.");
       return;
     }
     if (!form.department || !form.courseCode || !form.reason || !form.degree) {
@@ -182,7 +287,8 @@ export default function STUDENT_Petition() {
       const res = await submitStudentPetition(userId, form as PetitionSubmitPayload);
       if (res?.ok && res?.petition) {
         setPetitions((prev) => [res.petition as PetitionView, ...prev]);
-        setForm((prev) => ({ ...prev, department: "", courseCode: "", reason: "" }));
+        setProfile((prev) => prev ? ({ ...prev, student_number: form.studentNumber || prev.student_number, program_code: form.degree || prev.program_code, lock_student_number: true, lock_degree: true }) : prev);
+        setForm((prev) => ({ ...prev, department: "", courseCode: "", reason: "", studentNumber: prev.studentNumber, degree: prev.degree }));
       } else {
         throw new Error("Submission failed.");
       }
@@ -226,6 +332,8 @@ export default function STUDENT_Petition() {
               </ul>
             </div>
 
+            <DeadlineBanner openISO={submissionWindow.openISO} deadlineISO={submissionWindow.deadlineISO} />
+
             {error && (
               <div className="mb-4 bg-red-50 border border-red-200 text-red-700 px-3 py-2 rounded-lg">
                 {error}
@@ -264,8 +372,9 @@ export default function STUDENT_Petition() {
                       const onlyDigits = e.target.value.replace(/\D/g, "").slice(0, 8);
                       setForm((prev) => ({ ...prev, studentNumber: onlyDigits }));
                     }}
+                    disabled={editingLocked || submitting || studentNumberLocked}
                     placeholder="Enter 8-digit student number"
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm"
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm disabled:bg-gray-100"
                   />
                 </div>
 
@@ -276,6 +385,7 @@ export default function STUDENT_Petition() {
                     onChange={(v) => setForm((prev) => ({ ...prev, degree: v }))}
                     options={options.programs.map((p) => p.program_code)}
                     placeholder="-- Select Degree Program --"
+                    disabled={editingLocked || submitting || degreeLocked}
                   />
                 </div>
 
@@ -288,6 +398,7 @@ export default function STUDENT_Petition() {
                       onChange={(v) => setForm((prev) => ({ ...prev, department: v, courseCode: "" }))}
                       options={options.departments}
                       placeholder="-- Select Department --"
+                      disabled={editingLocked || submitting}
                     />
                   </div>
                   <div>
@@ -295,8 +406,8 @@ export default function STUDENT_Petition() {
                     <SelectBox
                       value={form.courseCode}
                       onChange={(v) => setForm((prev) => ({ ...prev, courseCode: v }))}
-                      options={coursesForDeptCodes} // ONLY codes
-                      disabled={!form.department}
+                      disabled={editingLocked || submitting || !form.department}
+                      options={coursesForDeptCodes}
                       placeholder="-- Select Course --"
                     />
                   </div>
@@ -310,12 +421,13 @@ export default function STUDENT_Petition() {
                     onChange={(v) => setForm((prev) => ({ ...prev, reason: v }))}
                     options={options.reasons}
                     placeholder="-- Select Reason --"
+                    disabled={editingLocked || submitting}
                   />
                 </div>
 
                 <button
                   onClick={handleSubmit}
-                  disabled={submitting}
+                  disabled={editingLocked || submitting}
                   className="mt-2 flex items-center justify-center gap-2 rounded-lg bg-[#21804A] px-6 py-2 text-white font-medium hover:bg-[#18693B] disabled:opacity-60"
                 >
                   <Send className="h-4 w-4" />

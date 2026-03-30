@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..main import db
+from ..status_rules import get_active_special_section_ids, get_dissolved_section_ids
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -21,11 +22,22 @@ COL_ROOMS = "rooms"
 COL_FAC_ASSIGN = "faculty_assignments"
 COL_FAC_PROFILES = "faculty_profiles"
 COL_USERS = "users"
+COL_SPECIAL = "special_class"
 
 
 # ---------------- helpers ----------------
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+
+async def _active_special_class_section_ids(term_id: str) -> set[str]:
+    return await get_active_special_section_ids(
+        db,
+        term_id,
+        special_col=COL_SPECIAL,
+        assign_col=COL_FAC_ASSIGN,
+        schedule_col=COL_SECTION_SCHEDULES,
+    )
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -210,6 +222,7 @@ async def student_course_offerings(
             return {"ok": True, "term": term, "course": {"course_code": code}, "sections": []}
 
         # sections for course + term
+        active_special_section_ids = await _active_special_class_section_ids(term_id)
         sec_docs = await db[COL_SECTIONS].find(
             {"term_id": term_id, "course_id": course["course_id"]},
             {
@@ -220,8 +233,23 @@ async def student_course_offerings(
                 "enrolled": 1,
                 "status": 1,
                 "remarks": 1,
+                "is_dissolved": 1,
+                "class_retention_status": 1,
             },
         ).sort([("section_code", 1)]).to_list(None)
+        dissolved_section_ids = await get_dissolved_section_ids(
+            db,
+            term_id,
+            section_ids=[str(s.get("section_id") or "").strip() for s in sec_docs],
+            sections_col=COL_SECTIONS,
+            sections_submitted_col="sections_submitted",
+            class_retention_col="class_retention",
+        )
+        if active_special_section_ids:
+            sec_docs = [s for s in sec_docs if str(s.get("section_id") or "").strip() not in active_special_section_ids]
+        if dissolved_section_ids:
+            sec_docs = [s for s in sec_docs if str(s.get("section_id") or "").strip() not in dissolved_section_ids]
+        sec_docs = [s for s in sec_docs if "SPECIAL CLASS" not in str(s.get("remarks") or "").upper()]
 
         section_ids = [s.get("section_id") for s in sec_docs if s.get("section_id")]
         if not section_ids:

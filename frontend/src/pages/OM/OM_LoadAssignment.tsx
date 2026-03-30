@@ -88,7 +88,7 @@ import {
   Download,
   Save,
   Trash2,
-  Inbox,
+  MessageSquareText,
 } from "lucide-react";
 import { InboxContent as OMInboxContent } from "./OM_Inbox";
 
@@ -1093,6 +1093,7 @@ type Row = {
   has_pending_override?: boolean;
   /** Timestamp of last draft update (best-effort). */
   pending_override_updated_at?: any;
+  remarks?: string;
 };
 
 type ChangeItem = { key: string; label: string };
@@ -1598,42 +1599,73 @@ function checkTimeMismatch(row: Row, ctx: ValidationContext): RowFlag | null {
   const prefs = ctx.facultyPrefWindows[fid] || [];
   if (!prefs.length) return null;
 
+  const normalizeDay = (d?: string) => {
+    const s = (d || "").trim().toUpperCase();
+    return s === "TH" ? "H" : s;
+  };
+
   const toMin = (t?: string): number | null => {
     if (!t) return null;
     const s = t.trim();
-    const hh = s.length === 3 ? s.slice(0, 1) : s.slice(0, 2);
-    const mm = s.slice(-2);
-    const h = Number(hh);
-    const m = Number(mm);
+
+    if (s.includes(":")) {
+      const [hh, mm] = s.split(":");
+      const h = Number(hh);
+      const m = Number(mm);
+      if (Number.isNaN(h) || Number.isNaN(m)) return null;
+      return h * 60 + m;
+    }
+
+    const digits = s.replace(/\D/g, "");
+    if (!digits) return null;
+
+    const padded = digits.length === 3 ? `0${digits}` : digits;
+    if (padded.length !== 4) return null;
+
+    const h = Number(padded.slice(0, 2));
+    const m = Number(padded.slice(2));
     if (Number.isNaN(h) || Number.isNaN(m)) return null;
+
     return h * 60 + m;
   };
 
-  type Meet = { day: string; b: number; e: number };
+  type Meet = { day: string; b: number; e: number; label: string };
   const meets: Meet[] = [];
 
   const add = (d?: string, b?: string, e?: string) => {
-    const day = (d || "").toUpperCase();
+    const day = normalizeDay(d);
     const bb = toMin(b);
     const ee = toMin(e);
     if (!day || bb == null || ee == null || ee <= bb) return;
-    meets.push({ day, b: bb, e: ee });
+    meets.push({ day, b: bb, e: ee, label: `${b}-${e}` });
   };
 
   add(row.day1, row.begin1, row.end1);
   add(row.day2, row.begin2, row.end2);
 
   for (const m of meets) {
-    const sameDayPrefs = prefs.filter((p) => p.day === m.day);
-    if (!sameDayPrefs.length) continue; // day mismatch covered separately
+    const sameDayPrefs = prefs.filter((p) => normalizeDay(p.day) === m.day);
 
-    const ok = sameDayPrefs.some((p) => p.begin <= m.b && p.end >= m.e);
+    // First: normal same-day check
+    if (sameDayPrefs.length) {
+      const okSameDay = sameDayPrefs.some((p) => p.begin <= m.b && p.end >= m.e);
+      if (!okSameDay) {
+        return {
+          type: "TIME_MISMATCH",
+          severity: "warning",
+          message: `Time ${m.day} ${m.label} is outside preferred windows.`,
+        };
+      }
+      continue;
+    }
 
-    if (!ok) {
+    // Second: if no same-day prefs exist, still check if this time fits ANY preferred window at all
+    const okAnyDayTime = prefs.some((p) => p.begin <= m.b && p.end >= m.e);
+    if (!okAnyDayTime) {
       return {
         type: "TIME_MISMATCH",
         severity: "warning",
-        message: `Time ${m.day} ${row.begin1}-${row.end1} is outside preferred windows.`,
+        message: `Time ${m.day} ${m.label} is outside all preferred time windows.`,
       };
     }
   }
@@ -2412,7 +2444,7 @@ const SendBlockedModal = ({
       <div className="w-full max-w-3xl rounded-2xl bg-white p-6 shadow-2xl">
         <div className="mb-2 flex items-start gap-3">
           <div className="mt-0.5 grid h-10 w-10 place-items-center rounded-full bg-amber-50 text-amber-700 border border-amber-200">
-            <Inbox className="h-5 w-5" />
+            <MessageSquareText className="h-5 w-5" />
           </div>
           <div className="min-w-0">
             <h3 className="text-lg font-semibold text-gray-900">
@@ -2744,30 +2776,47 @@ const NewSectionModal = ({
   onClose,
   onSave,
   courseOptions,
+  facultyOptions,
   onToast,
 }: {
   open: boolean;
   onClose: () => void;
   onSave: (data: {
     course: string;
-    section: string;
-    units: string;
-    campus_id: string;
+    faculty: string;
+    day1: string;
+    begin1: string;
+    end1: string;
+    day2?: string;
+    begin2?: string;
+    end2?: string;
+    remarks?: string;
   }) => void;
-  courseOptions: { code: string; title: string }[];
+  courseOptions: { code: string; title: string; units?: number; capacity?: number }[];
+  facultyOptions: string[];
   onToast?: (message: string, kind?: "success" | "error") => void;
 }) => {
   const [course, setCourse] = useState("");
-  const [section, setSection] = useState("");
-  const [units, setUnits] = useState("");
-  const [campusId, setCampusId] = useState("");
+  const [faculty, setFaculty] = useState("");
+  const [day1, setDay1] = useState("");
+  const [begin1, setBegin1] = useState("");
+  const [end1, setEnd1] = useState("");
+  const [day2, setDay2] = useState("");
+  const [begin2, setBegin2] = useState("");
+  const [end2, setEnd2] = useState("");
+  const [remarks, setRemarks] = useState("");
 
   useEffect(() => {
     if (!open) {
       setCourse("");
-      setSection("");
-      setUnits("");
-      setCampusId("");
+      setFaculty("");
+      setDay1("");
+      setBegin1("");
+      setEnd1("");
+      setDay2("");
+      setBegin2("");
+      setEnd2("");
+      setRemarks("");
     }
   }, [open]);
 
@@ -2777,22 +2826,42 @@ const NewSectionModal = ({
     courseOptions.find((c) => c.code === course)?.title || "";
 
   const handleSave = () => {
-    if (!course || !section) {
-      onToast?.("Please fill at least Course Code and Section Code.", "error");
+    const missing: string[] = [];
+    if (!course) missing.push("Course");
+    if (!faculty) missing.push("Faculty");
+    if (!day1) missing.push("Day 1");
+    if (!begin1) missing.push("Begin 1");
+    if (!end1) missing.push("End 1");
+
+    const hasAnyMeet2 = !!day2 || !!begin2 || !!end2;
+    const hasAllMeet2 = !!day2 && !!begin2 && !!end2;
+    if (hasAnyMeet2 && !hasAllMeet2) {
+      if (!day2) missing.push("Day 2");
+      if (!begin2) missing.push("Begin 2");
+      if (!end2) missing.push("End 2");
+    }
+
+    if (missing.length) {
+      onToast?.(`Please fill in: ${missing.join(", ")}.`, "error");
       return;
     }
 
     onSave({
       course,
-      section,
-      units,
-      campus_id: campusId,
+      faculty,
+      day1,
+      begin1,
+      end1,
+      day2: day2 || undefined,
+      begin2: begin2 || undefined,
+      end2: end2 || undefined,
+      remarks: remarks.trim() || undefined,
     });
   };
 
   return (
     <div className="fixed inset-0 z-[130] grid place-items-center bg-black/40 p-4">
-      <div className="w-full max-w-lg rounded-2xl bg-white p-6 shadow-2xl relative">
+      <div className="w-full max-w-xl rounded-2xl bg-white p-6 shadow-2xl relative">
         <button
           aria-label="Close"
           className="absolute right-3 top-3 rounded-md p-1.5 hover:bg-gray-100"
@@ -2806,10 +2875,9 @@ const NewSectionModal = ({
         </h3>
 
         <div className="space-y-4 text-sm">
-          {/* Course code */}
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700">
-              Course Code
+              Course
             </label>
             <SelectBox
               value={course}
@@ -2823,38 +2891,118 @@ const NewSectionModal = ({
             </div>
           </div>
 
-          {/* Section code */}
           <div>
             <label className="mb-1 block text-xs font-semibold text-gray-700">
-              Section Code
+              Faculty
             </label>
-            <TextBox
-              value={section}
-              onChange={setSection}
-              placeholder="e.g. S11"
+            <SelectBox
+              value={faculty}
+              onChange={setFaculty}
+              options={facultyOptions}
+              placeholder="— Select faculty —"
+              className="w-full"
             />
           </div>
 
-          {/* Units */}
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-3 gap-3">
             <div>
               <label className="mb-1 block text-xs font-semibold text-gray-700">
-                Units
+                Day 1
               </label>
-              <TextBox value={units} onChange={setUnits} placeholder="e.g. 3" />
-            </div>
-
-            {/* Campus ID (simple text for now) */}
-            <div>
-              <label className="mb-1 block text-xs font-semibold text-gray-700">
-                Campus ID
-              </label>
-              <TextBox
-                value={campusId}
-                onChange={setCampusId}
-                placeholder="e.g. CMPS0001"
+              <SelectBox
+                value={day1}
+                onChange={setDay1}
+                options={DAY_OPTIONS}
+                placeholder="— Day —"
+                className="w-full"
               />
             </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Begin 1
+              </label>
+              <SelectBox
+                value={begin1}
+                onChange={setBegin1}
+                options={TIME_BEGIN_OPTIONS.map((t) =>
+                  typeof t === "string" ? t : t.value
+                )}
+                placeholder="— Begin —"
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                End 1
+              </label>
+              <SelectBox
+                value={end1}
+                onChange={setEnd1}
+                options={TIME_END_OPTIONS.map((t) =>
+                  typeof t === "string" ? t : t.value
+                )}
+                placeholder="— End —"
+                className="w-full"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-3 gap-3">
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Day 2
+              </label>
+              <SelectBox
+                value={day2}
+                onChange={setDay2}
+                options={DAY_OPTIONS}
+                placeholder="— Optional —"
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                Begin 2
+              </label>
+              <SelectBox
+                value={begin2}
+                onChange={setBegin2}
+                options={TIME_BEGIN_OPTIONS.map((t) =>
+                  typeof t === "string" ? t : t.value
+                )}
+                placeholder="— Optional —"
+                className="w-full"
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-semibold text-gray-700">
+                End 2
+              </label>
+              <SelectBox
+                value={end2}
+                onChange={setEnd2}
+                options={TIME_END_OPTIONS.map((t) =>
+                  typeof t === "string" ? t : t.value
+                )}
+                placeholder="— Optional —"
+                className="w-full"
+              />
+            </div>
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-semibold text-gray-700">
+              Remarks
+            </label>
+            <TextBox
+              value={remarks}
+              onChange={setRemarks}
+              placeholder="Optional"
+            />
+          </div>
+
+          <div className="rounded-lg border border-emerald-100 bg-emerald-50 px-3 py-2 text-xs text-emerald-900">
+            Section Code will be generated automatically. Mode will default to Hybrid.
           </div>
         </div>
 
@@ -2870,13 +3018,15 @@ const NewSectionModal = ({
             className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:brightness-110"
           >
             <Save className="h-4 w-4" />
-            Save New Section
+            Add Section
           </button>
         </div>
       </div>
     </div>
   );
 };
+
+void NewSectionModal;
 
 type ToastKind = "success" | "error" | "warning" | "info";
 
@@ -2976,6 +3126,8 @@ export type OMLoadAssignmentProps = {
 type ChairPlantillaRow = {
   rank?: string;
   faculty_name: string;
+  faculty_type?: "FT" | "PT" | "";
+  faculty_group_key?: string;
   course_code: string;
   section_code: string;
   day_text: string;
@@ -2992,8 +3144,6 @@ type ChairPlantillaRow = {
   nature_research: number | null;
   nature_faculty_units: number | null;
   premium_grad: number | null;
-  premium_4th_prep: number | null;
-  premium_overload: number | null;
   remarks: string;
   source?: string | null; // e.g., "SPECIALCLASS"
   source_id?: string | null;
@@ -3006,61 +3156,36 @@ type ChairPlantillaHeaderResp = {
   plantilla_file?: string;
 };
 
-const chairNormalizeDayLines = (s: string) => {
-  const toks = (s || "")
-    .toUpperCase()
-    .split(/[^A-Z]/g)
-    .filter(Boolean);
-
-  const map: Record<string, string> = {
-    M: "M",
-    T: "T",
-    W: "W",
-    H: "H",
-    TH: "H",
-    F: "F",
-    S: "S",
-    SU: "Su",
-    SUN: "Su",
-    SAT: "S",
-  };
-
-  const lines = toks.map((t) => map[t] ?? t.charAt(0));
-  return lines.filter((v, idx) => v && (idx === 0 || v !== lines[idx - 1]));
-};
-
-const ChairMultiLineCell: React.FC<{ lines: string[]; raw?: string }> = ({ lines, raw }) => {
-  const safe = (lines || []).map((l) => String(l || "").trim()).filter(Boolean);
-  if (safe.length === 0) return <span data-raw={raw}>—</span>;
-
-  return (
-    <span data-raw={raw} className="inline-block leading-tight">
-      {safe.map((l, idx) => (
-        <div key={idx}>{l}</div>
-      ))}
-    </span>
-  );
-};
-
 const ChairDayCell: React.FC<{ raw: string }> = ({ raw }) => (
-  <ChairMultiLineCell raw={raw} lines={chairNormalizeDayLines(raw)} />
+  <span className="whitespace-pre-line">{String(raw || "").trim() || "—"}</span>
 );
 
-const ChairTimeCell: React.FC<{ raw: string }> = ({ raw }) => {
-  const parts = String(raw || "")
-    .split("/")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  return <ChairMultiLineCell raw={raw} lines={parts} />;
+const ChairTimeCell: React.FC<{ raw: string }> = ({ raw }) => (
+  <span className="whitespace-pre-line">{String(raw || "").trim() || "—"}</span>
+);
+
+const ChairRoomCell: React.FC<{ raw: string }> = ({ raw }) => (
+  <span className="whitespace-pre-line">{String(raw || "").trim() || "—"}</span>
+);
+const chairModeToCourseType = (mode: string) => {
+  const raw = String(mode || "").trim().toUpperCase();
+  if (["FOL", "ONLINE", "A"].includes(raw)) return "A";
+  if (["HYB", "B"].includes(raw)) return "B";
+  if (["F2F", "ONSITE", "C"].includes(raw)) return "C";
+  return raw;
 };
 
-const ChairRoomCell: React.FC<{ raw: string }> = ({ raw }) => {
-  const parts = String(raw || "")
-    .split("/")
-    .map((p) => p.trim())
-    .filter(Boolean);
-  return <ChairMultiLineCell raw={raw} lines={parts} />;
+const chairCompactDayText = (...days: string[]) => {
+  const safe = days.map((d) => String(d || "").trim()).filter(Boolean);
+  if (safe.length === 0) return "";
+  return Array.from(new Set(safe)).join("");
 };
+
+const chairCompactJoinedText = (...values: string[]) => {
+  const safe = values.map((v) => String(v || "").trim()).filter(Boolean);
+  return Array.from(new Set(safe)).join("\n");
+};
+
 
 export default function OM_LoadAssignment(props: OMLoadAssignmentProps = {}) {
   const [copiedRowId, setCopiedRowId] = useState<string | null>(null);
@@ -3077,11 +3202,24 @@ const [loadTableCanScrollRight, setLoadTableCanScrollRight] = useState(false);
 const updateLoadTableScrollHints = useCallback(() => {
   const el = loadTableScrollRef.current;
   if (!el) return;
-  const max = el.scrollWidth - el.clientWidth;
+  const max = Math.max(0, el.scrollWidth - el.clientWidth);
   const left = el.scrollLeft;
   setLoadTableCanScrollLeft(left > 1);
   setLoadTableCanScrollRight(left < max - 1);
 }, []);
+
+const scrollLoadTableBy = useCallback((direction: "left" | "right") => {
+  const el = loadTableScrollRef.current;
+  if (!el) return;
+
+  const distance = Math.max(240, Math.round(el.clientWidth * 0.8));
+  el.scrollBy({
+    left: direction === "left" ? -distance : distance,
+    behavior: "smooth",
+  });
+
+  requestAnimationFrame(updateLoadTableScrollHints);
+}, [updateLoadTableScrollHints]);
 
 const handleLoadTableMouseMove = useCallback(
   (e: React.MouseEvent<HTMLDivElement>) => {
@@ -3089,7 +3227,7 @@ const handleLoadTableMouseMove = useCallback(
     if (!el) return;
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
-    const edge = 36; // px hover zone on left/right edges
+    const edge = Math.min(48, Math.max(36, rect.width * 0.08));
     if (x < edge) setLoadTableHoverSide("left");
     else if (x > rect.width - edge) setLoadTableHoverSide("right");
     else setLoadTableHoverSide(null);
@@ -3221,6 +3359,7 @@ const chairPlantillaTableRef = useRef<HTMLTableElement | null>(null);
 
 const [chairPlantillaSearchInput, setChairPlantillaSearchInput] = useState("");
 const [chairPlantillaSearch, setChairPlantillaSearch] = useState("");
+const [chairPlantillaTab, setChairPlantillaTab] = useState<"FT" | "PT">("FT");
 
 useEffect(() => {
   const t = setTimeout(() => setChairPlantillaSearch(chairPlantillaSearchInput.trim()), 250);
@@ -3229,20 +3368,62 @@ useEffect(() => {
 
 const chairPlantillaFilteredRows = useMemo(() => {
   const q = (chairPlantillaSearch || "").toLowerCase();
-  // "without the special class" => exclude SPECIALCLASS rows.
-  const base = (chairPlantillaRows || []).filter((r) => r?.source !== "SPECIALCLASS");
-  if (!q) return base;
-  return base.filter((r) => {
+  const typeFiltered = (chairPlantillaRows || []).filter((r) => {
+    if (r?.source === "SPECIALCLASS") return false;
+    const facultyType = String(r?.faculty_type || "").trim().toUpperCase();
+    return chairPlantillaTab === "FT" ? facultyType === "FT" : facultyType !== "FT";
+  });
+  if (!q) return typeFiltered;
+  return typeFiltered.filter((r) => {
     const name = String(r.faculty_name || "").toLowerCase();
     const course = String(r.course_code || "").toLowerCase();
     const section = String(r.section_code || "").toLowerCase();
-    return name.includes(q) || course.includes(q) || section.includes(q);
+    const room = String(r.room_text || "").toLowerCase();
+    const remarks = String(r.remarks || "").toLowerCase();
+    return name.includes(q) || course.includes(q) || section.includes(q) || room.includes(q) || remarks.includes(q);
   });
-}, [chairPlantillaRows, chairPlantillaSearch]);
+}, [chairPlantillaRows, chairPlantillaSearch, chairPlantillaTab]);
 
 const chairPlantillaFilename =
   (chairPlantillaHeader?.plantilla_file && String(chairPlantillaHeader.plantilla_file).replace(/\.pdf$/i, ".xls")) ||
   "Faculty_Plantilla.xls";
+
+const chairGetFacultyGroupSpan = (rows: ChairPlantillaRow[], startIndex: number) => {
+  const currentKey = String(rows[startIndex]?.faculty_group_key || rows[startIndex]?.faculty_name || "").trim().toLowerCase();
+  if (!currentKey) return 1;
+  let span = 1;
+  for (let i = startIndex + 1; i < rows.length; i += 1) {
+    const nextKey = String(rows[i]?.faculty_group_key || rows[i]?.faculty_name || "").trim().toLowerCase();
+    if (nextKey !== currentKey) break;
+    span += 1;
+  }
+  return span;
+};
+
+const chairGetFacultyGroupKey = (row?: ChairPlantillaRow | null) =>
+  String(row?.faculty_group_key || row?.faculty_name || "").trim().toLowerCase();
+
+const chairGetFacultyUnitsTotal = (rows: ChairPlantillaRow[], startIndex: number) => {
+  const currentKey = chairGetFacultyGroupKey(rows[startIndex]);
+  if (!currentKey) return 0;
+  let total = 0;
+  for (let i = startIndex; i < rows.length; i += 1) {
+    if (chairGetFacultyGroupKey(rows[i]) !== currentKey) break;
+    const units = Number(rows[i]?.nature_faculty_units ?? 0);
+    if (Number.isFinite(units)) total += units;
+  }
+  return total;
+};
+
+const chairGetFacultyGroupStartIndex = (rows: ChairPlantillaRow[], index: number) => {
+  const currentKey = chairGetFacultyGroupKey(rows[index]);
+  if (!currentKey) return index;
+  let startIndex = index;
+  while (startIndex > 0 && chairGetFacultyGroupKey(rows[startIndex - 1]) === currentKey) {
+    startIndex -= 1;
+  }
+  return startIndex;
+};
 
 const closeChairPlantillaPreview = useCallback(() => {
   if (chairPlantillaLoading) return;
@@ -3300,6 +3481,7 @@ useEffect(() => {
       rowsParams.set("action", "fetch");
       const rr = await fetch(`/api/chair/plantilla?${rowsParams.toString()}`);
       const data = await rr.json();
+      setChairPlantillaTab("FT");
       if (data?.ok && Array.isArray(data.rows)) setChairPlantillaRows(data.rows as ChairPlantillaRow[]);
       else setChairPlantillaRows([]);
     } catch {
@@ -3312,217 +3494,355 @@ useEffect(() => {
 }, [chairPlantillaOpen, chairExportExcel, userId]);
 
 const chairHandleExportExcel = useCallback(() => {
-  if (!chairPlantillaFilteredRows || chairPlantillaFilteredRows.length === 0) {
+  const baseRows = (chairPlantillaRows || []).filter((r) => r?.source !== "SPECIALCLASS");
+  const q = chairPlantillaSearch.trim().toLowerCase();
+  const searchedRows = !q
+    ? baseRows
+    : baseRows.filter((r) =>
+        [r.faculty_name, r.course_code, r.section_code, r.room_text, r.remarks].some((v) =>
+          String(v || "").toLowerCase().includes(q)
+        )
+      );
+
+  const ftRows = searchedRows.filter((r) => String(r.faculty_type || "").trim().toUpperCase() === "FT");
+  const ptRows = searchedRows.filter((r) => String(r.faculty_type || "").trim().toUpperCase() !== "FT");
+
+  if (ftRows.length === 0 && ptRows.length === 0) {
     alert("No plantilla rows to export.");
     return;
   }
 
-  const headers = [
-    "Rank",
-    "Faculty",
-    "Course",
-    "Section",
-    "Day",
-    "Time",
-    "Room",
-    "No. of Students",
-    "Lecture Hours",
-    "Lab Hours",
-    "Student Unit(s)",
-    "On Leave",
-    "Type of Course",
-    "Teaching",
-    "Admin",
-    "Research",
-    "Faculty Unit(s)",
-    "Grad Load",
-    "Premium 4th Prep",
-    "Overload (NCA)",
-    "Remarks",
-  ];
-
-  const dataRows = (() => {
-    const table = chairPlantillaTableRef.current;
-    const bodyRows = table?.querySelectorAll("tbody tr") ?? [];
-
-    const visible: string[][] = [];
-    bodyRows.forEach((tr) => {
-      const tds = Array.from(tr.querySelectorAll("td"));
-      if (tds.length < headers.length) return;
-      visible.push(
-        tds.slice(0, headers.length).map((td, idx) => {
-          const el = td as HTMLElement;
-          const raw =
-            idx === 4 || idx === 5 || idx === 6
-              ? (el.innerText || el.textContent || "")
-              : (td.textContent || "");
-          return String(raw || "").trim();
-        })
-      );
-    });
-
-    if (visible.length > 0) return visible;
-
-    return chairPlantillaFilteredRows.map((r) => [
-      String(r.rank ?? ""),
-      String(r.faculty_name || ""),
-      String(r.course_code || ""),
-      String(r.section_code || ""),
-      chairNormalizeDayLines(String(r.day_text || "")).join("\n"),
-      String(r.time_text || "")
-        .split("/")
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .join("\n"),
-      String(r.room_text || "")
-        .split("/")
-        .map((p) => p.trim())
-        .filter(Boolean)
-        .join("\n"),
-      String(r.student_count ?? ""),
-      String(r.lec_hours ?? ""),
-      String(r.lab_hours ?? ""),
-      String(r.student_units ?? ""),
-      String(r.on_leave || ""),
-      String(r.course_type || ""),
-      String(r.nature_teaching ?? ""),
-      String(r.nature_admin ?? ""),
-      String(r.nature_research ?? ""),
-      String(r.nature_faculty_units ?? ""),
-      String(r.premium_grad ?? ""),
-      String(r.premium_4th_prep ?? ""),
-      String(r.premium_overload ?? ""),
-      String(r.remarks || ""),
-    ]);
-  })();
-
-  const normalizeForExcel = (value: string, preserveNewlines: boolean) => {
-    let v = value ?? "";
-    if (v === "—") v = "";
+  const sanitizeXmlText = (value: unknown, preserveBreaks = false) => {
+    let v = String(value ?? "");
     v = v
-      .replace(/[\u2012\u2013\u2014\u2015]/g, "-")
-      .replace(/[\u2018\u2019]/g, "'")
-      .replace(/[\u201C\u201D]/g, '"')
+      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u0084\u0086-\u009F]/g, "")
+      .replace(/[‘’]/g, "'")
+      .replace(/[“”]/g, '"')
       .replace(/\u00A0/g, " ");
 
-    if (preserveNewlines) {
-      v = v.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, " ");
-      v = v
+    if (preserveBreaks) {
+      return v
+        .replace(/\r\n/g, "\n")
+        .replace(/\r/g, "\n")
         .split("\n")
-        .map((line) => line.replace(/\s+/g, " ").trim())
-        .filter(Boolean)
-        .join("\n");
-      return v;
+        .map((line) => line.replace(/[\t ]+/g, " ").trim())
+        .join("\n")
+        .trim();
     }
 
-    v = v.replace(/[\r\n\t]/g, " ");
-    v = v.replace(/\s+/g, " ").trim();
-    return v;
+    return v.replace(/[\t ]+/g, " ").trim();
   };
 
-  const esc = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const xmlEsc = (value: unknown, preserveBreaks = false) => {
+  const escaped = sanitizeXmlText(value, preserveBreaks)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/\"/g, "&quot;")
+    .replace(/'/g, "&apos;");
 
-  const excelCss = `
-    table{border-collapse:collapse;}
-    th{border:2px solid #000;padding:4px;font-weight:700;text-align:center;vertical-align:top;}
-    td{padding:4px;vertical-align:top;border-left:1px solid #000;border-right:1px solid #000;}
-  `;
+  return preserveBreaks ? escaped.replace(/\n/g, "&#10;") : escaped;
+};
 
-  const facultyKeyByRow: string[] = [];
-  let lastFaculty = "";
-  dataRows.forEach((r) => {
-    const rawFaculty = String((r?.[1] ?? "") as string).trim();
-    if (rawFaculty) lastFaculty = rawFaculty;
-    facultyKeyByRow.push(lastFaculty);
-  });
-
-  const isGroupStart = (rowIdx: number) => rowIdx === 0 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx - 1];
-  const isGroupEnd = (rowIdx: number) =>
-    rowIdx === facultyKeyByRow.length - 1 || facultyKeyByRow[rowIdx] !== facultyKeyByRow[rowIdx + 1];
-
-  const groupRowSpan = (startIdx: number) => {
-    const key = facultyKeyByRow[startIdx];
-    let span = 1;
-    for (let i = startIdx + 1; i < facultyKeyByRow.length; i++) {
-      if (facultyKeyByRow[i] !== key) break;
-      span++;
-    }
-    return span;
+  const safeSheetName = (value: string) => {
+    const cleaned = String(value || "")
+      .replace(/[\\/:?*\[\]]/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    return (cleaned || "Sheet").slice(0, 31);
   };
 
-  const cellBorderStyle = (rowIdx: number, colIdx: number, colCount: number) => {
-    const start = isGroupStart(rowIdx);
-    const end = isGroupEnd(rowIdx);
-    const firstCol = colIdx === 0;
-    const lastCol = colIdx === colCount - 1;
-
-    const parts: string[] = [];
-    if (start) parts.push("border-top:2px solid #000");
-    if (end) parts.push("border-bottom:2px solid #000");
-    if (firstCol) parts.push("border-left:2px solid #000");
-    if (lastCol) parts.push("border-right:2px solid #000");
-
-    return parts.join(";");
+  const previewValue = (value: unknown, fallback = "—") => {
+    const txt = sanitizeXmlText(value, true);
+    return txt ? txt : fallback;
   };
 
-  let html =
-    '<html><head><meta charset="utf-8" />' + `<style>${excelCss}</style>` + '</head><body><table><thead><tr>';
-  headers.forEach((h) => {
-    html += `<th>${esc(String(h))}</th>`;
-  });
-  html += "</tr></thead><tbody>";
+  const previewRowCells = (r: ChairPlantillaRow) => [
+    previewValue(r.rank ?? "", ""),
+    previewValue(r.faculty_name || "", "—"),
+    previewValue(r.course_code || "", "—"),
+    previewValue(r.section_code || "", "—"),
+    previewValue(r.day_text || "", "—"),
+    previewValue(r.time_text || "", "—"),
+    previewValue(r.room_text || "", ""),
+    previewValue(r.student_count ?? "", "—"),
+    previewValue(r.lec_hours ?? "", "—"),
+    previewValue(r.lab_hours ?? "", "—"),
+    previewValue(r.student_units ?? "", "—"),
+    previewValue(r.on_leave || "", "N/A"),
+    previewValue(r.course_type || "", "N/A"),
+    previewValue(r.nature_teaching ?? "", "—"),
+    previewValue(r.nature_admin ?? "", "—"),
+    previewValue(r.nature_research ?? "", "—"),
+    previewValue(r.nature_faculty_units ?? "", "—"),
+    previewValue(r.premium_grad ?? "", "—"),
+    previewValue(r.remarks || "", ""),
+  ];
 
-  for (let rowIdx = 0; rowIdx < dataRows.length; rowIdx++) {
-    const row = dataRows[rowIdx];
-    const start = isGroupStart(rowIdx);
+  const makeCell = ({
+    value,
+    styleId = "cellCenter",
+    index,
+    mergeAcross,
+    mergeDown,
+    preserveBreaks = false,
+  }: {
+    value: unknown;
+    styleId?: string;
+    index?: number;
+    mergeAcross?: number;
+    mergeDown?: number;
+    preserveBreaks?: boolean;
+  }) => {
+    const indexAttr = typeof index === "number" ? ` ss:Index="${index}"` : "";
+    const mergeAcrossAttr = mergeAcross && mergeAcross > 0 ? ` ss:MergeAcross="${mergeAcross}"` : "";
+    const mergeDownAttr = mergeDown && mergeDown > 0 ? ` ss:MergeDown="${mergeDown}"` : "";
+    return `<Cell ss:StyleID="${styleId}"${indexAttr}${mergeAcrossAttr}${mergeDownAttr}><Data ss:Type="String">${xmlEsc(value, preserveBreaks)}</Data></Cell>`;
+  };
 
-    html += "<tr>";
+  const columnWidths = [66, 168, 96, 84, 84, 108, 96, 92, 92, 84, 98, 78, 96, 82, 82, 82, 96, 82, 336];
 
-    if (start) {
-      const span = groupRowSpan(rowIdx);
+  const buildWorksheet = (sheetName: string, sourceRows: ChairPlantillaRow[]) => {
+    const rows = sourceRows.map(previewRowCells);
+    const facultyGroupCount = sourceRows.reduce((count, row, index) => {
+      const isGroupStart = index === 0 || chairGetFacultyGroupKey(row) !== chairGetFacultyGroupKey(sourceRows[index - 1]);
+      return count + (isGroupStart ? 1 : 0);
+    }, 0);
 
-      // Rank
-      {
-        const idx = 0;
-        const raw = row?.[idx] == null ? "" : String(row[idx]);
-        const normalized = normalizeForExcel(raw, false);
-        const safe = esc(normalized);
-        const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000", "border-left:2px solid #000"];
-        html += `<td rowspan="${span}" style="${parts.join(";")};">${safe}</td>`;
+    let xml = `<Worksheet ss:Name="${xmlEsc(safeSheetName(sheetName))}">`;
+    xml += `<Table ss:ExpandedColumnCount="${columnWidths.length}" ss:ExpandedRowCount="${rows.length + facultyGroupCount + 2}" x:FullColumns="1" x:FullRows="1">`;
+
+    columnWidths.forEach((width) => {
+      xml += `<Column ss:AutoFitWidth="0" ss:Width="${width}"/>`;
+    });
+
+    xml += '<Row ss:Height="26">';
+    const topHeaders = [
+      ["Rank", 1, 1],
+      ["Faculty", 1, 1],
+      ["Course", 1, 1],
+      ["Section", 1, 1],
+      ["Day", 1, 1],
+      ["Time", 1, 1],
+      ["Room", 1, 1],
+      ["No. of Students", 1, 1],
+      ["Lecture Hours", 1, 1],
+      ["Lab Hours", 1, 1],
+      ["Student Unit(s)", 1, 1],
+      ["On Leave", 1, 1],
+      ["Type of Course", 1, 1],
+      ["NATURE OF LOAD", 0, 4],
+      ["Grad Load", 1, 1],
+      ["Remarks", 1, 1],
+    ] as const;
+
+    topHeaders.forEach(([label, mergeDown, span]) => {
+      xml += makeCell({
+        value: label,
+        styleId: "header",
+        mergeDown,
+        mergeAcross: Math.max(span - 1, 0),
+      });
+    });
+    xml += '</Row>';
+
+    xml += '<Row ss:Height="26">';
+    ["Teaching", "Admin", "Research", "Faculty Unit(s)"].forEach((label, index) => {
+      xml += makeCell({
+        value: label,
+        styleId: "header",
+        index: index === 0 ? 14 : undefined,
+      });
+    });
+    xml += '</Row>';
+
+    rows.forEach((row, rowIndex) => {
+      const currentKey = chairGetFacultyGroupKey(sourceRows[rowIndex]);
+      const prevKey = chairGetFacultyGroupKey(sourceRows[rowIndex - 1]);
+      const nextKey = chairGetFacultyGroupKey(sourceRows[rowIndex + 1]);
+      const isGroupStart = rowIndex === 0 || currentKey !== prevKey;
+      const isGroupEnd = rowIndex === sourceRows.length - 1 || currentKey !== nextKey;
+      const mergeDown = isGroupStart ? chairGetFacultyGroupSpan(sourceRows, rowIndex) - 1 : 0;
+      const groupStartIndex = chairGetFacultyGroupStartIndex(sourceRows, rowIndex);
+
+      xml += '<Row ss:AutoFitHeight="1">';
+      row.forEach((cell, cellIndex) => {
+        if (!isGroupStart && (cellIndex === 0 || cellIndex === 1)) {
+          return;
+        }
+
+        const preserveBreaks = [4, 5, 6, 18].includes(cellIndex);
+        const isLeft = cellIndex === 1 || cellIndex === 18;
+        const styleId =
+          cellIndex === 1
+            ? "facultyCell"
+            : preserveBreaks
+            ? isLeft
+              ? "cellLeftWrap"
+              : "cellCenterWrap"
+            : isLeft
+            ? "cellLeft"
+            : "cellCenter";
+
+        xml += makeCell({
+          value: cell,
+          styleId,
+          index: !isGroupStart && cellIndex === 2 ? 3 : undefined,
+          mergeDown: isGroupStart && (cellIndex === 0 || cellIndex === 1) ? mergeDown : undefined,
+          preserveBreaks,
+        });
+      });
+      xml += '</Row>';
+
+      if (isGroupEnd) {
+        const facultyLabel = previewValue(sourceRows[rowIndex]?.faculty_name || "", "—");
+        const totalFacultyUnits = chairGetFacultyUnitsTotal(sourceRows, groupStartIndex);
+
+xml += '<Row ss:AutoFitHeight="1" ss:Height="30">';
+xml += makeCell({ value: '', styleId: 'summaryCell' });
+xml += makeCell({
+  value: `${facultyLabel}\nTotal:`,
+  styleId: 'summaryLabel',
+  mergeAcross: 14,
+  preserveBreaks: true
+});
+xml += makeCell({ value: totalFacultyUnits, styleId: 'summaryValue' });
+xml += makeCell({ value: '', styleId: 'summaryCell' });
+xml += makeCell({ value: '', styleId: 'summaryCell' });
+xml += '</Row>';
       }
+    });
 
-      // Faculty
-      {
-        const idx = 1;
-        const raw = row?.[idx] == null ? "" : String(row[idx]);
-        const normalized = normalizeForExcel(raw, false);
-        const safe = esc(normalized);
-        const parts: string[] = ["border-top:2px solid #000", "border-bottom:2px solid #000"];
-        html += `<td rowspan="${span}" style="${parts.join(";")};">${safe}</td>`;
-      }
-    }
+    xml += '</Table>';
+    xml += '<WorksheetOptions xmlns="urn:schemas-microsoft-com:office:excel">';
+    xml += '<PageSetup><Layout x:Orientation="Landscape"/></PageSetup>';
+    xml += '<FreezePanes/><FrozenNoSplit/><SplitHorizontal>2</SplitHorizontal><TopRowBottomPane>2</TopRowBottomPane>';
+    xml += '<FitToPage/>';
+    xml += '<Print><ValidPrinterInfo/></Print>';
+    xml += '<ProtectObjects>False</ProtectObjects><ProtectScenarios>False</ProtectScenarios>';
+    xml += '</WorksheetOptions>';
+    xml += '</Worksheet>';
+    return xml;
+  };
 
-    for (let idx = 2; idx < headers.length; idx++) {
-      const cell = row?.[idx];
-      const raw = cell == null ? "" : String(cell);
-      const preserveNewlines = idx === 4 || idx === 5 || idx === 6;
-      const normalized = normalizeForExcel(raw, preserveNewlines);
-      const safe = preserveNewlines ? esc(normalized).replace(/\n/g, "<br/>") : esc(normalized);
+  const workbookXml =
+    '\ufeff<?xml version="1.0"?>' +
+    '<?mso-application progid="Excel.Sheet"?>' +
+    '<Workbook xmlns="urn:schemas-microsoft-com:office:spreadsheet"' +
+    ' xmlns:o="urn:schemas-microsoft-com:office:office"' +
+    ' xmlns:x="urn:schemas-microsoft-com:office:excel"' +
+    ' xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"' +
+    ' xmlns:html="http://www.w3.org/TR/REC-html40">' +
+    '<DocumentProperties xmlns="urn:schemas-microsoft-com:office:office">' +
+    `<Author>${xmlEsc(session?.fullName || "Animo Assign")}</Author>` +
+    `<Created>${new Date().toISOString()}</Created>` +
+    '</DocumentProperties>' +
+    '<ExcelWorkbook xmlns="urn:schemas-microsoft-com:office:excel">' +
+    '<ProtectStructure>False</ProtectStructure>' +
+    '<ProtectWindows>False</ProtectWindows>' +
+    '</ExcelWorkbook>' +
+    '<Styles>' +
+    '<Style ss:ID="Default" ss:Name="Normal">' +
+    '<Alignment ss:Vertical="Top"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11"/>' +
+    '<Borders/>' +
+    '</Style>' +
+    '<Style ss:ID="header">' +
+    '<Alignment ss:Horizontal="Center" ss:Vertical="Center" ss:WrapText="1"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#065F46"/>' +
+    '<Interior ss:Color="#F3F4F6" ss:Pattern="Solid"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="cellCenter">' +
+    '<Alignment ss:Horizontal="Center" ss:Vertical="Top"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="cellCenterWrap">' +
+    '<Alignment ss:Horizontal="Center" ss:Vertical="Top" ss:WrapText="1"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="cellLeft">' +
+    '<Alignment ss:Horizontal="Left" ss:Vertical="Top"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="cellLeftWrap">' +
+    '<Alignment ss:Horizontal="Left" ss:Vertical="Top" ss:WrapText="1"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#9CA3AF"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="facultyCell">' +
+    '<Alignment ss:Horizontal="Left" ss:Vertical="Top"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1" ss:Color="#047857"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="summaryCell">' +
+    '<Alignment ss:Horizontal="Center" ss:Vertical="Center"/>' +
+    '<Interior ss:Color="#F9FAFB" ss:Pattern="Solid"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="summaryLabel">' +
+    '<Alignment ss:Horizontal="Right" ss:Vertical="Center" ss:WrapText="1"/>' +
+    '<Interior ss:Color="#F9FAFB" ss:Pattern="Solid"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '<Style ss:ID="summaryValue">' +
+    '<Alignment ss:Horizontal="Center" ss:Vertical="Center"/>' +
+    '<Interior ss:Color="#F9FAFB" ss:Pattern="Solid"/>' +
+    '<Font ss:FontName="Calibri" ss:Size="11" ss:Bold="1"/>' +
+    '<Borders>' +
+    '<Border ss:Position="Bottom" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Left" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Right" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '<Border ss:Position="Top" ss:LineStyle="Continuous" ss:Weight="1" ss:Color="#6B7280"/>' +
+    '</Borders>' +
+    '</Style>' +
+    '</Styles>' +
+    buildWorksheet("Full Time Faculty", ftRows) +
+    buildWorksheet("Part Time Faculty", ptRows) +
+    '</Workbook>';
 
-      const borderStyle = cellBorderStyle(rowIdx, idx, headers.length);
-      const extraStyle = borderStyle ? `${borderStyle};` : "";
-
-      html += preserveNewlines
-        ? `<td style="white-space:pre-wrap;${extraStyle}">${safe}</td>`
-        : `<td style="${extraStyle}">${safe}</td>`;
-    }
-
-    html += "</tr>";
-  }
-
-  html += "</tbody></table></body></html>";
-
-  const blob = new Blob([html], { type: "application/vnd.ms-excel;charset=utf-8" });
+  const blob = new Blob([workbookXml], { type: "application/vnd.ms-excel;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
@@ -3530,8 +3850,8 @@ const chairHandleExportExcel = useCallback(() => {
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}, [chairPlantillaFilteredRows, chairPlantillaFilename]);
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}, [chairPlantillaRows, chairPlantillaSearch, chairPlantillaFilename, session?.fullName]);
 
 
 // Local tick for countdown display.
@@ -3704,8 +4024,6 @@ useEffect(() => {
   };
 
   const [isAssigning, setIsAssigning] = useState(false);
-
-  const [showNewSectionModal, setShowNewSectionModal] = useState(false);
 
   const [preferredByFaculty, setPreferredByFaculty] = useState<
     Record<string, number>
@@ -4223,10 +4541,6 @@ const inferOmCampusId = useCallback((): string => {
   return best;
 }, [session, rows]);
 
-
-
-  const [newLineSectionDraft, setNewLineSectionDraft] =
-  useState<Record<string, string>>({});
 
   // Submitted Course Offerings options for the Course dropdown (CODE, Title, Units, Capacity).
   const [submittedCourses, setSubmittedCourses] = useState<
@@ -5126,13 +5440,13 @@ const inferOmCampusId = useCallback((): string => {
     // They must NOT appear in the OM Load Assignment table.
     // Backend also filters these out, but we keep a frontend safeguard so legacy data
     // (or future schema changes) won't accidentally surface them here.
-    const isSpecialClassRow = (r: any) => {
+    const isExcludedRow = (r: any) => {
       const remarks = String(r?.remarks ?? "").trim();
-      return /^SPECIAL\s*CLASS$/i.test(remarks);
+      return /^(SPECIAL\s*CLASS|DISSOLVED)$/i.test(remarks);
     };
 
     const filteredServerRows: Row[] = serverRows.filter(
-      (r: any) => !isSpecialClassRow(r)
+      (r: any) => !isExcludedRow(r)
     );
 
     const normalizedRows: Row[] = filteredServerRows.map((r: any) => ({
@@ -5433,40 +5747,37 @@ const handleApplyPendingDrafts = useCallback(
   }, [initialLoaded]);
 
   const addRow = () => {
-  // Inline add: insert an editable row directly into the table.
-  // This row is treated as an OM-created pending request for APO room assignment.
-  const newId = `manual-${Date.now()}`;
-  commitRows([
-    ...rows,
-    {
-      id: newId,
-      // Client-only draft marker. This prevents other unsaved new-line rows from
-      // disappearing when we refresh after saving a single row.
-      __local_only: true as any,
-      is_new_line: true as any,
-      course: "",
-      title: "",
-      units: "", // auto-filled after course selection
-      section: "",
-      faculty: "",
-      faculty_id: undefined,
-      day1: "",
-      begin1: "",
-      end1: "",
-      room1: "TBA",
-      day2: "",
-      begin2: "",
-      end2: "",
-      room2: "TBA",
-      capacity: "", // auto-filled after course selection
-      mode: "",
-      status: "",
-      editable: true,
-    } as any,
-  ]);
-  setMode("manual");
-  setApproved(false);
-};
+    const newId = `manual-${Date.now()}`;
+    commitRows([
+      ...rows,
+      {
+        id: newId,
+        __local_only: true as any,
+        is_new_line: true as any,
+        course: "",
+        title: "",
+        units: "",
+        section: "",
+        faculty: "",
+        faculty_id: undefined,
+        day1: "",
+        begin1: "",
+        end1: "",
+        room1: "TBA",
+        day2: "",
+        begin2: "",
+        end2: "",
+        room2: "TBA",
+        capacity: "",
+        mode: "HYB",
+        remarks: "",
+        status: "",
+        editable: true,
+      } as any,
+    ]);
+    setMode("manual");
+    setApproved(false);
+  };
 
   const handleDeleteNewLineRow = (rowId: string) => {
     // New-line rows are client-only until saved, so delete is purely local.
@@ -5555,12 +5866,12 @@ const handleApplyPendingDrafts = useCallback(
 // Newly added "Add new line" rows have special edit rules:
 // - Editable: all fields EXCEPT Room 1/2, Units, Capacity (auto-filled / APO-assigned).
 if (!!(r as any).is_new_line) {
-  const editSchedule = true; // allow editing day/time/mode/faculty for the pending request
+  const editSchedule = true;
   return {
     course: true,
     title: false,
     units: false,
-    section: true,
+    section: false,
     faculty: editSchedule,
     day1: editSchedule,
     begin1: editSchedule,
@@ -5571,7 +5882,7 @@ if (!!(r as any).is_new_line) {
     end2: editSchedule,
     room2: false,
     capacity: false,
-    mode: editSchedule,
+    mode: false,
   } as const;
 }
     const editAll = !!r.editable;
@@ -5649,42 +5960,10 @@ async function handleSaveNewLineRow(r: Row) {
   const norm = (v: any) => String(v ?? "").trim();
   const courseCode = norm(r.course);
 
-  // Duplicate/Existing section warning (prevent saving).
-  const sec = norm(r.section);
-  if (!sec) {
-    showToast("Section is required.", "error");
-    return;
-  }
-
-  // Must have course selected before validating duplicates/APO rules.
   if (!courseCode) {
     showToast("Please select a Course Code first.", "error");
     return;
   }
-
-  // 1) Prevent duplicate sections PER COURSE (case-insensitive)
-  const existsLocal = rows.some((x) => {
-    if (x.id === r.id) return false;
-    const xCourse = norm((x as any).course);
-    const xSec = norm((x as any).section);
-    return (
-      xCourse.toLowerCase() === courseCode.toLowerCase() &&
-      xSec.toLowerCase() === sec.toLowerCase()
-    );
-  });
-  if (existsLocal) {
-    showToast("Duplicate section: this section already exists for that course.", "error");
-    return;
-  }
-
-  // 2) Enforce APO rules based on section prefix + OM campus context
-  const inferSectionApo = (s: string): "APO Manila" | "APO Laguna" | "" => {
-    const up = norm(s).toUpperCase();
-    if (!up) return "";
-    if (up.startsWith("XX") || up.startsWith("XC")) return "APO Laguna";
-    if (up.startsWith("S") || up.startsWith("G")) return "APO Manila";
-    return "";
-  };
 
   const campusId = inferOmCampusId();
 
@@ -5692,40 +5971,12 @@ async function handleSaveNewLineRow(r: Row) {
     showToast('Cannot add section: the APO-set deadline has passed for this campus.', 'error');
     return;
   }
-  const inferOmApo = (cid: string): "APO Manila" | "APO Laguna" | "" => {
-    const up = norm(cid).toUpperCase();
-    if (!up) return "";
-    // Project convention: CMPS0001 = Manila, CMPS0002 = Laguna
-    if (up === "CMPS0001") return "APO Manila";
-    if (up === "CMPS0002") return "APO Laguna";
-    return "";
-  };
-
-  const sectionApo = inferSectionApo(sec);
-  if (!sectionApo) {
-    showToast(
-      "Invalid section: use S/G (APO Manila) or XX/XC (APO Laguna).",
-      "error"
-    );
-    return;
-  }
-
-  const omApo = inferOmApo(campusId);
-  if (omApo && sectionApo !== omApo) {
-    showToast(
-      `Invalid section: This section belongs to ${sectionApo}, but you’re assigning for ${omApo}.`,
-      "error"
-    );
-    return;
-  }
 
   // Required fields for saving a pending request
-  // NOTE: Remarks are optional; everything else in the new-line row must be present.
+  // NOTE: Remarks are optional; section code is auto-generated and mode defaults to HYB.
   const missing: string[] = [];
   if (!courseCode) missing.push("Course");
-  if (!sec) missing.push("Section");
   if (!norm((r as any).faculty_id)) missing.push("Faculty");
-  if (!norm((r as any).mode)) missing.push("Mode");
   if (!norm((r as any).day1)) missing.push("Day 1");
   if (!norm((r as any).begin1)) missing.push("Begin 1");
   if (!norm((r as any).end1)) missing.push("End 1");
@@ -5759,9 +6010,7 @@ async function handleSaveNewLineRow(r: Row) {
   setSavingNewLineId(r.id);
   try {
     await saveOmNewLine(userId, {
-      // course is stored as course_code in the row
       course_code: courseCode,
-      section_code: sec,
       faculty_id: norm((r as any).faculty_id),
       campus_id: campusId || undefined,
       day1: norm((r as any).day1),
@@ -5770,8 +6019,7 @@ async function handleSaveNewLineRow(r: Row) {
       day2: norm((r as any).day2),
       begin2: norm((r as any).begin2),
       end2: norm((r as any).end2),
-      mode: norm((r as any).mode),
-      // units & capacity are auto-filled after course selection
+      mode: "HYB",
       units: Number((r as any).units || 0),
       capacity: Number((r as any).capacity || 0),
       remarks: String((r as any).remarks || "").trim(),
@@ -5936,37 +6184,39 @@ const chairRecommendationPlantillaRows = useMemo<ChairPlantillaRow[]>(() => {
   return sorted.map((r) => {
     const facultyName = displayFacultyName(r);
     const fid = String(r.faculty_id || "").trim();
-    const courseId = String(r.course_id || validationContext.sectionCourse?.[r.id] || "").trim();
-    const courseType = String(validationContext.courseTypeOfCourse?.[courseId] || "").trim();
     const units = toNumberOrNull(r.units);
     const level = getRowProgramLevel(r);
     const remarks = String(remarksDraftBySection[r.id] ?? remarksSavedBySection[r.id] ?? (r as any)?.remarks ?? "").trim();
-    const days = [toDayLabel(r.day1), toDayLabel(r.day2)].filter(Boolean).join("/");
-    const times = [formatTimeRange(r.begin1, r.end1), formatTimeRange(r.begin2, r.end2)].filter(Boolean).join("/");
-    const rooms = [String(r.room1 || "").trim(), String(r.room2 || "").trim()].filter(Boolean).join("/");
+    const dayText = chairCompactDayText(toDayLabel(r.day1), toDayLabel(r.day2));
+    const time1 = formatTimeRange(r.begin1, r.end1);
+    const time2 = formatTimeRange(r.begin2, r.end2);
+    const room1 = String(r.room1 || "").trim();
+    const room2 = String(r.room2 || "").trim();
     const onLeave = fid && onLeaveSet.has(fid) ? "Yes" : "No";
+    const employmentTypeRaw = String(facultyById[fid]?.employment_type || "").trim().toUpperCase();
+    const facultyType: "FT" | "PT" | "" = employmentTypeRaw === "FT" ? "FT" : employmentTypeRaw === "PT" ? "PT" : "";
 
     return {
       rank: "",
       faculty_name: facultyName,
+      faculty_type: facultyType,
+      faculty_group_key: `${facultyType || "UNK"}::${facultyName.toLowerCase()}`,
       course_code: String(r.course || "").trim(),
       section_code: String(r.section || "").trim(),
-      day_text: days,
-      time_text: times,
-      room_text: rooms,
+      day_text: dayText,
+      time_text: time1 && time2 && time1 === time2 ? time1 : chairCompactJoinedText(time1, time2),
+      room_text: chairCompactJoinedText(room1, room2),
       student_count: toNumberOrNull(r.capacity),
       lec_hours: units,
       lab_hours: null,
       student_units: units,
       on_leave: onLeave,
-      course_type: courseType,
+      course_type: chairModeToCourseType(String(r.mode || "")),
       nature_teaching: units,
       nature_admin: 0,
       nature_research: 0,
       nature_faculty_units: units,
       premium_grad: level === "GS" ? units : null,
-      premium_4th_prep: null,
-      premium_overload: null,
       remarks,
       source: "LOAD_RECOMMENDATION",
       source_id: String(r.id || "").trim() || null,
@@ -5999,6 +6249,7 @@ const openChairPlantillaPreview = useCallback(() => {
         ""
     ).trim();
 
+    setChairPlantillaTab("FT");
     setChairPlantillaHeader({
       ok: true,
       term_label: term || undefined,
@@ -6584,15 +6835,20 @@ const openChairPlantillaPreview = useCallback(() => {
       row: Row;
     };
 
+    const normalizeDay = (d?: string) => {
+      const s = (d || "").trim().toUpperCase();
+      return s === "TH" ? "H" : s;
+    };
+    
     const byKey: Record<string, Interval[]> = {};
-
+    
     rows.forEach((r) => {
       const facultyKey = r.faculty_id || r.faculty;
       if (!facultyKey) return;
       const facultyName = r.faculty || facultyKey;
       const facultyId = r.faculty_id;
-
-      const d1 = (r.day1 || "").trim();
+    
+      const d1 = normalizeDay(r.day1);
       const b1 = toMinutes(r.begin1);
       const e1 = toMinutes(r.end1);
       if (d1 && b1 != null && e1 != null && e1 > b1) {
@@ -6607,8 +6863,8 @@ const openChairPlantillaPreview = useCallback(() => {
           row: r,
         });
       }
-
-      const d2 = (r.day2 || "").trim();
+    
+      const d2 = normalizeDay(r.day2);
       const b2 = toMinutes(r.begin2);
       const e2 = toMinutes(r.end2);
       if (d2 && b2 != null && e2 != null && e2 > b2) {
@@ -6628,7 +6884,7 @@ const openChairPlantillaPreview = useCallback(() => {
     const MAX_CONSEC = 4 * 60 + 30; // 4.5 hours
     const GAP_TOL = 15; // minutes
 
-    // 2) For each faculty+day, detect 4.5h+ consecutive teaching streaks
+    // 2) For each faculty+day, detect 4.5h-or-more consecutive teaching streaks
     Object.entries(byKey).forEach(([key, arr]) => {
       if (arr.length === 0) return;
       arr.sort((a, b) => a.start - b.start);
@@ -6656,7 +6912,7 @@ const openChairPlantillaPreview = useCallback(() => {
           streakIntervals = [iv];
         }
 
-        if (streakTeach > MAX_CONSEC) {
+        if (streakTeach >= MAX_CONSEC) {
           const sample = streakIntervals[0];
           const facultyName = sample.facultyName;
           const facultyId = sample.facultyId;
@@ -7792,18 +8048,9 @@ const courseCodeToInfo = useMemo(() => {
 
                               <td className="px-2 py-2 text-center">
                               {(r as any).is_new_line ? (
-                                <TextBox
-                                  value={newLineSectionDraft[r.id] ?? (r.section ?? "")}
-                                  onChange={(v) =>
-                                    setNewLineSectionDraft((p) => ({ ...p, [r.id]: v }))
-                                  }
-                                  onBlur={() => {
-                                    const v = (newLineSectionDraft[r.id] ?? r.section ?? "");
-                                    setCell(r.id, "section", v as any);
-                                  }}
-                                  className="w-[260px]"
-                                  align="center"
-                                />
+                                <span className="inline-block min-w-[260px] text-center text-gray-500">
+                                  {r.section || "Auto"}
+                                </span>
                               ) : (
                                 <Cell
                                   editable={e.section}
@@ -7883,10 +8130,7 @@ const courseCodeToInfo = useMemo(() => {
                                   />
                                 ) : (
                                   <span>
-                                    {displayTimeFromOptions(
-                                      r.begin1,
-                                      TIME_BEGIN_OPTIONS
-                                    ) || "—"}
+                                    {displayBeginTimeOnly(r.begin1) || "—"}
                                   </span>
                                 )}
                               </td>
@@ -7961,10 +8205,7 @@ const courseCodeToInfo = useMemo(() => {
                                   />
                                 ) : (
                                   <span>
-                                    {displayTimeFromOptions(
-                                      r.begin2,
-                                      TIME_BEGIN_OPTIONS
-                                    ) || "—"}
+                                    {displayBeginTimeOnly(r.begin2) || "—"}
                                   </span>
                                 )}
                               </td>
@@ -8096,7 +8337,7 @@ const courseCodeToInfo = useMemo(() => {
                                               isArchiveView &&
                                                 "opacity-40 cursor-not-allowed hover:brightness-100"
                                             )}
-                                            title="RFC"
+                                            title="Request for Change"
                                             onClick={() => {
                                               if (isArchiveView) return;
                                               setReqChange({
@@ -8109,7 +8350,7 @@ const courseCodeToInfo = useMemo(() => {
                                               });
                                             }}
                                           >
-                                            <Inbox className="h-5 w-5" />
+                                            <MessageSquareText className="h-5 w-5" />
                                             {unread && (
                                               <span className="absolute -top-1 -right-1 h-2.5 w-2.5 rounded-full bg-red-600" />
                                             )}
@@ -8172,27 +8413,47 @@ const courseCodeToInfo = useMemo(() => {
     </table>
     </div>
 
-    {loadTableHoverSide === "left" && loadTableCanScrollLeft && (
-      <>
+    <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-2">
+      {(loadTableHoverSide === "left" || loadTableCanScrollLeft) && (
         <div className="pointer-events-none absolute inset-y-0 left-0 w-16 bg-gradient-to-r from-white/80 to-transparent" />
-        <div className="pointer-events-none absolute inset-y-0 left-2 flex items-center">
-          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
-            <ChevronLeft className="h-5 w-5 text-white" />
-          </div>
-        </div>
-      </>
-    )}
+      )}
+      <button
+        type="button"
+        aria-label="Scroll table left"
+        title="Scroll left"
+        disabled={!loadTableCanScrollLeft}
+        onClick={() => scrollLoadTableBy("left")}
+        className={cls(
+          "pointer-events-auto relative z-[1] inline-flex h-9 w-9 items-center justify-center rounded-full border shadow-sm backdrop-blur-sm transition",
+          loadTableCanScrollLeft
+            ? "border-gray-200 bg-emerald-700/80 text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+            : "cursor-not-allowed border-gray-200 bg-white/70 text-gray-300 opacity-70"
+        )}
+      >
+        <ChevronLeft className="h-5 w-5" />
+      </button>
+    </div>
 
-    {loadTableHoverSide === "right" && loadTableCanScrollRight && (
-      <>
+    <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-2">
+      {(loadTableHoverSide === "right" || loadTableCanScrollRight) && (
         <div className="pointer-events-none absolute inset-y-0 right-0 w-16 bg-gradient-to-l from-white/80 to-transparent" />
-        <div className="pointer-events-none absolute inset-y-0 right-2 flex items-center">
-          <div className="rounded-full border border-gray-200 bg-emerald-700/80 p-1 shadow-sm backdrop-blur-sm">
-            <ChevronRight className="h-5 w-5 text-white" />
-          </div>
-        </div>
-      </>
-    )}
+      )}
+      <button
+        type="button"
+        aria-label="Scroll table right"
+        title="Scroll right"
+        disabled={!loadTableCanScrollRight}
+        onClick={() => scrollLoadTableBy("right")}
+        className={cls(
+          "pointer-events-auto relative z-[1] inline-flex h-9 w-9 items-center justify-center rounded-full border shadow-sm backdrop-blur-sm transition",
+          loadTableCanScrollRight
+            ? "border-gray-200 bg-emerald-700/80 text-white hover:bg-emerald-700 focus:outline-none focus:ring-2 focus:ring-emerald-500/40"
+            : "cursor-not-allowed border-gray-200 bg-white/70 text-gray-300 opacity-70"
+        )}
+      >
+        <ChevronRight className="h-5 w-5" />
+      </button>
+    </div>
   </div>
 )}
 
@@ -8802,48 +9063,6 @@ const courseCodeToInfo = useMemo(() => {
         onToast={showToast}
       />
 
-      <NewSectionModal
-        open={showNewSectionModal}
-        onClose={() => setShowNewSectionModal(false)}
-        courseOptions={courseOptions}
-        onToast={showToast}
-        onSave={({ course, section, units, campus_id }) => {
-          // create a new manual row that behaves like other rows,
-          // but with the extra campus_id attached
-          const title =
-            courseOptions.find((c) => c.code === course)?.title || "";
-
-          commitRows([
-            ...rows,
-            {
-              id: `manual-${Date.now()}`,
-              course,
-              title,
-              units: units ? Number(units) || "" : "",
-              section,
-              faculty: "",
-              faculty_id: undefined,
-              day1: "",
-              begin1: "",
-              end1: "",
-              room1: "",
-              day2: "",
-              begin2: "",
-              end2: "",
-              room2: "",
-              capacity: "",
-              mode: "",
-              status: "",
-              editable: true,
-              campus_id,
-            },
-          ]);
-
-          setMode("manual");
-          setApproved(false);
-          setShowNewSectionModal(false);
-        }}
-      />
 
       {/* Import SHS modal (match APO import UX) */}
       {showShsImportModal && (
@@ -9015,37 +9234,64 @@ const courseCodeToInfo = useMemo(() => {
         </button>
       </div>
 
+      <div className="px-5 pt-4">
+        <div className="inline-flex rounded-lg border border-gray-300 bg-gray-100 p-1">
+          <button
+            type="button"
+            onClick={() => setChairPlantillaTab("FT")}
+            className={cls(
+              "rounded-md px-4 py-2 text-sm font-medium transition",
+              chairPlantillaTab === "FT"
+                ? "bg-white text-emerald-700 shadow-sm"
+                : "text-gray-600 hover:text-gray-900"
+            )}
+          >
+            Full Time Faculty
+          </button>
+          <button
+            type="button"
+            onClick={() => setChairPlantillaTab("PT")}
+            className={cls(
+              "rounded-md px-4 py-2 text-sm font-medium transition",
+              chairPlantillaTab === "PT"
+                ? "bg-white text-emerald-700 shadow-sm"
+                : "text-gray-600 hover:text-gray-900"
+            )}
+          >
+            Part Time Faculty
+          </button>
+        </div>
+      </div>
+
       <div className="flex-1 min-h-0 overflow-hidden px-5 py-4">
-        <div className="h-full w-full overflow-auto rounded-xl border border-gray-300 bg-white shadow-sm">
+        <div className="h-full w-full overflow-auto rounded-xl border-2 border-gray-500 bg-white shadow-sm">
           <table
             ref={chairPlantillaTableRef}
             className="min-w-full w-full text-sm table-fixed border-collapse leading-snug [&_td]:align-top [&_td]:whitespace-normal [&_td]:break-words"
           >
             <colgroup>
-              <col className="w-[5rem]" />
+              <col className="w-[5.5rem]" />
               <col className="w-[14rem]" />
-              <col className="w-[7.5rem]" />
-              <col className="w-[6rem]" />
-              <col className="w-[6.5rem]" />
               <col className="w-[8rem]" />
               <col className="w-[7rem]" />
-              <col className="w-[8rem]" />
               <col className="w-[7rem]" />
-              <col className="w-[6.5rem]" />
+              <col className="w-[9rem]" />
               <col className="w-[8rem]" />
-              <col className="w-[6.5rem]" />
               <col className="w-[8rem]" />
-              <col className="w-[6.5rem]" />
-              <col className="w-[6.5rem]" />
+              <col className="w-[8rem]" />
               <col className="w-[7rem]" />
               <col className="w-[8rem]" />
               <col className="w-[7rem]" />
               <col className="w-[9rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[7rem]" />
+              <col className="w-[7rem]" />
               <col className="w-[9rem]" />
+              <col className="w-[8rem]" />
               <col className="w-[28rem]" />
             </colgroup>
 
-            <thead className="bg-gray-50 text-emerald-800 sticky top-0 z-[1] text-xs">
+            <thead className="bg-gray-100 text-emerald-900 sticky top-0 z-[1] text-xs">
               <tr className="whitespace-nowrap text-[13px] font-semibold">
                 <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Rank</th>
                 <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Faculty</th>
@@ -9061,7 +9307,7 @@ const courseCodeToInfo = useMemo(() => {
                 <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">On Leave</th>
                 <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Type of Course</th>
                 <th colSpan={4} className="px-3 py-2 text-center border border-gray-300">NATURE OF LOAD</th>
-                <th colSpan={3} className="px-3 py-2 text-center border border-gray-300">PREMIUMS</th>
+                <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Grad Load</th>
                 <th rowSpan={2} className="px-3 py-2 text-center border border-gray-300">Remarks</th>
               </tr>
               <tr className="whitespace-nowrap text-[13px] font-semibold">
@@ -9069,58 +9315,74 @@ const courseCodeToInfo = useMemo(() => {
                 <th className="px-3 py-2 text-center border border-gray-300">Admin</th>
                 <th className="px-3 py-2 text-center border border-gray-300">Research</th>
                 <th className="px-3 py-2 text-center border border-gray-300">Faculty Unit(s)</th>
-                <th className="px-3 py-2 text-center border border-gray-300">Grad Load</th>
-                <th className="px-3 py-2 text-center border border-gray-300">Premium 4th Prep</th>
-                <th className="px-3 py-2 text-center border border-gray-300">Overload (NCA)</th>
               </tr>
             </thead>
 
             <tbody>
               {chairPlantillaLoading ? (
                 <tr>
-                  <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">Loading plantilla…</td>
+                  <td colSpan={19} className="px-4 py-10 text-center text-sm text-gray-500">Loading plantilla…</td>
                 </tr>
               ) : chairPlantillaFilteredRows.length === 0 ? (
                 <tr>
-                  <td colSpan={21} className="px-4 py-10 text-center text-sm text-gray-500">
+                  <td colSpan={19} className="px-4 py-10 text-center text-sm text-gray-500">
                     {chairPlantillaRows.length === 0 ? "No plantilla to display." : "No matching results."}
                   </td>
                 </tr>
               ) : (
-                chairPlantillaFilteredRows.map((r, i) => (
-                  <tr key={i} className="hover:bg-gray-50 [&>td]:border [&>td]:border-gray-200">
-                    <td className="px-3 py-2 text-center">{r.rank ?? ""}</td>
-                    <td className="px-3 py-2 text-left font-semibold text-emerald-700">
-                      {(() => {
-                        const prev = chairPlantillaFilteredRows[i - 1];
-                        const prevName = String(prev?.faculty_name || "").trim().toLowerCase();
-                        const curName = String(r.faculty_name || "").trim().toLowerCase();
-                        const show = i === 0 || prevName !== curName;
-                        if (!curName) return "—";
-                        return show ? r.faculty_name : "";
-                      })()}
-                    </td>
-                    <td className="px-3 py-2 text-center">{r.course_code || "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.section_code || "—"}</td>
-                    <td className="px-3 py-2 text-center whitespace-nowrap"><ChairDayCell raw={r.day_text || "—"} /></td>
-                    <td className="px-3 py-2 text-center whitespace-nowrap"><ChairTimeCell raw={r.time_text || "—"} /></td>
-                    <td className="px-3 py-2 text-center"><ChairRoomCell raw={r.room_text || ""} /></td>
-                    <td className="px-3 py-2 text-center">{r.student_count ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.lec_hours ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.lab_hours ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.student_units ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.on_leave || "N/A"}</td>
-                    <td className="px-3 py-2 text-center">{r.course_type || "N/A"}</td>
-                    <td className="px-3 py-2 text-center">{r.nature_teaching ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.nature_admin ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.nature_research ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.nature_faculty_units ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.premium_grad ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.premium_4th_prep ?? "—"}</td>
-                    <td className="px-3 py-2 text-center">{r.premium_overload ?? "—"}</td>
-                    <td className="px-3 py-2 text-left">{r.remarks || ""}</td>
-                  </tr>
-                ))
+                chairPlantillaFilteredRows.map((r, i) => {
+                  const currentKey = chairGetFacultyGroupKey(r);
+                  const prevKey = chairGetFacultyGroupKey(chairPlantillaFilteredRows[i - 1]);
+                  const nextKey = chairGetFacultyGroupKey(chairPlantillaFilteredRows[i + 1]);
+                  const showFaculty = i === 0 || currentKey !== prevKey;
+                  const isGroupEnd = i === chairPlantillaFilteredRows.length - 1 || currentKey !== nextKey;
+                  const facultySpan = showFaculty ? chairGetFacultyGroupSpan(chairPlantillaFilteredRows, i) : 0;
+                  const groupStartIndex = chairGetFacultyGroupStartIndex(chairPlantillaFilteredRows, i);
+                  const totalFacultyUnits = chairGetFacultyUnitsTotal(chairPlantillaFilteredRows, groupStartIndex);
+                  return (
+                    <React.Fragment key={`${currentKey}-${i}`}>
+                      <tr className="hover:bg-gray-50 [&>td]:border [&>td]:border-gray-400">
+                        {showFaculty && (
+                          <td rowSpan={facultySpan} className="px-3 py-2 text-center border border-gray-500 align-top">{r.rank ?? ""}</td>
+                        )}
+                        {showFaculty && (
+                          <td rowSpan={facultySpan} className="px-3 py-2 text-left font-semibold text-emerald-700 border border-gray-500 align-top">{r.faculty_name || "—"}</td>
+                        )}
+                        <td className="px-3 py-2 text-center">{r.course_code || "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.section_code || "—"}</td>
+                        <td className="px-3 py-2 text-center whitespace-nowrap"><ChairDayCell raw={r.day_text || "—"} /></td>
+                        <td className="px-3 py-2 text-center whitespace-nowrap"><ChairTimeCell raw={r.time_text || "—"} /></td>
+                        <td className="px-3 py-2 text-center"><ChairRoomCell raw={r.room_text || ""} /></td>
+                        <td className="px-3 py-2 text-center">{r.student_count ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.lec_hours ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.lab_hours ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.student_units ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.on_leave || "N/A"}</td>
+                        <td className="px-3 py-2 text-center">{r.course_type || "N/A"}</td>
+                        <td className="px-3 py-2 text-center">{r.nature_teaching ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.nature_admin ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.nature_research ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.nature_faculty_units ?? "—"}</td>
+                        <td className="px-3 py-2 text-center">{r.premium_grad ?? "—"}</td>
+                        <td className="px-3 py-2 text-left">{r.remarks || ""}</td>
+                      </tr>
+
+                      {isGroupEnd && (
+                        <tr className="bg-gray-50 font-semibold [&>td]:border [&>td]:border-gray-500">
+                          <td className="px-3 py-2"></td>
+                          <td colSpan={15} className="px-3 py-2 text-right border border-gray-500">
+  <div className="whitespace-pre-line leading-tight">
+    {`${r.faculty_name || "—"}\nTotal:`}
+  </div>
+</td>
+                          <td className="px-3 py-2 text-center">{totalFacultyUnits}</td>
+                          <td className="px-3 py-2"></td>
+                          <td className="px-3 py-2"></td>
+                        </tr>
+                      )}
+                    </React.Fragment>
+                  );
+                })
               )}
             </tbody>
           </table>

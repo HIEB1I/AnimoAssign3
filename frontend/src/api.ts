@@ -785,7 +785,7 @@ export type ApiConflict = {
 type GateError = { code?: "NEEDS_IMPORT" | "APPROVAL_REQUIRED"; message?: string };
 
 export type OfferingsQuery = {
-  view?: "offerings" | "curriculum" | "specialclass"; 
+  view?: "offerings" | "curriculum" | "specialclass" | "dissolved"; 
   campus?: "MANILA" | "LAGUNA";
   level?: string;
   department_id?: string;
@@ -1523,6 +1523,13 @@ function _coerceSpecialClassResponse(raw: SpecialClassBackendResponse): SpecialC
         term_id: r.term_id ?? raw.term_id,
         term_label: r.term_label ?? raw.term_label,
 
+        // Preserve canonical bindings for APO save/grouping.
+        section_id: r.section_id ?? null,
+        course_id: r.course_id ?? null,
+        assignment_id: r.assignment_id ?? null,
+        faculty_id: r.faculty_id ?? null,
+        section_code: r.section_code ?? null,
+
         student: {
           student_number: r.student_number != null ? String(r.student_number) : undefined,
           student_name: r.student_name,
@@ -1580,9 +1587,22 @@ export async function getApoSpecialClass(
 
 export type ApoSpecialClassUpdatePayload = {
   special_id: string;
+  special_ids?: string[];
   term_id?: string;
+  section_id?: string;
+  course_id?: string;
+  assignment_id?: string;
+  faculty_id?: string;
+  section_code?: string;
   remarks?: string;
-  schedule_entries?: Array<{ schedule_id?: string | null; room_id?: string | null }>;
+  schedule_entries?: Array<{
+    schedule_id?: string | null;
+    day?: string | null;
+    start_time?: string | null;
+    end_time?: string | null;
+    room_type?: string | null;
+    room_id?: string | null;
+  }>;
 };
 
 export async function updateApoSpecialClassRow(
@@ -1593,6 +1613,76 @@ export async function updateApoSpecialClassRow(
   return post(url, payload as any);
 }
 
+export type ApoSpecialClassDetail = {
+  special_id: string;
+  student_name?: string;
+  student_number?: string | number;
+  program_code?: string;
+  graduating_after_term?: boolean;
+  reason?: string;
+  reason_other?: string;
+  has_eaf?: boolean;
+  eaf_original_name?: string;
+  eaf_content_type?: string;
+  eaf_size?: number;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
+  [k: string]: any;
+};
+
+export async function getApoSpecialClassDetail(
+  userId: string,
+  specialId: string,
+  termId?: string
+): Promise<{ ok: boolean; row: ApoSpecialClassDetail }> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    view: "specialclass",
+    action: "specialclassDetail",
+    specialId,
+    termId,
+  })}`;
+  return get<any>(url);
+}
+
+export type DissolvedClassRow = {
+  section_id: string;
+  section_code?: string;
+  course_id?: string;
+  course_code?: string;
+  course_title?: string;
+  units?: string | number;
+  enrollment_cap?: number | null;
+  remarks?: string | null;
+  campus_id?: string;
+  faculty_id?: string;
+  faculty_name?: string;
+  schedule_entries?: SpecialClassSlot[];
+  slot1?: SpecialClassSlot | null;
+  slot2?: SpecialClassSlot | null;
+  [k: string]: any;
+};
+
+export type DissolvedClassResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: DissolvedClassRow[];
+};
+
+export async function getApoDissolvedClasses(
+  userId: string,
+  opts: { term_id?: string; term_mode?: "active" | "planning" } = {}
+): Promise<DissolvedClassResponse> {
+  const url = `${API_BASE}/apo/courseofferings${q({
+    userId,
+    view: "dissolved",
+    term_id: opts.term_id,
+    term_mode: opts.term_mode ?? "active",
+  })}`;
+
+  return get<any>(url);
+}
 
 /* =========================================================
    ===============  APO: ROOM ALLOCATION  ==================
@@ -1802,6 +1892,11 @@ export async function removeRoom(userId: string, payload: { room_id: string }) {
 /* =========================================================
    ===============  STUDENT: PETITION  =====================
    ========================================================= */
+export type SubmissionWindow = {
+  openISO?: string;
+  deadlineISO?: string;
+  term_id?: string;
+};
 export type StudentOptions = {
   ok: boolean;
   departments: string[];
@@ -1809,6 +1904,7 @@ export type StudentOptions = {
   programs: { program_id: string; program_code: string }[];
   reasons: string[];
   statuses: string[];
+  submission_window?: SubmissionWindow;
 };
 
 export type PetitionView = {
@@ -1851,7 +1947,7 @@ export async function getStudentOptions(userId: string): Promise<StudentOptions>
 }
 
 export async function getStudentProfile(userId: string): Promise<{
-  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string;
+  ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string; lock_student_number?: boolean; lock_degree?: boolean;
 }> {
   const { data } = await axios.post(`${API_BASE}/student/petition`, {}, {
     params: { userId, action: "profile" },
@@ -1872,8 +1968,6 @@ export async function submitStudentPetition(
 /* =========================================================
    ===============  STUDENT: SPECIAL CLASS  =================
    ========================================================= */
-
-
 export type SpecialClassOptions = {
   ok: boolean;
   departments: string[];
@@ -1881,6 +1975,7 @@ export type SpecialClassOptions = {
   programs: { program_id: string; program_code: string }[];
   reasons: string[];
   statuses: string[];
+  submission_window?: SubmissionWindow;
 };
 
 export type SpecialClassView = {
@@ -1888,11 +1983,17 @@ export type SpecialClassView = {
   user_id: string;
   course_id: string | null;
 
+  eaf_original_name?: string;
+  eaf_content_type?: string;
+  eaf_size?: number;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
+  has_eaf?: boolean;
+
   course_code: string;
   course_title: string;
   department_name?: string;
 
-  // submission info (kept minimal; not shown in status card to avoid clutter)
   student_number?: number | string;
   units_remaining?: number;
   graduating_after_term?: boolean;
@@ -1909,7 +2010,6 @@ export type SpecialClassView = {
   term_number?: number;
   program_code?: string;
 
-  // ✅ schedule table fields
   section_id?: string | null;
   section_code?: string;
 
@@ -1948,6 +2048,7 @@ export type SpecialClassSubmitPayload = {
   department: string;
 
   agree: boolean;
+  eafFile: File;
 };
 
 export async function getStudentSpecialClasses(
@@ -1972,7 +2073,7 @@ export async function getStudentSpecialClassOptions(userId: string): Promise<Spe
 
 export async function getStudentSpecialClassProfile(
   userId: string
-): Promise<{ ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string }> {
+): Promise<{ ok: boolean; first_name: string; last_name: string; student_number: string; program_code?: string; lock_student_number?: boolean; lock_degree?: boolean }> {
   const { data } = await axios.post(
     `${API_BASE}/student/specialclass`,
     {},
@@ -1993,11 +2094,41 @@ export async function getStudentSpecialClassCourseInfo(
   return data;
 }
 
+async function fileToBase64(file: File): Promise<string> {
+  return await new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = typeof reader.result === "string" ? reader.result : "";
+      const commaIdx = result.indexOf(",");
+      resolve(commaIdx >= 0 ? result.slice(commaIdx + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error || new Error("Failed to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
 export async function submitStudentSpecialClass(
   userId: string,
   payload: SpecialClassSubmitPayload
 ): Promise<{ ok: boolean; application: SpecialClassView }> {
-  const { data } = await axios.post(`${API_BASE}/student/specialclass`, payload, {
+  const eafBase64 = await fileToBase64(payload.eafFile);
+  const requestPayload = {
+    studentNumber: payload.studentNumber,
+    degree: payload.degree,
+    unitsRemaining: payload.unitsRemaining,
+    graduatingAfterTerm: payload.graduatingAfterTerm,
+    courseCode: payload.courseCode,
+    units: payload.units,
+    reason: payload.reason,
+    reasonOther: payload.reasonOther,
+    department: payload.department,
+    agree: payload.agree,
+    eafFileName: payload.eafFile.name,
+    eafContentType: payload.eafFile.type || "application/pdf",
+    eafBase64,
+  };
+
+  const { data } = await axios.post(`${API_BASE}/student/specialclass`, requestPayload, {
     params: { userId, action: "submit" },
   });
   return data;
@@ -2513,12 +2644,15 @@ export type OMPetitionRow = {
   count: number;
   status: string;
   remarks?: string;
+  highlight_row?: boolean;
+  highlight_yellow?: boolean;
 };
 
 export type OMPetitionOptions = {
   ok: boolean;
   statuses: string[];
   activeTerm: { term_id: string; acad_year_start?: number; term_number?: number };
+  submission_window?: SubmissionWindow;
 };
 
 export async function getOMSPOptions() {
@@ -2545,6 +2679,17 @@ export async function updateOMSPCourse(
     params: { action: "update", courseId: course_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function startOMSPWindow(args: { termId?: string; durationDays?: number; openISO?: string; deadlineISO?: string } = {}) {
+  const params: any = { action: "startWindow" };
+  if (args.termId) params.termId = args.termId;
+  if (args.durationDays != null) params.durationDays = args.durationDays;
+  if (args.openISO) params.openISO = args.openISO;
+  if (args.deadlineISO) params.deadlineISO = args.deadlineISO;
+
+  const { data } = await axios.post(`${API_BASE}/om/student-petition`, {}, { params });
+  return data as { ok: boolean; submission_window?: SubmissionWindow };
 }
 
 /* =========================================================
@@ -2652,11 +2797,20 @@ export type OMSpecialClassRow = {
   assignment_id?: string | null;
   schedule_cleared?: boolean;
   clear_schedule_only?: boolean;
+  generated_from_class_retention?: boolean;
+  manual_special_class?: boolean;
+  retention_id?: string;
 };
 
 export type OMSpecialClassDetail = OMSpecialClassRow & {
   department_id?: string;
   department_name?: string;
+  has_eaf?: boolean;
+  eaf_original_name?: string;
+  eaf_content_type?: string;
+  eaf_size?: number;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
 
   course_units?: number | string;
   units_remaining?: number | string;
@@ -2668,13 +2822,21 @@ export type OMSpecialClassDetail = OMSpecialClassRow & {
   updated_at?: string;
 };
 
+export type OMSpecialClassCourseOption = {
+  course_id: string;
+  course_code: string;
+  course_title?: string;
+};
+
 export type OMSpecialClassOptions = {
   ok: boolean;
   statuses: string[];
   activeTerm?: { term_id: string; term_number: number; acad_year_start: number } | null;
   facultyOptions?: OMSCFaultyOpt[];
+  courseOptions?: OMSpecialClassCourseOption[];
   // backend includes this in options, even if UI doesn't edit rooms yet
   roomOptions?: OMSCRoomOpt[];
+  submission_window?: SubmissionWindow;
 };
 
 // ---------- OM: Special Class endpoints ----------
@@ -2683,6 +2845,17 @@ export async function getOMSC_Options(): Promise<OMSpecialClassOptions> {
     params: { action: "options" },
   });
   return data as OMSpecialClassOptions;
+}
+
+export async function startOMSCWindow(args: { termId?: string; durationDays?: number; openISO?: string; deadlineISO?: string } = {}) {
+  const params: any = { action: "startWindow" };
+  if (args.termId) params.termId = args.termId;
+  if (args.durationDays != null) params.durationDays = args.durationDays;
+  if (args.openISO) params.openISO = args.openISO;
+  if (args.deadlineISO) params.deadlineISO = args.deadlineISO;
+
+  const { data } = await api.post(`/om/specialclass`, null, { params });
+  return data as { ok: boolean; submission_window?: SubmissionWindow };
 }
 
 export async function listOMSC(params: {
@@ -2715,6 +2888,63 @@ export async function updateOMSC(
     params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
   });
   return data as { ok: boolean; matched: number; modified: number };
+}
+
+export type OMSpecialClassCandidate = {
+  special_id: string;
+  student_name: string;
+  student_number?: string | number;
+  status?: string;
+};
+
+export async function createOMSC(
+  payload: Partial<OMSpecialClassRow>,
+  userId?: string | null
+): Promise<{ ok: boolean; special_id: string; row?: OMSpecialClassRow }> {
+  const { data } = await api.post(`/om/specialclass`, payload, {
+    params: { action: "create", ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; special_id: string; row?: OMSpecialClassRow };
+}
+
+export async function getOMSC_EligibleStudents(
+  targetSpecialId: string
+): Promise<{ ok: boolean; rows: OMSpecialClassCandidate[] }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "eligibleStudents", targetSpecialId },
+  });
+  return data as { ok: boolean; rows: OMSpecialClassCandidate[] };
+}
+
+export async function unassignOMSCStudent(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "unassignStudent", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function assignOMSCStudent(
+  targetSpecialId: string,
+  studentSpecialId: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/om/specialclass`, { studentSpecialId }, {
+    params: { action: "assignStudent", targetSpecialId, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function deleteOMSCClass(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string }> {
+  const { data } = await api.post(`/om/specialclass`, null, {
+    params: { action: "deleteClass", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string };
 }
 
 export async function getOMSC_Detail(
@@ -2812,7 +3042,14 @@ export type OMCROptions = {
   activeTermLabel?: string;
 };
 
-export type OMCRCourseOpt = { course_id: string; course_code: string; course_title: string };
+export type OMCRCourseOpt = {
+  course_id: string;
+  course_code: string;
+  course_title: string;
+  units?: number | null;
+  faculty_units?: number | null;
+};
+
 export type OMCRSectionOpt = {
   section_id: string;
   section_code: string;
@@ -2883,16 +3120,19 @@ export type ChairPetitionRow = {
   count: number;
   status: string;
   remarks?: string;
+  highlight_row?: boolean;
+  highlight_yellow?: boolean;
 };
 
 export type ChairPetitionOptions = {
   ok: boolean;
   statuses: string[];
   activeTerm: { term_id: string; acad_year_start?: number; term_number?: number };
+  submission_window?: SubmissionWindow;
 };
 
 export async function getChairSPOptions() {
-  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petition`, {}, {
     params: { action: "options" },
   });
   return data as ChairPetitionOptions;
@@ -2900,26 +3140,164 @@ export async function getChairSPOptions() {
 
 export async function listChairSP(params: { status?: string; search?: string; userId?: string } = {}) {
   const { status = "", search = "", userId } = params;
-  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, {}, {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petition`, {}, {
     params: { action: "list", status, search, userId },
   });
   return data as { ok: boolean; rows: ChairPetitionRow[]; term_id: string };
 }
 
 export async function updateChairSPCourse(course_id: string, payload: { status?: string; remarks?: string }) {
-  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, payload, {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petition`, payload, {
     params: { action: "update", courseId: course_id },
   });
   return data as { ok: boolean; matched: number; modified: number };
 }
 
 export async function bulkForwardChairSP(course_ids: string[], status?: string) {
-  const { data } = await axios.post(`${API_BASE}/chair/student-petitions`, { course_ids, status }, {
+  const { data } = await axios.post(`${API_BASE}/chair/student-petition`, { course_ids, status }, {
     params: { action: "bulkForward" },
   });
   return data as { ok: boolean; matched: number; modified: number; status: string };
 }
 
+
+
+
+export type ChairSpecialClassRow = OMSpecialClassRow;
+export type ChairSpecialClassOptions = OMSpecialClassOptions;
+export type ChairSCSchedulePreset = OMSCSchedulePreset;
+export type ChairSpecialClassDetail = OMSpecialClassDetail;
+
+export async function getChairSCOptions(): Promise<ChairSpecialClassOptions> {
+  const { data } = await api.get(`/chair/specialclass`, {
+    params: { action: "options" },
+  });
+  return data as ChairSpecialClassOptions;
+}
+
+export async function listChairSC(params: {
+  termId?: string;
+  status?: string;
+  q?: string;
+}): Promise<{ ok: boolean; rows: ChairSpecialClassRow[]; term_id?: string }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "list", ...params },
+  });
+  return data as { ok: boolean; rows: ChairSpecialClassRow[]; term_id?: string };
+}
+
+export async function getChairSC_SchedulePresets(
+  course_id: string,
+  term_id?: string
+): Promise<{ ok: boolean; presets: ChairSCSchedulePreset[] }> {
+  const { data } = await api.get(`/chair/specialclass`, {
+    params: { action: "schedulePresets", course_id, term_id },
+  });
+  return data as { ok: boolean; presets: ChairSCSchedulePreset[] };
+}
+
+export async function updateChairSC(
+  special_id: string,
+  payload: Partial<ChairSpecialClassRow>,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/chair/specialclass`, payload, {
+    params: { action: "update", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export type ChairSpecialClassCandidate = OMSpecialClassCandidate;
+
+export async function createChairSC(
+  payload: Partial<ChairSpecialClassRow>,
+  userId?: string | null
+): Promise<{ ok: boolean; special_id: string; row?: ChairSpecialClassRow }> {
+  const { data } = await api.post(`/chair/specialclass`, payload, {
+    params: { action: "create", ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; special_id: string; row?: ChairSpecialClassRow };
+}
+
+export async function getChairSC_EligibleStudents(
+  targetSpecialId: string
+): Promise<{ ok: boolean; rows: ChairSpecialClassCandidate[] }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "eligibleStudents", targetSpecialId },
+  });
+  return data as { ok: boolean; rows: ChairSpecialClassCandidate[] };
+}
+
+export async function unassignChairSCStudent(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "unassignStudent", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function assignChairSCStudent(
+  targetSpecialId: string,
+  studentSpecialId: string,
+  userId?: string | null
+): Promise<{ ok: boolean; matched: number; modified: number }> {
+  const { data } = await api.post(`/chair/specialclass`, { studentSpecialId }, {
+    params: { action: "assignStudent", targetSpecialId, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; matched: number; modified: number };
+}
+
+export async function deleteChairSCClass(
+  special_id: string,
+  userId?: string | null
+): Promise<{ ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "deleteClass", specialId: special_id, ...(userId ? { userId } : {}) },
+  });
+  return data as { ok: boolean; deleted_rows: number; cleared_students: number; kept_row: boolean; message?: string };
+}
+
+export async function getChairSC_Detail(
+  special_id: string,
+  termId?: string
+): Promise<{ ok: boolean; row: ChairSpecialClassDetail }> {
+  const { data } = await api.post(`/chair/specialclass`, null, {
+    params: { action: "detail", specialId: special_id, ...(termId ? { termId } : {}) },
+  });
+  return data as { ok: boolean; row: ChairSpecialClassDetail };
+}
+
+export async function exportChairSC_Pdf(args: {
+  termId?: string;
+  status?: string;
+  q?: string;
+  specialId?: string;
+  special_ids?: string[];
+}): Promise<Blob> {
+  const { special_ids, ...queryParams } = args || {};
+
+  try {
+    const res = await api.post(
+      `/chair/specialclass`,
+      special_ids && special_ids.length > 0 ? { special_ids } : null,
+      {
+        params: { action: "exportPdf", ...queryParams },
+        responseType: "arraybuffer",
+        headers: { Accept: "application/pdf" },
+      }
+    );
+
+    return new Blob([res.data], { type: "application/pdf" });
+  } catch (err: any) {
+    const decoded = await tryDecodePdfError(err);
+    if (decoded) {
+      throw new Error(decoded);
+    }
+    throw err;
+  }
+}
 
 /* =========================================================
    ===============  FACULTY: OVERVIEW  =====================
@@ -3226,7 +3604,6 @@ export async function getOmSubmittedCourses(user_id: string, term_id?: string) {
 
 export type OmNewLineSavePayload = {
   course_code: string;
-  section_code: string;
   faculty_id: string;
   /** Campus context used for APO validation/routing (optional; backend may infer). */
   campus_id?: string;
@@ -3236,7 +3613,8 @@ export type OmNewLineSavePayload = {
   day2?: string;
   begin2?: string;
   end2?: string;
-  mode: string;
+  /** Optional from frontend; backend defaults to HYB. */
+  mode?: string;
   units?: number;
   capacity?: number;
   remarks?: string;
@@ -3882,7 +4260,7 @@ export async function chairClassRetention(userId: string) {
 }
 
 export async function chairStudentPetitions(userId: string) {
-  const { data } = await api.post(`/chair/student-petitions`, {}, {
+  const { data } = await api.post(`/chair/student-petition`, {}, {
     params: { userId, action: "fetch" },
   });
   return data as { ok: boolean; rows: any[] };
