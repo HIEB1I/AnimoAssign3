@@ -1523,6 +1523,13 @@ function _coerceSpecialClassResponse(raw: SpecialClassBackendResponse): SpecialC
         term_id: r.term_id ?? raw.term_id,
         term_label: r.term_label ?? raw.term_label,
 
+        // Preserve canonical bindings for APO save/grouping.
+        section_id: r.section_id ?? null,
+        course_id: r.course_id ?? null,
+        assignment_id: r.assignment_id ?? null,
+        faculty_id: r.faculty_id ?? null,
+        section_code: r.section_code ?? null,
+
         student: {
           student_number: r.student_number != null ? String(r.student_number) : undefined,
           student_name: r.student_name,
@@ -1582,6 +1589,10 @@ export type ApoSpecialClassUpdatePayload = {
   special_id: string;
   special_ids?: string[];
   term_id?: string;
+  section_id?: string;
+  course_id?: string;
+  assignment_id?: string;
+  faculty_id?: string;
   section_code?: string;
   remarks?: string;
   schedule_entries?: Array<{

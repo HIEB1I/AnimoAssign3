@@ -21,6 +21,8 @@ from ..main import db
 
 # In-app bell notifications (same pattern as Faculty Service)
 from ..Notifications import create_notification
+from ..status_rules import get_active_special_section_ids
+from ..status_rules import get_active_special_section_ids
 
 async def _ensure_user_gmail_address(user_id: str, db) -> None:
     """Best-effort: ensure users.gmail is populated for email notifications.
@@ -93,107 +95,11 @@ COL_LOAD_PROPOSALS = "faculty_load_proposals"
 COL_LOAD_RFC = "faculty_rfc"
 
 async def _special_class_section_ids(term_id: str, db) -> set[str]:
-    """Collect section_ids that belong to Special Class records for a term.
-
-    Requirement: OM_LoadAssignment must *not* reflect Special Classes in its
-    load assignment tables.
-
-    Special Class rows live in the `special_class` collection and may reference
-    a section via different legacy shapes:
-      - special_class.section_id
-      - special_class.assignment_id -> faculty_assignments.section_id
-      - schedule_id within schedule_entries / slot1 / slot2 -> section_schedules.section_id
-
-    We resolve all of the above best-effort and return a set of section_ids.
-    """
-
-    term_id = (term_id or "").strip()
-    if not term_id:
-        return set()
-
+    """Return only ACTIVE special-class section_ids for OM regular views."""
     try:
-        sc_rows = await db.get_collection("special_class").find(
-            {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
-            {
-                "_id": 0,
-                "section_id": 1,
-                "assignment_id": 1,
-                "schedule_entries": 1,
-                "slot1": 1,
-                "slot2": 1,
-                "status": 1,
-            },
-        ).to_list(None)
+        return await get_active_special_section_ids(db, term_id)
     except Exception:
-        sc_rows = []
-
-    if not sc_rows:
         return set()
-
-    out: set[str] = set()
-    asg_ids: set[str] = set()
-    sched_ids: set[str] = set()
-
-    def _s(x: Any) -> str:
-        return (str(x).strip() if x is not None else "")
-
-    def _collect_schedule_ids(val: Any) -> None:
-        if not val:
-            return
-        if isinstance(val, dict):
-            sid = _s(val.get("schedule_id") or val.get("id"))
-            if sid:
-                sched_ids.add(sid)
-            return
-        if isinstance(val, list):
-            for e in val:
-                if isinstance(e, dict):
-                    sid = _s(e.get("schedule_id") or e.get("id"))
-                    if sid:
-                        sched_ids.add(sid)
-
-    for r in sc_rows:
-        sid = _s(r.get("section_id"))
-        if sid:
-            out.add(sid)
-
-        aid = _s(r.get("assignment_id"))
-        if aid:
-            asg_ids.add(aid)
-
-        _collect_schedule_ids(r.get("schedule_entries"))
-        _collect_schedule_ids(r.get("slot1"))
-        _collect_schedule_ids(r.get("slot2"))
-
-    # Resolve assignment_id -> section_id
-    if asg_ids:
-        try:
-            asg_docs = await db.get_collection(COL_ASSIGN).find(
-                {"assignment_id": {"$in": sorted(asg_ids)}, "is_archived": {"$ne": True}},
-                {"_id": 0, "assignment_id": 1, "section_id": 1},
-            ).to_list(None)
-            for a in asg_docs or []:
-                sid = _s(a.get("section_id"))
-                if sid:
-                    out.add(sid)
-        except Exception:
-            pass
-
-    # Resolve schedule_id -> section_id
-    if sched_ids:
-        try:
-            sched_docs = await db.get_collection(COL_SCHED).find(
-                {"schedule_id": {"$in": sorted(sched_ids)}},
-                {"_id": 0, "schedule_id": 1, "section_id": 1},
-            ).to_list(None)
-            for s in sched_docs or []:
-                sid = _s(s.get("section_id"))
-                if sid:
-                    out.add(sid)
-        except Exception:
-            pass
-
-    return out
 
 def _campus_name_to_id(val: str) -> str:
     """Map Campus column values to campus_id.

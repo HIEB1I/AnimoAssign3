@@ -22,7 +22,7 @@ import { InboxContent } from "./FACULTY_Inbox";
 // Requirements:
 // - For special classes, show TBA instead of ONLINE.
 // - For special classes (List view), show day initials (M/T/W/H/F/S/U) instead of full words.
-// - For special classes, mode should be FOL if BOTH rooms are unassigned (empty/TBA/ONLINE), else HYB.
+// - Do NOT auto-derive FOL/HYB from room assignment; display the stored mode only.
 const isRoomUnassignedForSpecial = (v?: unknown) => {
   const s = String(v ?? "").trim();
   if (!s) return true;
@@ -57,10 +57,9 @@ const dayInitial = (d?: unknown) => {
   return s.charAt(0).toUpperCase();
 };
 
-const specialModeFromRooms = (room1?: unknown, room2?: unknown) => {
-  return isRoomUnassignedForSpecial(room1) && isRoomUnassignedForSpecial(room2)
-    ? "FOL"
-    : "HYB";
+const specialModeDisplay = (mode?: unknown) => {
+  const s = String(mode ?? "").trim();
+  return s || "—";
 };
 
 
@@ -1163,7 +1162,7 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [specialEdit, setSpecialEdit] = useState<null | {
     special_id: string;
     special_ids: string[];
-    section_id: string;
+    section_id?: string;
     original: any;
   }>(null);
   const [specialEditBusy, setSpecialEditBusy] = useState(false);
@@ -1474,9 +1473,15 @@ const [isAccepting, setIsAccepting] = useState(false);
         )
       );
       if (special_id && !special_ids.includes(special_id)) special_ids.unshift(special_id);
-      const section_id = String(it?.section_id || it?.originalItem?.section_id || "").trim();
-      if (!userId || !special_id || !section_id) {
-        onToast?.("error", "Missing special class identifiers.");
+      const section_id = String(
+        it?.real_section_id ||
+        it?.originalItem?.real_section_id ||
+        it?.section_id ||
+        it?.originalItem?.section_id ||
+        ""
+      ).trim();
+      if (!userId || !special_id) {
+        onToast?.("error", "Missing special class identifier.");
         return;
       }
 
@@ -1563,11 +1568,6 @@ const [isAccepting, setIsAccepting] = useState(false);
 
       setSpecialEditBusy(true);
 
-      // Ensure we post room_id (not room label). If the current value is a label,
-      // map it using the latest eligible rooms list.
-      const room1Id = resolveRoomIdFromEligible(specialRooms1, specialEditDraft.room1);
-      const room2Id = resolveRoomIdFromEligible(specialRooms2, specialEditDraft.room2);
-
       await apiPost("/api/faculty/special-class/update-schedule", {
         user_id: userId,
         special_id: specialEdit.special_id,
@@ -1577,7 +1577,6 @@ const [isAccepting, setIsAccepting] = useState(false);
           day: specialEditDraft.day1,
           begin: hmToHHMM(specialEditDraft.begin1),
           end: hmToHHMM(specialEditDraft.end1),
-          room_id: room1Id || "",
         },
         meeting2:
           specialEditDraft.day2 && specialEditDraft.begin2 && specialEditDraft.end2
@@ -1585,7 +1584,6 @@ const [isAccepting, setIsAccepting] = useState(false);
                 day: specialEditDraft.day2,
                 begin: hmToHHMM(specialEditDraft.begin2),
                 end: hmToHHMM(specialEditDraft.end2),
-                room_id: room2Id || "",
               }
             : {},
       });
@@ -1617,7 +1615,7 @@ const [isAccepting, setIsAccepting] = useState(false);
         setSpecialRoomsLoading(true);
         const paramsBase = (day: string, begin: string, end: string) =>
           `/api/faculty/special-class/eligible-rooms?user_id=${encodeURIComponent(String(userId))}` +
-          `&section_id=${encodeURIComponent(specialEdit.section_id)}` +
+          `${specialEdit.section_id ? `&section_id=${encodeURIComponent(specialEdit.section_id)}` : ""}` +
           `&day=${encodeURIComponent(String(day || ""))}` +
           `&start_time=${encodeURIComponent(hmToHHMM(begin))}` +
           `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
@@ -1722,9 +1720,10 @@ const scheduleFinalLabel = (() => {
             .filter((pair): pair is Record<string, unknown> => Boolean(pair) && typeof pair === "object")
             .map((pair) => ({
               special_id: String(pair.special_id || (it as any)?.special_id || "").trim() || undefined,
-              student: String(pair.student || "—").trim() || "—",
-              reason: String(pair.reason || "—").trim() || "—",
-            })))
+              student: String(pair.student || "").trim(),
+              reason: String(pair.reason || "").trim(),
+            }))
+            .filter((pair) => pair.student))
         : [];
       if (explicitPairs.length) return explicitPairs;
 
@@ -1734,19 +1733,30 @@ const scheduleFinalLabel = (() => {
       const reasons = Array.isArray((it as any)?.reasons)
         ? (((it as any).reasons as unknown[]).flatMap((value) => normalizeDisplayParts(value)))
         : normalizeDisplayParts((it as any)?.reason);
-      const maxLen = Math.max(students.length, reasons.length, 1);
+      const maxLen = Math.max(students.length, reasons.length, 0);
+      if (!maxLen) return [];
       return Array.from({ length: maxLen }, (_, index) => ({
         special_id: String((it as any)?.special_id || "").trim() || undefined,
-        student: students[index] || students[0] || "—",
-        reason: reasons[index] || reasons[0] || "—",
-      }));
+        student: students[index] || students[0] || "",
+        reason: reasons[index] || reasons[0] || "",
+      })).filter((pair) => pair.student);
     };
+
+    const sectionSig = (it: TLItem) =>
+      [
+        String((it as any)?.section_id || "").trim().toUpperCase(),
+        String(it.section || "").trim().toUpperCase(),
+        String((it as any)?.day1 || "").trim().toUpperCase(),
+        String((it as any)?.time1 || "").trim().toUpperCase(),
+        String((it as any)?.day2 || "").trim().toUpperCase(),
+        String((it as any)?.time2 || "").trim().toUpperCase(),
+        String((it as any)?.special_id || "").trim().toUpperCase(),
+      ].join("|");
 
     (specialTeachingLoad || []).forEach((it) => {
       const key = [
         String((it as any)?.course_id || "").trim().toUpperCase(),
-        String(it.course_code || "").trim().toUpperCase(),
-        String(it.course_title || "").trim().toUpperCase(),
+        sectionSig(it),
       ].join("|");
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(it);
@@ -1765,8 +1775,8 @@ const scheduleFinalLabel = (() => {
         const studentReasonPairs = Array.from(pairByKey.values()).sort((a, b) =>
           `${a.student}|${a.special_id || ""}`.localeCompare(`${b.student}|${b.special_id || ""}`)
         );
-        const students = studentReasonPairs.map((pair) => pair.student || "—");
-        const reasons = studentReasonPairs.map((pair) => pair.reason || "—");
+        const students = studentReasonPairs.map((pair) => pair.student).filter(Boolean);
+        const reasons = studentReasonPairs.map((pair) => pair.reason);
         const specialIds = Array.from(new Set(items.flatMap((it) => collectSpecialIds(it))));
         const backendStudentCount = Math.max(
           0,
@@ -1788,8 +1798,8 @@ const scheduleFinalLabel = (() => {
           student_reason_pairs: studentReasonPairs,
           students,
           reasons,
-          student: students.join("\n") || "—",
-          reason: reasons.join("\n") || "—",
+          student: students.join("\n"),
+          reason: reasons.join("\n"),
           student_count: finalStudentCount,
           special_faculty_status: overriddenStatus || (allAccepted ? "ACCEPTED" : "PENDING"),
         } as TLItem;
@@ -1826,7 +1836,7 @@ const scheduleFinalLabel = (() => {
           : [];
         if (students.length > 0) return total + students.length;
 
-        return total + 1;
+        return total;
       }, 0),
     [selectedSpecialList]
   );
@@ -2383,7 +2393,7 @@ const scheduleFinalLabel = (() => {
                 const room1Display = normalizeRoomDisplayForSpecial((it as any).room1);
                 const room2Display = normalizeRoomDisplayForSpecial((it as any).room2);
 
-                const modeDisplay = specialModeFromRooms((it as any).room1, (it as any).room2);
+                const modeDisplay = specialModeDisplay((it as any).mode);
 
                 const facStatus = String((it as any)?.special_faculty_status || "PENDING").toUpperCase();
                 const isPending = facStatus !== "ACCEPTED";
@@ -2496,21 +2506,25 @@ const scheduleFinalLabel = (() => {
                     <td className="px-3 py-3 align-top">
                       <div className="leading-tight">
                         <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">
-                          {(it as any)?.student_count ? `${(it as any).student_count} student${(it as any).student_count === 1 ? "" : "s"}` : "—"}
+                          {`${Number((it as any)?.student_count ?? 0)} student${Number((it as any)?.student_count ?? 0) === 1 ? "" : "s"}`}
                         </div>
                         <div className="mt-1 space-y-1 text-[12px] text-gray-700">
-                          {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).length ? (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).map((pair, studentIdx) => (
-                            <div key={`${pair.special_id || pair.student}-${studentIdx}`} className="break-words whitespace-normal">{pair.student || "—"}</div>
-                          )) : <div>—</div>}
+                          {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
+                            .filter((pair) => String(pair?.student || "").trim())
+                            .map((pair, studentIdx) => (
+                              <div key={`${pair.special_id || pair.student}-${studentIdx}`} className="break-words whitespace-normal">{pair.student}</div>
+                            ))}
                         </div>
                       </div>
                     </td>
 
                     <td className="px-3 py-3 align-top">
                       <div className="space-y-1 text-[12px] text-gray-800 break-words whitespace-normal">
-                        {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).length ? (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).map((pair, reasonIdx) => (
-                          <div key={`${pair.special_id || pair.reason}-${reasonIdx}`}>{pair.reason || "—"}</div>
-                        )) : <div>—</div>}
+                        {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
+                          .filter((pair) => String(pair?.student || "").trim())
+                          .map((pair, reasonIdx) => (
+                            <div key={`${pair.special_id || pair.reason}-${reasonIdx}`}>{pair.reason || ""}</div>
+                          ))}
                       </div>
                     </td>
 
@@ -2702,7 +2716,7 @@ const scheduleFinalLabel = (() => {
                         // In List view: Special Classes should NOT show "Special Class" in the Mode column.
                         const modeRaw = String(it.mode || "").trim();
                         const modeDisplay = isSpecial
-                          ? specialModeFromRooms((it as any).room1, (it as any).room2)
+                          ? specialModeDisplay((it as any).mode)
                           : (modeRaw || "—");
 
                         const hasSecondMeeting = Boolean(
@@ -2943,7 +2957,7 @@ const scheduleFinalLabel = (() => {
                             })),
                           ].filter((o) => o.value !== "")}
                           includeEmptyOption={{ value: "", label: "TBA" }}
-                          disabled={specialRoomsLoading}
+                          disabled={true}
                         />
 
                         </div>
@@ -2998,7 +3012,7 @@ const scheduleFinalLabel = (() => {
                             })),
                           ].filter((o) => o.value !== "")}
                           includeEmptyOption={{ value: "", label: "TBA" }}
-                          disabled={specialRoomsLoading || !specialEditDraft.day2}
+                          disabled={true}
                         />
                         </div>
                     </div>

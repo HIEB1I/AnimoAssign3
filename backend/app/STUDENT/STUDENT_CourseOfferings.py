@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, Body, HTTPException, Query
 
 from ..main import db
+from ..status_rules import get_active_special_section_ids, get_dissolved_section_ids
 
 router = APIRouter(prefix="/student", tags=["student"])
 
@@ -30,53 +31,13 @@ def _now_dt() -> datetime:
 
 
 async def _active_special_class_section_ids(term_id: str) -> set[str]:
-    term_id = str(term_id or "").strip()
-    if not term_id:
-        return set()
-
-    rows = [x async for x in db[COL_SPECIAL].find(
-        {"term_id": term_id, "status": {"$ne": "Convert to Regular Class"}},
-        {"_id": 0, "section_id": 1, "assignment_id": 1, "schedule_id1": 1, "schedule_id2": 1},
-    )]
-    if not rows:
-        return set()
-
-    out: set[str] = set()
-    assignment_ids: set[str] = set()
-    schedule_ids: set[str] = set()
-    for row in rows:
-        sid = str(row.get("section_id") or "").strip()
-        if sid:
-            out.add(sid)
-        aid = str(row.get("assignment_id") or "").strip()
-        if aid:
-            assignment_ids.add(aid)
-        for key in ("schedule_id1", "schedule_id2"):
-            sched_id = str(row.get(key) or "").strip()
-            if sched_id:
-                schedule_ids.add(sched_id)
-
-    if assignment_ids:
-        docs = [x async for x in db[COL_FAC_ASSIGN].find(
-            {"assignment_id": {"$in": list(assignment_ids)}, "is_archived": {"$ne": True}},
-            {"_id": 0, "section_id": 1},
-        )]
-        for doc in docs:
-            sid = str(doc.get("section_id") or "").strip()
-            if sid:
-                out.add(sid)
-
-    if schedule_ids:
-        docs = [x async for x in db[COL_SECTION_SCHEDULES].find(
-            {"schedule_id": {"$in": list(schedule_ids)}},
-            {"_id": 0, "section_id": 1},
-        )]
-        for doc in docs:
-            sid = str(doc.get("section_id") or "").strip()
-            if sid:
-                out.add(sid)
-
-    return out
+    return await get_active_special_section_ids(
+        db,
+        term_id,
+        special_col=COL_SPECIAL,
+        assign_col=COL_FAC_ASSIGN,
+        schedule_col=COL_SECTION_SCHEDULES,
+    )
 
 
 async def _active_term() -> Dict[str, Any]:
@@ -272,10 +233,22 @@ async def student_course_offerings(
                 "enrolled": 1,
                 "status": 1,
                 "remarks": 1,
+                "is_dissolved": 1,
+                "class_retention_status": 1,
             },
         ).sort([("section_code", 1)]).to_list(None)
+        dissolved_section_ids = await get_dissolved_section_ids(
+            db,
+            term_id,
+            section_ids=[str(s.get("section_id") or "").strip() for s in sec_docs],
+            sections_col=COL_SECTIONS,
+            sections_submitted_col="sections_submitted",
+            class_retention_col="class_retention",
+        )
         if active_special_section_ids:
             sec_docs = [s for s in sec_docs if str(s.get("section_id") or "").strip() not in active_special_section_ids]
+        if dissolved_section_ids:
+            sec_docs = [s for s in sec_docs if str(s.get("section_id") or "").strip() not in dissolved_section_ids]
         sec_docs = [s for s in sec_docs if "SPECIAL CLASS" not in str(s.get("remarks") or "").upper()]
 
         section_ids = [s.get("section_id") for s in sec_docs if s.get("section_id")]

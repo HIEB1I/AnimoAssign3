@@ -206,7 +206,6 @@ export default function CHAIR_StudentPetition() {
   const [startingWindow, setStartingWindow] = useState(false);
 
   const [rows, setRows] = useState<OMPetitionRow[]>([]);
-  const [selected, setSelected] = useState<string[]>([]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
 
@@ -286,7 +285,6 @@ export default function CHAIR_StudentPetition() {
         const { ok, rows } = await listOMSP({ status, search });
         if (!ok) throw new Error("Failed to load petitions.");
         setRows(rows);
-        setSelected((sel) => sel.filter((cid) => rows.some((r) => r.course_id === cid)));
       } catch (e: any) {
         setRows([]);
         setErr(e?.response?.data?.detail || e?.message || "Failed to load petitions.");
@@ -295,8 +293,6 @@ export default function CHAIR_StudentPetition() {
       }
     })();
   }, [status, search]);
-
-  const toggleAll = (checked: boolean) => setSelected(checked ? rows.map((r) => r.course_id) : []);
 
   const beginEdit = (row: OMPetitionRow) => {
     setEditCourseId(row.course_id);
@@ -427,14 +423,6 @@ export default function CHAIR_StudentPetition() {
         <table className="w-full table-auto text-sm">
           <thead className="border-b bg-gray-50 text-gray-900">
             <tr>
-              <th className="w-10 px-3 py-2 text-center">
-                <input
-                  type="checkbox"
-                  checked={rows.length > 0 && selected.length === rows.length}
-                  onChange={(e) => toggleAll(e.target.checked)}
-                  className="h-4 w-4 accent-emerald-600"
-                />
-              </th>
               <th className="px-4 py-2 text-left">Course Code & Title</th>
               <th className="px-4 py-2 text-center">Petition Count</th>
               <th className="px-4 py-2 text-center">Status</th>
@@ -445,13 +433,13 @@ export default function CHAIR_StudentPetition() {
           <tbody className="divide-y">
             {loading ? (
               <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={5}>
                   Loading…
                 </td>
               </tr>
             ) : rows.length === 0 ? (
               <tr>
-                <td className="px-4 py-6 text-center text-gray-500" colSpan={6}>
+                <td className="px-4 py-6 text-center text-gray-500" colSpan={5}>
                   No results
                 </td>
               </tr>
@@ -466,18 +454,6 @@ export default function CHAIR_StudentPetition() {
                       r.highlight_yellow ? "bg-yellow-100 hover:bg-yellow-200" : "hover:bg-gray-50"
                     )}
                   >
-                    <td className="px-3 py-3 text-center">
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(r.course_id)}
-                        onChange={() =>
-                          setSelected((prev) =>
-                            prev.includes(r.course_id) ? prev.filter((id) => id !== r.course_id) : [...prev, r.course_id]
-                          )
-                        }
-                        className="h-4 w-4 accent-emerald-600"
-                      />
-                    </td>
                     <td className="px-4 py-3 text-left font-semibold text-emerald-700">
                       {r.course_code}
                       <div className="text-xs text-gray-500">{r.course_title}</div>

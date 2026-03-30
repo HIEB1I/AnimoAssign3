@@ -93,11 +93,11 @@ async def _regularization_snapshot(section_id: str, course_id: str) -> Dict[str,
     if section_id:
         sec = await db[COL_SECTIONS].find_one(
             {"section_id": section_id},
-            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1},
+            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1, "owner_program_id": 1, "owner_batch_id": 1},
         ) or {}
         sub = await db[COL_SECTIONS_SUBMITTED].find_one(
             {"section_id": section_id},
-            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1},
+            {"_id": 0, "section_code": 1, "campus_id": 1, "enrollment_cap": 1, "batch_number": 1, "mode": 1, "course_id": 1, "term_id": 1, "owner_program_id": 1, "owner_batch_id": 1},
         ) or {}
 
     campus_id = _safe_str(sec.get("campus_id") or sub.get("campus_id")).upper()
@@ -118,6 +118,8 @@ async def _regularization_snapshot(section_id: str, course_id: str) -> Dict[str,
         "enrollment_cap": _coerce_int(sec.get("enrollment_cap") or sub.get("enrollment_cap"), 45),
         "batch_number": _coerce_int(sec.get("batch_number") or sub.get("batch_number"), 0),
         "mode": _safe_str(sec.get("mode") or sub.get("mode")) or "HYB",
+        "owner_program_id": _safe_str(sec.get("owner_program_id") or sub.get("owner_program_id")),
+        "owner_batch_id": _safe_str(sec.get("owner_batch_id") or sub.get("owner_batch_id")),
     }
 
 
@@ -750,6 +752,8 @@ async def _resolve_faculty_user_for_special_row(doc: Dict[str, Any]) -> Tuple[st
     if not faculty_id and section_id:
         fa = await _latest_faculty_assignment_for_section(section_id)
         faculty_id = _safe_str(fa.get("faculty_id"))
+    if not faculty_id:
+        faculty_id = _safe_str(doc.get("faculty_id"))
 
     user_id = await _faculty_user_id_from_faculty_id(faculty_id) if faculty_id else ""
     return user_id, faculty_id
@@ -1737,6 +1741,25 @@ async def _maybe_load_id_for_faculty(term_id: str, faculty_id: str) -> str:
     return (load or {}).get("load_id") or ""
 
 
+async def _regular_room_type_for_course(course_id: str) -> Optional[str]:
+    course_id = _safe_str(course_id)
+    if not course_id:
+        return None
+
+    course = await db[COL_COURSES].find_one(
+        {"course_id": course_id},
+        {"_id": 0, "room_type": 1},
+    ) or {}
+
+    raw = course.get("room_type")
+    value = _safe_str(raw[0] if isinstance(raw, list) and raw else raw)
+    if not value:
+        return None
+    if value.strip().upper() == "ONLINE":
+        return None
+    return value
+
+
 async def _create_pending_section_bundle(
     *,
     term_id: str,
@@ -1811,6 +1834,7 @@ async def _create_pending_section_bundle(
     schedule_id1: Optional[str] = None
     schedule_id2: Optional[str] = None
     sched_docs: List[Dict[str, Any]] = []
+    regular_room_type = await _regular_room_type_for_course(course_id)
 
     if sched.get("day1") and sched.get("begin1") and sched.get("end1"):
         schedule_id1 = f"{sch_base}-01"
@@ -1823,7 +1847,7 @@ async def _create_pending_section_bundle(
                 "start_time": _hhmm_to_db(sched["begin1"]),
                 "end_time": _hhmm_to_db(sched["end1"]),
                 "room_id": None,
-                "room_type": "Online",
+                "room_type": regular_room_type,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -1840,7 +1864,7 @@ async def _create_pending_section_bundle(
                 "start_time": _hhmm_to_db(sched["begin2"]),
                 "end_time": _hhmm_to_db(sched["end2"]),
                 "room_id": None,
-                "room_type": "Online",
+                "room_type": regular_room_type,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -1963,6 +1987,7 @@ async def _create_custom_section_bundle(
     schedule_id1: Optional[str] = None
     schedule_id2: Optional[str] = None
     sched_docs: List[Dict[str, Any]] = []
+    regular_room_type = await _regular_room_type_for_course(course_id)
 
     if sched.get("day1") and sched.get("begin1") and sched.get("end1"):
         schedule_id1 = f"{sch_base}-01"
@@ -1974,7 +1999,7 @@ async def _create_custom_section_bundle(
                 "start_time": _hhmm_to_db(sched["begin1"]),
                 "end_time": _hhmm_to_db(sched["end1"]),
                 "room_id": None,
-                "room_type": "Online",
+                "room_type": regular_room_type,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -1990,7 +2015,7 @@ async def _create_custom_section_bundle(
                 "start_time": _hhmm_to_db(sched["begin2"]),
                 "end_time": _hhmm_to_db(sched["end2"]),
                 "room_id": None,
-                "room_type": "Online",
+                "room_type": regular_room_type,
                 "created_at": now,
                 "updated_at": now,
             }
@@ -2104,6 +2129,7 @@ async def _update_existing_special_section_bundle(
         raise HTTPException(status_code=400, detail="Meeting 1 is required.")
 
     now = datetime.utcnow()
+    regular_room_type = await _regular_room_type_for_course(course_id)
 
     await db[COL_SECTIONS].update_one(
         {"section_id": section_id},
@@ -2156,7 +2182,7 @@ async def _update_existing_special_section_bundle(
             "start_time": _hhmm_to_db(sched["begin1"]),
             "end_time": _hhmm_to_db(sched["end1"]),
             "room_id": None,
-            "room_type": "Online",
+            "room_type": regular_room_type,
             "updated_at": now,
         }, "$setOnInsert": {"created_at": now}},
         upsert=True,
@@ -2173,7 +2199,7 @@ async def _update_existing_special_section_bundle(
                 "start_time": _hhmm_to_db(sched["begin2"]),
                 "end_time": _hhmm_to_db(sched["end2"]),
                 "room_id": None,
-                "room_type": "Online",
+                "room_type": regular_room_type,
                 "updated_at": now,
             }, "$setOnInsert": {"created_at": now}},
             upsert=True,
@@ -2313,6 +2339,12 @@ async def _regularize_special_section_bundle(*, section_id: str, term_id: str, c
     if snap.get("batch_number") is not None:
         sec_set["batch_number"] = snap["batch_number"]
         sub_set["batch_number"] = snap["batch_number"]
+    if snap.get("owner_program_id"):
+        sec_set["owner_program_id"] = snap["owner_program_id"]
+        sub_set["owner_program_id"] = snap["owner_program_id"]
+    if snap.get("owner_batch_id"):
+        sec_set["owner_batch_id"] = snap["owner_batch_id"]
+        sub_set["owner_batch_id"] = snap["owner_batch_id"]
 
     await db[COL_SECTIONS].update_one(
         {"section_id": section_id},
@@ -2324,6 +2356,16 @@ async def _regularize_special_section_bundle(*, section_id: str, term_id: str, c
         {"section_id": section_id},
         {"$set": sub_set},
         upsert=True,
+    )
+
+    regular_room_type = await _regular_room_type_for_course(course_id)
+    await db[COL_SECTION_SCHEDULES].update_many(
+        {"section_id": section_id},
+        {"$set": {
+            "room_id": None,
+            "room_type": regular_room_type,
+            "updated_at": now,
+        }},
     )
 
 

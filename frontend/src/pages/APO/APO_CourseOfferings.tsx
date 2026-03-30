@@ -786,6 +786,11 @@ type SpecialClassRow = {
   campus_name?: string;
   term_id?: string;
   term_label?: string;
+  section_id?: string | null;
+  course_id?: string | null;
+  assignment_id?: string | null;
+  faculty_id?: string | null;
+  section_code?: string | null;
   student?: { student_number?: string; student_name?: string };
   course?: { course_code?: string; course_title?: string };
   section?: { section_id?: string; section_code?: string; section_remarks?: string };
@@ -882,16 +887,59 @@ function specialClassSlotTime(slot: any): string {
 function buildGroupedSpecialClassRows(input: SpecialClassRow[]): SpecialClassGroupRow[] {
   const groups = new Map<string, SpecialClassRow[]>();
 
+  const slotSig = (slot: any) => {
+    if (!slot) return "";
+    return [
+      String(slot?.schedule_id ?? "").trim(),
+      String(slot?.day ?? "").trim(),
+      String(slot?.start_time ?? "").trim(),
+      String(slot?.end_time ?? "").trim(),
+    ].join("|");
+  };
+
+  const rowScheduleSig = (row: SpecialClassRow) => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    const s1 = row?.slot1 ?? se[0] ?? null;
+    const s2 = row?.slot2 ?? se[1] ?? null;
+    return [slotSig(s1), slotSig(s2)].join("||");
+  };
+
   input.forEach((row) => {
-    const key = String(row?.course_id ?? specialClassCourseCode(row) ?? row?.special_id ?? "").trim();
-    if (!key) return;
+    const sectionId = String((row as any)?.section_id ?? (row as any)?.section?.section_id ?? "").trim();
+    const assignmentId = String((row as any)?.assignment_id ?? "").trim();
+    const facultyId = String((row as any)?.faculty_id ?? "").trim();
+    const sectionCode = String((row as any)?.section_code ?? (row as any)?.section?.section_code ?? "").trim();
+    const courseId = String((row as any)?.course_id ?? "").trim();
+    const courseCode = specialClassCourseCode(row);
+    const schedSig = rowScheduleSig(row);
+
+    const key = sectionId
+      ? `sec:${sectionId}`
+      : assignmentId
+      ? `asg:${assignmentId}|sch:${schedSig}`
+      : (courseId || courseCode)
+      ? `course:${courseId || courseCode}|fac:${facultyId}|scode:${sectionCode}|sch:${schedSig}`
+      : `special:${String(row?.special_id ?? "").trim()}`;
+
     const arr = groups.get(key) || [];
     arr.push(row);
     groups.set(key, arr);
   });
 
   const pickPrimary = (rows: SpecialClassRow[]) => {
+    const hasBinding = (row: SpecialClassRow) => {
+      if (String((row as any)?.section_id ?? "").trim()) return true;
+      if (String((row as any)?.assignment_id ?? "").trim()) return true;
+      const allSlots = [
+        ...(Array.isArray(row?.schedule_entries) ? row.schedule_entries : []),
+        row?.slot1,
+        row?.slot2,
+      ].filter(Boolean) as any[];
+      return allSlots.some((slot) => Boolean(String(slot?.schedule_id ?? "").trim()));
+    };
+
     return (
+      rows.find((row) => hasBinding(row)) ||
       rows.find((row) =>
         Boolean(
           specialClassSectionCode(row) ||
@@ -935,7 +983,12 @@ function buildGroupedSpecialClassRows(input: SpecialClassRow[]): SpecialClassGro
         slot2,
       } as SpecialClassGroupRow;
     })
-    .sort((a, b) => specialClassCourseCode(a).localeCompare(specialClassCourseCode(b)));
+    .sort((a, b) => {
+      const ac = specialClassCourseCode(a);
+      const bc = specialClassCourseCode(b);
+      if (ac !== bc) return ac.localeCompare(bc);
+      return String((a as any)?.section_code ?? "").localeCompare(String((b as any)?.section_code ?? ""));
+    });
 }
 
 function DetailRow({ label, value }: { label: string; value: any }) {
@@ -1390,7 +1443,6 @@ export default function CourseOfferingsPage() {
   const [dissolvedLoading, setDissolvedLoading] = useState(false);
   const [dissolvedErr, setDissolvedErr] = useState<string | null>(null);
 
-  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
   const [scExporting, setScExporting] = useState(false);
   const [scExportErr, setScExportErr] = useState<string>("");
   const [scExportOpen, setScExportOpen] = useState(false);
@@ -1516,38 +1568,13 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
     [scRowsForCampus]
   );
 
-  const scSelectedList = useMemo(
-    () => scRowsForCampus.filter((r) => !!scSelectedIds[String((r as any)?.special_id)]).map((r) => String((r as any)?.special_id)),
-    [scRowsForCampus, scSelectedIds]
+  const scExportAllList = useMemo(
+    () => scRowsForCampus.map((r) => String((r as any)?.special_id || "").trim()).filter(Boolean),
+    [scRowsForCampus]
   );
 
-  const toggleAllSpecialClassVisible = (checked: boolean) => {
-    setScSelectedIds((prev) => {
-      const next = { ...prev };
-      scGroupedRowsForCampus.forEach((group) => {
-        group.special_ids.forEach((id) => {
-          if (!id) return;
-          if (checked) next[id] = true;
-          else delete next[id];
-        });
-      });
-      return next;
-    });
-  };
-
-  const toggleOneSpecialClass = (id: string, checked: boolean) => {
-    const sid = String(id ?? "").trim();
-    if (!sid) return;
-    setScSelectedIds((prev) => {
-      const next = { ...prev };
-      if (checked) next[sid] = true;
-      else delete next[sid];
-      return next;
-    });
-  };
-
-  const exportSelectedSpecialClassPdf = async () => {
-    // Export each selected application as its own PDF file (separate downloads)
+  const exportSpecialClassPdf = async () => {
+    // Export each visible application as its own PDF file (separate downloads)
     const safe = (s: string) =>
       (s || "")
         .replace(/[\\/:*?"<>|]+/g, "_")
@@ -1575,13 +1602,13 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
 
     try {
       setScExportErr("");
-      if (scSelectedList.length === 0) {
-        setScExportErr("Select at least one row to export.");
+      if (scExportAllList.length === 0) {
+        setScExportErr("No visible rows to export.");
         return;
       }
 
       setScExporting(true);
-      for (const id of scSelectedList) {
+      for (const id of scExportAllList) {
         const blob = await exportOMSC_Pdf({
           termId: scData?.term_id,
           special_ids: [id],
@@ -1910,7 +1937,6 @@ const loadOfferings = async () => {
       setScData(data);
       setScRows(data.rows || []);
     
-      setScSelectedIds({});
       setScExportErr("");
     } catch (e: any) {
       setScErr(
@@ -2117,11 +2143,21 @@ const loadOfferings = async () => {
     setScErr(null);
 
     try {
-      const seBase =
-        Array.isArray(row.schedule_entries) && row.schedule_entries.length > 0
-          ? row.schedule_entries
-          : [row.slot1, row.slot2].filter(Boolean);
-      const next = [...(seBase as any[])].map((x) => ({ ...x }));
+      const slotBase = [_slotFromRow(row as any, 1), _slotFromRow(row as any, 2)]
+        .filter((slot) => slot && typeof slot === "object")
+        .map((slot) => ({ ...slot }));
+
+      const next = slotBase.filter((slot: any) => {
+        const scheduleId = String(slot?.schedule_id ?? "").trim();
+        const day = String(slot?.day ?? "").trim();
+        const start = String(slot?.start_time ?? "").trim();
+        const end = String(slot?.end_time ?? "").trim();
+        return Boolean(scheduleId || (day && start && end));
+      });
+
+      if (next.length === 0) {
+        throw new Error("Missing special class slot identifiers for room save.");
+      }
 
       const resolveRoomLabel = (specialId: string, idx: 1 | 2, roomId: string | null) => {
         const rid = String(roomId || "").trim();
@@ -2164,6 +2200,44 @@ const loadOfferings = async () => {
         special_id: sid,
         special_ids: targetIds,
         term_id: row.term_id ?? scData?.term_id,
+        section_id:
+          String(
+            (row as any)?.section_id ??
+            (row as any)?.section?.section_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (() => {
+                  const hit = (row as any).source_rows.find((r: any) =>
+                    String(r?.section_id ?? r?.section?.section_id ?? "").trim()
+                  );
+                  return hit?.section_id ?? hit?.section?.section_id ?? "";
+                })()
+              : "") ??
+            ""
+          ).trim() || undefined,
+        course_id:
+          String(
+            (row as any)?.course_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.course_id ?? "").trim())?.course_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        assignment_id:
+          String(
+            (row as any)?.assignment_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.assignment_id ?? "").trim())?.assignment_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        faculty_id:
+          String(
+            (row as any)?.faculty_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.faculty_id ?? "").trim())?.faculty_id
+              : "") ??
+            ""
+          ).trim() || undefined,
         section_code: scEditSectionCode,
         remarks: scEditRemarks,
         schedule_entries: next.map((x) => ({
@@ -4590,16 +4664,16 @@ const promptSaveEdit = () => {
             type="button"
             onClick={() => {
               setScExportOpen(false);
-              exportSelectedSpecialClassPdf();
+              exportSpecialClassPdf();
             }}
-            disabled={scSelectedList.length === 0 || scExporting}
+            disabled={scExportAllList.length === 0 || scExporting}
             className={cls(
               "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
-              (scSelectedList.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
+              (scExportAllList.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
             )}
-            title={scSelectedList.length === 0 ? "Select at least one row" : "Export selected rows to PDF"}
+            title={scExportAllList.length === 0 ? "No visible rows" : "Export visible rows to PDF"}
           >
-            Export selected (PDF)
+            Export visible (PDF)
           </button>
           <button
             type="button"
@@ -6373,20 +6447,6 @@ ${msg}`,
                     <table className="w-full text-sm border-collapse">
                       <thead className="bg-gray-50 text-emerald-800">
                         <tr className="text-[13px] font-semibold">
-                          <th className="px-3 py-2 text-left border border-gray-300 w-10">
-                            <input
-                              type="checkbox"
-                              className="h-4 w-4 accent-emerald-700"
-                              checked={
-                                scGroupedRowsForCampus.length > 0 &&
-                                scGroupedRowsForCampus.every((group) =>
-                                  group.special_ids.every((id) => !!scSelectedIds[String(id)])
-                                )
-                              }
-                              onChange={(e) => toggleAllSpecialClassVisible(e.target.checked)}
-                              aria-label="Select all visible special class rows"
-                            />
-                          </th>
                           <th className="px-3 py-2 text-left border border-gray-300 min-w-[190px]">Course</th>
                           <th className="px-3 py-2 text-center border border-gray-300 w-16">Count</th>
                           <th className="px-3 py-2 text-left border border-gray-300 min-w-[240px]">Students</th>
@@ -6428,17 +6488,6 @@ ${msg}`,
 
                           return (
                             <tr key={group.group_key} className="hover:bg-neutral-50 align-top">
-                              <td className="px-3 py-2 border border-gray-300">
-                                <input
-                                  type="checkbox"
-                                  className="h-4 w-4 accent-emerald-700"
-                                  checked={group.special_ids.every((id) => !!scSelectedIds[String(id)])}
-                                  onChange={(e) => {
-                                    group.special_ids.forEach((id) => toggleOneSpecialClass(String(id), e.target.checked));
-                                  }}
-                                  aria-label={`Select special class group ${group.course_code || group.group_key}`}
-                                />
-                              </td>
 
                               <td className="px-3 py-2 border border-gray-300">
                                 <div className="font-semibold text-emerald-700">{group.course_code || "—"}</div>
