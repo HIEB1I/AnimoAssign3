@@ -1,6 +1,7 @@
 # backend/app/FACULTY/FACULTY_Overview.py
 from fastapi import APIRouter, Query, HTTPException, Body
 from ..main import db
+from ..status_rules import ACTIVE_SPECIAL_STATUSES
 
 # In-app bell notifications (shared Notifications collection)
 from ..Notifications import create_notification
@@ -51,6 +52,7 @@ COL_FACULTY = "faculty_profiles"
 COL_TERMS = "terms"
 COL_ASSIGN = "faculty_assignments"
 COL_SECTIONS = "sections"
+COL_SECTIONS_SUBMITTED = "sections_submitted"
 COL_SCHED = "section_schedules"
 COL_ROOMS = "rooms"
 COL_CAMPUSES = "campuses"
@@ -71,13 +73,6 @@ import uuid
 
 def _safe_str(value: Any) -> str:
     return str(value).strip() if value is not None else ""
-
-
-_ACTIVE_SPECIAL_STATUSES = {"FORWARDED TO DEPARTMENT", "APPROVED"}
-
-
-def _is_active_special_status(value: Any) -> bool:
-    return _safe_str(value).upper() in _ACTIVE_SPECIAL_STATUSES
 
 
 def _scope_has_department(scope_val: Any, department_id: str) -> bool:
@@ -1602,13 +1597,13 @@ async def _fetch_reflected_special_classes_for_faculty(
             "room2": 1,
             "room1_room_type": 1,
             "room2_room_type": 1,
+            "schedule_entries": 1,
+            "slot1": 1,
+            "slot2": 1,
             "updated_at": 1,
             "submitted_at": 1,
-            "mode": 1,
         },
     ).sort([("updated_at", -1), ("submitted_at", -1)]).limit(max(limit * 4, 2000)).to_list(max(limit * 4, 2000))
-
-
 
     out: List[Dict[str, Any]] = []
     # NOTE: The special_class collection can contain multiple versions of the same
@@ -1630,7 +1625,7 @@ async def _fetch_reflected_special_classes_for_faculty(
         # flow (Calendar/List). Without this guard, converted rows fall through to
         # the default PENDING state below, which incorrectly re-shows Accept/Reject.
         current_status = str(d.get("status") or "").strip()
-        if not _is_active_special_status(current_status):
+        if current_status not in ACTIVE_SPECIAL_STATUSES:
             continue
 
         course_id = (d.get("course_id") or d.get("courseId") or "").strip()
@@ -1646,6 +1641,7 @@ async def _fetch_reflected_special_classes_for_faculty(
         # Determine owning faculty
         assignment_id = (d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
         sec_id = (d.get("section_id") or "").strip()
+
         fac_id = ""
         if assignment_id:
             asg = await db[COL_ASSIGN].find_one(
@@ -1690,18 +1686,16 @@ async def _fetch_reflected_special_classes_for_faculty(
         # Faculty Overview must do the same so both List + Calendar views show the correct section.
         sec_id_real = (d.get("section_id") or "").strip()
         section_display = (d.get("section_code") or d.get("section") or "").strip()
-        section_mode = str(d.get("mode") or "").strip()
 
         # If we have section_id but no section code text, derive it from sections.
         if sec_id_real and not section_display:
             sdoc = await db[COL_SECTIONS].find_one(
                 {"section_id": sec_id_real},
-                {"_id": 0, "section_code": 1, "section": 1, "section_name": 1, "mode": 1},
+                {"_id": 0, "section_code": 1, "section": 1, "section_name": 1},
             ) or {}
             section_display = (
                 (sdoc.get("section_code") or sdoc.get("section") or sdoc.get("section_name") or "").strip()
             )
-            section_mode = str(sdoc.get("mode") or "").strip()
 
         # If we only have a section text but no section_id (older/edge docs), attempt to resolve.
         if (not sec_id_real) and section_display and course_code:
@@ -1714,13 +1708,11 @@ async def _fetch_reflected_special_classes_for_faculty(
                 sec_id_real = resolved_sec_id
                 sdoc = await db[COL_SECTIONS].find_one(
                     {"section_id": sec_id_real},
-                    {"_id": 0, "section_code": 1, "section": 1, "section_name": 1, "mode": 1},
+                    {"_id": 0, "section_code": 1, "section": 1, "section_name": 1},
                 ) or {}
                 section_display = (
                     (sdoc.get("section_code") or sdoc.get("section") or sdoc.get("section_name") or section_display).strip()
                 )
-                if not section_mode:
-                    section_mode = str(sdoc.get("mode") or "").strip()
 
         # Schedule (IMPORTANT: special_class usually stores schedule_id1/2, not day/begin/end)
         schedule_id1 = (d.get("schedule_id1") or "").strip() or None
@@ -1762,7 +1754,19 @@ async def _fetch_reflected_special_classes_for_faculty(
             time2 = None
             room2 = None
 
-        mode = section_mode or str(d.get("mode") or "").strip() or "—"
+        mode = ""
+        if sec_id_real:
+            sec_mode_doc = await db[COL_SECTIONS].find_one(
+                {"section_id": sec_id_real},
+                {"_id": 0, "mode": 1, "remarks": 1},
+            ) or {}
+            sub_mode_doc = await db[COL_SECTIONS_SUBMITTED].find_one(
+                {"section_id": sec_id_real},
+                {"_id": 0, "mode": 1, "remarks": 1},
+            ) or {}
+            mode = _stored_special_mode(sub_mode_doc.get("mode") or sec_mode_doc.get("mode") or sub_mode_doc.get("remarks") or sec_mode_doc.get("remarks"))
+        if not mode:
+            mode = _stored_special_mode(d.get("mode")) or "—"
 
         # Student + Reason (for Faculty Special Class tab)
         student_name = ""
@@ -1926,73 +1930,24 @@ async def _expand_grouped_special_class_docs(
     require_faculty_state: Optional[str] = None,
     status_filter: Optional[str] = "Approved",
 ) -> List[Dict[str, Any]]:
-    """Expand selected special ids to the full grouped course set."""
+    """Return the exact selected special-class docs after applying ownership/state filters.
+
+    Do NOT expand by course. Same-course special classes must stay isolated unless the
+    caller explicitly sent all of their special_ids.
+    """
     base_docs = [d or {} for d in (sc_docs or []) if isinstance(d, dict)]
     if not base_docs:
         return []
 
     faculty_id = str(faculty_id or "").strip()
     require_state = str(require_faculty_state or "").strip().upper()
-
-    query_or: List[Dict[str, Any]] = []
-    for d in base_docs:
-        term_id = str(d.get("term_id") or "").strip()
-        course_id = str(d.get("course_id") or d.get("courseId") or "").strip()
-        course_code = str(d.get("course_code") or d.get("courseCode") or "").strip()
-        course_title = str(d.get("course_title") or d.get("courseTitle") or "").strip()
-
-        if term_id and course_id:
-            query_or.append({"term_id": term_id, "$or": [{"course_id": course_id}, {"courseId": course_id}]})
-        elif term_id and course_code:
-            query_or.append({"term_id": term_id, "$or": [{"course_code": course_code}, {"courseCode": course_code}]})
-        elif term_id and course_title:
-            query_or.append({"term_id": term_id, "$or": [{"course_title": course_title}, {"courseTitle": course_title}]})
-
-    if not query_or:
-        return base_docs
-
-    projection = {
-        "_id": 0,
-        "special_id": 1,
-        "term_id": 1,
-        "section_id": 1,
-        "assignment_id": 1,
-        "faculty_assignment_id": 1,
-        "faculty_response": 1,
-        "faculty_status": 1,
-        "user_id": 1,
-        "student_user_id": 1,
-        "schedule_id1": 1,
-        "schedule_id2": 1,
-        "schedule_cleared": 1,
-        "course_id": 1,
-        "courseId": 1,
-        "course_code": 1,
-        "courseCode": 1,
-        "course_title": 1,
-        "courseTitle": 1,
-        "section_code": 1,
-        "section": 1,
-        "om_user_id": 1,
-        "chair_user_id": 1,
-        "status": 1,
-        "updated_at": 1,
-        "submitted_at": 1,
-    }
-    query: Dict[str, Any] = {"$or": query_or}
-    if status_filter is not None:
-        query["status"] = status_filter
-
-    candidates = await db[COL_SPECIAL_CLASS].find(
-        query,
-        projection,
-    ).sort([("updated_at", -1), ("submitted_at", -1)]).to_list(1000)
-
     out: List[Dict[str, Any]] = []
     seen: set[str] = set()
-    for doc in base_docs + (candidates or []):
+    for doc in base_docs:
         sid = str((doc or {}).get("special_id") or "").strip()
         if not sid or sid in seen:
+            continue
+        if status_filter is not None and str((doc or {}).get("status") or "").strip() != str(status_filter).strip():
             continue
         if require_state:
             fac_state = str((doc or {}).get("faculty_response") or (doc or {}).get("faculty_status") or "").strip().upper()
@@ -2004,7 +1959,6 @@ async def _expand_grouped_special_class_docs(
                 continue
         out.append(doc or {})
         seen.add(sid)
-
     return out
 
 
@@ -2311,21 +2265,19 @@ async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
     faculty_id = str(faculty.get("faculty_id") or "").strip()
 
     sc_docs = await db[COL_SPECIAL_CLASS].find(
-        {"special_id": {"$in": special_ids}, "status": {"$in": ["Forwarded To Department", "Approved"]}},
-        {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1, "user_id": 1, "student_user_id": 1,
+        {"special_id": {"$in": special_ids}, "status": {"$in": list(ACTIVE_SPECIAL_STATUSES)}},
+        {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1, "assignment_id": 1, "faculty_assignment_id": 1, "faculty_id": 1, "user_id": 1, "student_user_id": 1,
          "schedule_id1": 1, "schedule_id2": 1, "schedule_cleared": 1, "course_id": 1, "course_code": 1,
-         "course_title": 1, "section_code": 1, "section": 1, "om_user_id": 1, "chair_user_id": 1,
-         "assignment_id": 1, "faculty_assignment_id": 1, "faculty_id": 1, "status": 1},
+         "course_title": 1, "section_code": 1, "section": 1, "om_user_id": 1, "chair_user_id": 1, "status": 1},
     ).to_list(max(200, len(special_ids) * 2))
     if not sc_docs:
         raise HTTPException(status_code=404, detail="Special class not found")
 
     owned_docs: List[Dict[str, Any]] = []
-    for d in sc_docs:
-        owning_faculty_id = await _owning_faculty_id_for_special_doc(d)
-        if owning_faculty_id and owning_faculty_id == faculty_id:
-            owned_docs.append(d)
-
+    for doc in sc_docs:
+        owner = await _owning_faculty_id_for_special_doc(doc or {})
+        if owner == faculty_id:
+            owned_docs.append(doc)
     sc_docs = owned_docs
     if not sc_docs:
         raise HTTPException(status_code=404, detail="Special class not found")
@@ -2348,7 +2300,7 @@ async def faculty_special_class_respond(payload: Dict[str, Any] = Body(...)):
         set_doc["faculty_rejected_at"] = now
 
     await db[COL_SPECIAL_CLASS].update_many(
-        {"special_id": {"$in": matched_special_ids}, "status": {"$in": ["Forwarded To Department", "Approved"]}},
+        {"special_id": {"$in": matched_special_ids}, "status": {"$in": list(ACTIVE_SPECIAL_STATUSES)}},
         {"$set": set_doc},
     )
 
@@ -2508,6 +2460,19 @@ def _serviced_mode_from_rooms(room1: str | None, room2: str | None) -> str:
     # Requirement: if APO assigned a room in either Room 1 or Room 2 (or both), mode should be HYB.
     # Otherwise default to FOL.
     return "HYB" if (_is_real_room_label(room1 or "") or _is_real_room_label(room2 or "")) else "FOL"
+
+def _stored_special_mode(value: Any) -> str:
+    s = str(value or "").strip()
+    if not s:
+        return ""
+    up = s.upper()
+    if "HYB" in up or "HYBRID" in up:
+        return "HYB"
+    if "F2F" in up or "FTF" in up or "FACE" in up:
+        return "F2F"
+    if "FOL" in up or "ONLINE" in up:
+        return "FOL"
+    return ""
 
 def _section_doc_is_dissolved(doc: Optional[Dict[str, Any]]) -> bool:
     row = doc or {}
@@ -5147,7 +5112,12 @@ def _build_faculty_accept_email(
         if is_special:
             rr["room1"] = _room_to_email_display(rr.get("room1"))
             rr["room2"] = _room_to_email_display(rr.get("room2")) if rr.get("room2") not in (None, "") else ""
-            rr["mode"] = str(rr.get("mode") or "").strip() or "—"
+
+            # Mode override for special classes per requirement
+            if _is_unassigned_room(r.get("room1")) and _is_unassigned_room(r.get("room2")):
+                rr["mode"] = "FOL"
+            else:
+                rr["mode"] = "HYB"
 
         return rr
 
@@ -5798,7 +5768,7 @@ async def faculty_accept_load_proposal(userId: str = Query(...), payload: Dict[s
 @router.get("/special-class/eligible-rooms")
 async def faculty_special_class_eligible_rooms(
     user_id: str = Query(...),
-    section_id: str = Query(""),
+    section_id: str = Query(...),
     day: str = Query(...),
     start_time: str = Query(...),
     end_time: str = Query(...),
@@ -5924,11 +5894,10 @@ async def faculty_special_class_update_schedule(
         raise HTTPException(status_code=400, detail="Missing required fields")
 
     sc_docs = await db[COL_SPECIAL_CLASS].find(
-        {"special_id": {"$in": special_ids}, "status": {"$in": ["Forwarded To Department", "Approved"]}},
+        {"special_id": {"$in": special_ids}},
         {
             "_id": 0,
             "special_id": 1,
-            "term_id": 1,
             "om_user_id": 1,
             "chair_user_id": 1,
             "schedule_id1": 1,
@@ -5942,7 +5911,6 @@ async def faculty_special_class_update_schedule(
             "section": 1,
             "assignment_id": 1,
             "faculty_assignment_id": 1,
-            "faculty_id": 1,
             "user_id": 1,
             "student_user_id": 1,
         },
@@ -5955,41 +5923,28 @@ async def faculty_special_class_update_schedule(
     if not section_id:
         section_id = str(sc.get("section_id") or "").strip()
     if not section_id:
-        for d in sc_docs:
-            asg_id = str(d.get("assignment_id") or d.get("faculty_assignment_id") or "").strip()
+        for doc in sc_docs:
+            for key in ("schedule_id1", "schedule_id2"):
+                sched_id = str((doc or {}).get(key) or "").strip()
+                if not sched_id:
+                    continue
+                sched_doc = await db[COL_SCHED].find_one({"schedule_id": sched_id}, {"_id": 0, "section_id": 1}) or {}
+                section_id = str(sched_doc.get("section_id") or "").strip()
+                if section_id:
+                    break
+            if section_id:
+                break
+    if not section_id:
+        for doc in sc_docs:
+            asg_id = str((doc or {}).get("assignment_id") or (doc or {}).get("faculty_assignment_id") or "").strip()
             if not asg_id:
                 continue
-            asg = await db[COL_ASSIGN].find_one(
-                {"assignment_id": asg_id, "is_archived": {"$ne": True}},
-                {"_id": 0, "section_id": 1},
-            ) or {}
-            section_id = str(asg.get("section_id") or "").strip()
+            asg_doc = await db[COL_ASSIGN].find_one({"assignment_id": asg_id, "is_archived": {"$ne": True}}, {"_id": 0, "section_id": 1}) or {}
+            section_id = str(asg_doc.get("section_id") or "").strip()
             if section_id:
                 break
     if not section_id:
-        sched_ids: List[str] = []
-        for d in sc_docs:
-            for key in ("schedule_id1", "schedule_id2"):
-                sid0 = str(d.get(key) or "").strip()
-                if sid0 and sid0 not in sched_ids:
-                    sched_ids.append(sid0)
-        for sid0 in sched_ids:
-            sch0 = await db[COL_SCHED].find_one({"schedule_id": sid0}, {"_id": 0, "section_id": 1}) or {}
-            section_id = str(sch0.get("section_id") or "").strip()
-            if section_id:
-                break
-    if not section_id:
-        section_code_guess = str(sc.get("section_code") or sc.get("section") or "").strip()
-        course_id_guess = str(sc.get("course_id") or "").strip()
-        term_id_guess = str(sc.get("term_id") or "").strip()
-        if section_code_guess and course_id_guess and term_id_guess:
-            sec = await db[COL_SECTIONS].find_one(
-                {"term_id": term_id_guess, "course_id": course_id_guess, "section_code": section_code_guess},
-                {"_id": 0, "section_id": 1},
-            ) or {}
-            section_id = str(sec.get("section_id") or "").strip()
-    if not section_id:
-        raise HTTPException(status_code=400, detail="Missing special class identifier")
+        raise HTTPException(status_code=400, detail="Missing required fields")
 
     m1 = payload.get("meeting1") or {}
     m2 = payload.get("meeting2") or {}

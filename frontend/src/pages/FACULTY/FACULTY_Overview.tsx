@@ -22,14 +22,8 @@ import { InboxContent } from "./FACULTY_Inbox";
 // Requirements:
 // - For special classes, show TBA instead of ONLINE.
 // - For special classes (List view), show day initials (M/T/W/H/F/S/U) instead of full words.
-// - Do NOT auto-derive FOL/HYB from room assignment; display the stored mode only.
-const isRoomUnassignedForSpecial = (v?: unknown) => {
-  const s = String(v ?? "").trim();
-  if (!s) return true;
-  const u = s.toUpperCase();
-  return u === "TBA" || u === "ONLINE";
-};
-
+// - For special classes, do not invent FOL/HYB from room emptiness.
+//   Use the stored mode when available and otherwise leave the UI blank.
 const normalizeRoomDisplayForSpecial = (v?: unknown) => {
   const s = String(v ?? "").trim();
   if (!s) return "—";
@@ -57,9 +51,10 @@ const dayInitial = (d?: unknown) => {
   return s.charAt(0).toUpperCase();
 };
 
-const specialModeDisplay = (mode?: unknown) => {
-  const s = String(mode ?? "").trim();
-  return s || "—";
+const specialModeDisplay = (value?: unknown) => {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.toUpperCase() == "SPECIAL CLASS") return "—";
+  return raw;
 };
 
 
@@ -1162,7 +1157,7 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [specialEdit, setSpecialEdit] = useState<null | {
     special_id: string;
     special_ids: string[];
-    section_id?: string;
+    section_id: string;
     original: any;
   }>(null);
   const [specialEditBusy, setSpecialEditBusy] = useState(false);
@@ -1481,7 +1476,7 @@ const [isAccepting, setIsAccepting] = useState(false);
         ""
       ).trim();
       if (!userId || !special_id) {
-        onToast?.("error", "Missing special class identifier.");
+        onToast?.("error", "Missing special class identifiers.");
         return;
       }
 
@@ -1529,11 +1524,11 @@ const [isAccepting, setIsAccepting] = useState(false);
         `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
 
       const list1 =
-        d1 && t1.begin !== "—" && t1.end !== "—"
+        section_id && d1 && t1.begin !== "—" && t1.end !== "—"
           ? await apiGet(paramsBase(d1, t1.begin, t1.end))
           : [];
       const list2 =
-        d2 && t2.begin !== "—" && t2.end !== "—"
+        section_id && d2 && t2.begin !== "—" && t2.end !== "—"
           ? await apiGet(paramsBase(d2, t2.begin, t2.end))
           : [];
       setSpecialRooms1(Array.isArray(list1) ? list1 : []);
@@ -1615,7 +1610,7 @@ const [isAccepting, setIsAccepting] = useState(false);
         setSpecialRoomsLoading(true);
         const paramsBase = (day: string, begin: string, end: string) =>
           `/api/faculty/special-class/eligible-rooms?user_id=${encodeURIComponent(String(userId))}` +
-          `${specialEdit.section_id ? `&section_id=${encodeURIComponent(specialEdit.section_id)}` : ""}` +
+          `&section_id=${encodeURIComponent(specialEdit.section_id)}` +
           `&day=${encodeURIComponent(String(day || ""))}` +
           `&start_time=${encodeURIComponent(hmToHHMM(begin))}` +
           `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
@@ -1873,7 +1868,7 @@ const scheduleFinalLabel = (() => {
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
-	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
+        <div className="rounded-xl border border-neutral-200 bg-white p-5">
         <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
           <div className="flex w-full flex-col gap-3">
             <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 xl:justify-start">
@@ -2863,9 +2858,9 @@ const scheduleFinalLabel = (() => {
 
             <div className="max-h-[80vh] overflow-y-auto p-5">
               {(() => {
-	                // NOTE: specialEdit is guarded by `{specialEdit && (...)}` above,
-	                // but TS doesn't always narrow across the IIFE boundary.
-	                const oi = (specialEdit?.original ?? {}) as any;
+                  // NOTE: specialEdit is guarded by `{specialEdit && (...)}` above,
+                  // but TS doesn't always narrow across the IIFE boundary.
+                  const oi = (specialEdit?.original ?? {}) as any;
                 const t1 = splitBeginEnd(oi?.time1);
                 const t2 = splitBeginEnd(oi?.time2);
                 const orig1 = `${dayInitial(oi?.day1 || "TBA") || "TBA"} ${(t1.begin && t1.end && t1.begin !== "—") ? `${t1.begin}–${t1.end}` : "TBA"} (${normalizeRoomDisplayForSpecial((oi as any)?.room1) || "TBA"})`;
@@ -3482,283 +3477,283 @@ function ChangeRequestModal({
       />
 
       <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
-	    <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
-	      {/* Header */}
-	      <div className="border-b border-neutral-200 p-5 sm:p-6">
-	        <div className="flex items-start justify-between gap-4">
-	          <div className="min-w-0">
-	            <h3 className="text-xl font-semibold text-emerald-700">Proposed Schedule</h3>
-	            <p className="mt-0.5 text-sm text-neutral-500">
-	              {context.item.code} {context.item.sec}
-	            </p>
-	          </div>
-	          <button
-	            className="shrink-0 rounded-full p-1 hover:bg-neutral-100"
-	            onClick={onClose}
-	            aria-label="Close"
-	            type="button"
-	          >
-	            <X className="h-5 w-5" />
-	          </button>
-	        </div>
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="border-b border-neutral-200 p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-xl font-semibold text-emerald-700">Proposed Schedule</h3>
+              <p className="mt-0.5 text-sm text-neutral-500">
+                {context.item.code} {context.item.sec}
+              </p>
+            </div>
+            <button
+              className="shrink-0 rounded-full p-1 hover:bg-neutral-100"
+              onClick={onClose}
+              aria-label="Close"
+              type="button"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
 
-	        {/* Panel switcher */}
-	        <div className="mt-4 flex w-full items-center justify-between gap-3">
-	          {(context.item as any)?.forceConversationOnly ? (
+          {/* Panel switcher */}
+          <div className="mt-4 flex w-full items-center justify-between gap-3">
+            {(context.item as any)?.forceConversationOnly ? (
               <div className="inline-flex rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-900">
                 Conversation
               </div>
             ) : (
-	            <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-	              <button
-	                type="button"
-	                onClick={() => setPanel("request")}
-	                className={cls(
-	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                  panel === "request"
-	                    ? "bg-white text-neutral-900 shadow-sm"
-	                    : "text-neutral-600 hover:text-neutral-900"
-	                )}
-	                aria-pressed={panel === "request"}
-	              >
-	                Request
-	              </button>
-	              <button
-	                type="button"
-	                onClick={() => setPanel("conversation")}
-	                className={cls(
-	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                  panel === "conversation"
-	                    ? "bg-white text-neutral-900 shadow-sm"
-	                    : "text-neutral-600 hover:text-neutral-900"
-	                )}
-	                aria-pressed={panel === "conversation"}
-	              >
-	                Conversation
-	              </button>
-	            </div>
-	          )}
-	        </div>
-	      </div>
+              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setPanel("request")}
+                  className={cls(
+                    "rounded-lg px-3 py-1.5 text-sm font-medium",
+                    panel === "request"
+                      ? "bg-white text-neutral-900 shadow-sm"
+                      : "text-neutral-600 hover:text-neutral-900"
+                  )}
+                  aria-pressed={panel === "request"}
+                >
+                  Request
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPanel("conversation")}
+                  className={cls(
+                    "rounded-lg px-3 py-1.5 text-sm font-medium",
+                    panel === "conversation"
+                      ? "bg-white text-neutral-900 shadow-sm"
+                      : "text-neutral-600 hover:text-neutral-900"
+                  )}
+                  aria-pressed={panel === "conversation"}
+                >
+                  Conversation
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
-	      {/* Body (scrollable) */}
-	      <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
-	        {effectivePanel === "conversation" ? (
-	          <RfcThreadView
-	            term={term}
-	            sectionId={(() => {
-	              const oiAny: any = (context.item.originalItem as any) || {};
-	              const isSpecial = Boolean(
-	                (context.item as any)?.is_special_class ||
-	                  (context.item as any)?.isSpecialClass ||
-	                  oiAny?.is_special_class
-	              );
-	              const raw =
-	                (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
-	                oiAny?.section_id ||
-	                oiAny?.sectionId ||
-	                "";
-	              return normalizeRfcKey(raw, isSpecial);
-	            })()}
-	            allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
-	            alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
-	          />
-	        ) : (
-	          <div className="space-y-4">
-	            {/* Status banners */}
-	            {scheduleFinal && (
-	              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-	                The schedule is already finalized and locked. RFC is disabled.
-	              </div>
-	            )}
-	
-	            {isFinalized && (
-	              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-	                This course has already been finalized by the Office Manager. RFC is disabled for this course.
-	              </div>
-	            )}
-	
-	            {/* Current schedule summary */}
-	            <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-	              <div className="flex items-center justify-between gap-3">
-	                <div className="text-sm font-semibold text-neutral-800">Current schedule</div>
-	                <button
-	                  type="button"
-	                  onClick={() => setPanel("conversation")}
-	                  className="text-sm font-medium text-emerald-700 hover:underline"
-	                >
-	                  View conversation
-	                </button>
-	              </div>
-	              {/* Compact meeting layout (Day / Time / Room columns) */}
-	              <div className="mt-3 overflow-hidden rounded-xl border border-neutral-200 bg-white">
-	                <div className="grid grid-cols-3 gap-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-600">
-	                  <div>Day</div>
-	                  <div>Time</div>
-	                  <div className="text-right">Room</div>
-	                </div>
-	
-	                <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
-	                  <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
-	                  <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
-	                  <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
-	                </div>
+        {/* Body (scrollable) */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
+          {effectivePanel === "conversation" ? (
+            <RfcThreadView
+              term={term}
+              sectionId={(() => {
+                const oiAny: any = (context.item.originalItem as any) || {};
+                const isSpecial = Boolean(
+                  (context.item as any)?.is_special_class ||
+                    (context.item as any)?.isSpecialClass ||
+                    oiAny?.is_special_class
+                );
+                const raw =
+                  (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
+                  oiAny?.section_id ||
+                  oiAny?.sectionId ||
+                  "";
+                return normalizeRfcKey(raw, isSpecial);
+              })()}
+              allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
+              alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
+            />
+          ) : (
+            <div className="space-y-4">
+              {/* Status banners */}
+              {scheduleFinal && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                  The schedule is already finalized and locked. RFC is disabled.
+                </div>
+              )}
+  
+              {isFinalized && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  This course has already been finalized by the Office Manager. RFC is disabled for this course.
+                </div>
+              )}
+  
+              {/* Current schedule summary */}
+              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-neutral-800">Current schedule</div>
+                  <button
+                    type="button"
+                    onClick={() => setPanel("conversation")}
+                    className="text-sm font-medium text-emerald-700 hover:underline"
+                  >
+                    View conversation
+                  </button>
+                </div>
+                {/* Compact meeting layout (Day / Time / Room columns) */}
+                <div className="mt-3 overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                  <div className="grid grid-cols-3 gap-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-600">
+                    <div>Day</div>
+                    <div>Time</div>
+                    <div className="text-right">Room</div>
+                  </div>
+  
+                  <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
+                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
+                    <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
+                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
+                  </div>
 
-	                {hasSecond ? (
-	                  <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
-	                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
-	                    <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
-	                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
-	                  </div>
-	                ) : (
-	                  <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">
-	                    <div className="col-span-3">No second meeting</div>
-	                  </div>
-	                )}
-	              </div>
-	            </div>
-	
-	            {/* Step 1: choose what to change */}
-	            <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	              <div className="flex items-start justify-between gap-3">
-	                <div>
-	                  <div className="text-sm font-semibold text-neutral-800">1) What would you like to change?</div>
-	                  <div className="mt-0.5 text-sm text-neutral-500">Select one or more options.</div>
-	                </div>
-	              </div>
-	              <div className="mt-3 flex flex-wrap gap-2">
-	                {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
-	                  <button
-	                    key={opt}
-	                    type="button"
-	                    onClick={() => toggle(opt)}
-	                    className={cls(
-	                      "rounded-xl border px-3 py-2 text-sm",
-	                      "transition-colors",
-	                      choices.includes(opt)
-	                        ? "border-emerald-600 bg-emerald-50 text-emerald-800"
-	                        : "border-neutral-300 bg-white hover:bg-neutral-50"
-	                    )}
-	                  >
-	                    {opt}
-	                  </button>
-	                ))}
-	              </div>
-	            </div>
-	
-	            {/* Step 2: details */}
-	            {(mustTime || mustDay || choices.includes("Other")) && (
-	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	                <div className="text-sm font-semibold text-neutral-800">2) Provide the new schedule/details</div>
-	                <div className="mt-0.5 text-sm text-neutral-500">
-	                  For paired schedules, Meeting 1 and Meeting 2 are submitted together.
-	                </div>
-	
-	                {mustTime && (
-	                  <div className="mt-4">
-	                    <div className="mb-2 text-sm font-medium text-neutral-700">New time slot</div>
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
-	                        <Dropdown
-	                          value={selTime1}
-	                          onChange={setSelTime1}
-	                          options={filteredTimeSlots1}
-	                          placeholder="— Select a time —"
-	                        />
-	                      </div>
-	                      {hasSecond && (
-	                        <div>
-	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
-	                          <Dropdown
-	                            value={selTime2}
-	                            onChange={setSelTime2}
-	                            options={filteredTimeSlots2}
-	                            placeholder="— Select a time —"
-	                          />
-	                        </div>
-	                      )}
-	                    </div>
-	                  </div>
-	                )}
-	
-	                {mustDay && (
-	                  <div className="mt-4">
-	                    <div className="mb-2 text-sm font-medium text-neutral-700">New class day</div>
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
-	                        <Dropdown
-	                          value={selDay1}
-	                          onChange={(v) => setSelDay1(v as DayLong)}
-	                          options={filteredDays1}
-	                          placeholder="— Select a day —"
-	                        />
-	                      </div>
-	                      {hasSecond && (
-	                        <div>
-	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
-	                          <Dropdown
-	                            value={selDay2}
-	                            onChange={(v) => setSelDay2(v as DayLong)}
-	                            options={filteredDays2}
-	                            placeholder="— Select a day —"
-	                          />
-	                        </div>
-	                      )}
-	                    </div>
-	                  </div>
-	                )}
-	
-	                {choices.includes("Other") && (
-	                  <div className="mt-4">
-	                    <label className="mb-1 block text-sm font-medium text-neutral-700">
-	                      Specify change <span className="text-red-500">*</span>
-	                    </label>
-	                    <input
-	                      type="text"
-	                      className="w-full rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
-	                      placeholder="Type your custom change…"
-	                      value={otherText}
-	                      onChange={(e) => setOtherText(e.target.value)}
-	                    />
-	                  </div>
-	                )}
-	              </div>
-	            )}
-	
-	            {/* Step 3: remarks */}
-	            {!!choices.length && (
-	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	                <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
-	                <textarea
-	                  rows={4}
-	                  className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
-	                  placeholder="Include brief context so OM can review faster..."
-	                  value={remarks}
-	                  onChange={(e) => setRemarks(e.target.value)}
-	                />
+                  {hasSecond ? (
+                    <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
+                      <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
+                      <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
+                      <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">
+                      <div className="col-span-3">No second meeting</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+  
+              {/* Step 1: choose what to change */}
+              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-neutral-800">1) What would you like to change?</div>
+                    <div className="mt-0.5 text-sm text-neutral-500">Select one or more options.</div>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => toggle(opt)}
+                      className={cls(
+                        "rounded-xl border px-3 py-2 text-sm",
+                        "transition-colors",
+                        choices.includes(opt)
+                          ? "border-emerald-600 bg-emerald-50 text-emerald-800"
+                          : "border-neutral-300 bg-white hover:bg-neutral-50"
+                      )}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+  
+              {/* Step 2: details */}
+              {(mustTime || mustDay || choices.includes("Other")) && (
+                <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                  <div className="text-sm font-semibold text-neutral-800">2) Provide the new schedule/details</div>
+                  <div className="mt-0.5 text-sm text-neutral-500">
+                    For paired schedules, Meeting 1 and Meeting 2 are submitted together.
+                  </div>
+  
+                  {mustTime && (
+                    <div className="mt-4">
+                      <div className="mb-2 text-sm font-medium text-neutral-700">New time slot</div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+                          <Dropdown
+                            value={selTime1}
+                            onChange={setSelTime1}
+                            options={filteredTimeSlots1}
+                            placeholder="— Select a time —"
+                          />
+                        </div>
+                        {hasSecond && (
+                          <div>
+                            <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+                            <Dropdown
+                              value={selTime2}
+                              onChange={setSelTime2}
+                              options={filteredTimeSlots2}
+                              placeholder="— Select a time —"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+  
+                  {mustDay && (
+                    <div className="mt-4">
+                      <div className="mb-2 text-sm font-medium text-neutral-700">New class day</div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+                          <Dropdown
+                            value={selDay1}
+                            onChange={(v) => setSelDay1(v as DayLong)}
+                            options={filteredDays1}
+                            placeholder="— Select a day —"
+                          />
+                        </div>
+                        {hasSecond && (
+                          <div>
+                            <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+                            <Dropdown
+                              value={selDay2}
+                              onChange={(v) => setSelDay2(v as DayLong)}
+                              options={filteredDays2}
+                              placeholder="— Select a day —"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+  
+                  {choices.includes("Other") && (
+                    <div className="mt-4">
+                      <label className="mb-1 block text-sm font-medium text-neutral-700">
+                        Specify change <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+                        placeholder="Type your custom change…"
+                        value={otherText}
+                        onChange={(e) => setOtherText(e.target.value)}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+  
+              {/* Step 3: remarks */}
+              {!!choices.length && (
+                <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                  <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
+                  <textarea
+                    rows={4}
+                    className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+                    placeholder="Include brief context so OM can review faster..."
+                    value={remarks}
+                    onChange={(e) => setRemarks(e.target.value)}
+                  />
                 {!remarks.trim() && (
                   <div className="mt-1 text-xs text-red-600">Remarks are required to send this RFC.</div>
                 )}
-	              </div>
-	            )}
-	          </div>
-	        )}
-	      </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
-	      {/* Footer */}
-	      {forceConversationOnly ? (
-	        <div className="p-6 pt-0 flex items-center justify-end">
-	          <button
-	            onClick={onClose}
-	            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
-	          >
-	            Close
-	          </button>
-	        </div>
-	      ) : (
-	        <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
+        {/* Footer */}
+        {forceConversationOnly ? (
+          <div className="p-6 pt-0 flex items-center justify-end">
+            <button
+              onClick={onClose}
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+            >
+              Close
+            </button>
+          </div>
+        ) : (
+          <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
             <button
               onClick={onClose}
               className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
@@ -3900,7 +3895,7 @@ function ChangeRequestModal({
             } finally {
               onClose();
             }
-	          }}
+            }}
 
               className={cls(
                 "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
@@ -3912,8 +3907,8 @@ function ChangeRequestModal({
               <SendIcon className="h-4 w-4" strokeWidth={2.2} />
               Send
             </button>
-	        </div>
-	      )}
+          </div>
+        )}
       </div>
       </div>
     </>

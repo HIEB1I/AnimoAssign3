@@ -47,6 +47,7 @@ import {
   setApoOmSubmitWindow,
   downloadBlob,
   exportOMSC_Pdf,
+  type ApoSpecialClassUpdatePayload,
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem,
@@ -887,6 +888,12 @@ function specialClassSlotTime(slot: any): string {
 function buildGroupedSpecialClassRows(input: SpecialClassRow[]): SpecialClassGroupRow[] {
   const groups = new Map<string, SpecialClassRow[]>();
 
+  const hasRealStudent = (row: SpecialClassRow) => {
+    const name = specialClassStudentName(row).trim();
+    const num = specialClassStudentNumber(row).trim();
+    return Boolean((name && name !== "—") || num);
+  };
+
   const slotSig = (slot: any) => {
     if (!slot) return "";
     return [
@@ -961,13 +968,14 @@ function buildGroupedSpecialClassRows(input: SpecialClassRow[]): SpecialClassGro
       const scheduleEntries = Array.isArray(primary?.schedule_entries) ? primary.schedule_entries : [];
       const slot1 = primary?.slot1 ?? scheduleEntries[0] ?? null;
       const slot2 = primary?.slot2 ?? scheduleEntries[1] ?? null;
+      const realStudentRows = sorted.filter((row) => hasRealStudent(row));
       return {
         ...(primary as any),
         group_key: groupKey,
         primary_special_id: String(primary?.special_id ?? "").trim(),
         special_ids: sorted.map((row) => String(row?.special_id ?? "").trim()).filter(Boolean),
-        count: sorted.length,
-        students: sorted.map((row) => ({
+        count: realStudentRows.length,
+        students: realStudentRows.map((row) => ({
           special_id: String(row?.special_id ?? "").trim(),
           student_name: specialClassStudentName(row),
           student_number: specialClassStudentNumber(row) || undefined,
@@ -2143,21 +2151,11 @@ const loadOfferings = async () => {
     setScErr(null);
 
     try {
-      const slotBase = [_slotFromRow(row as any, 1), _slotFromRow(row as any, 2)]
-        .filter((slot) => slot && typeof slot === "object")
-        .map((slot) => ({ ...slot }));
-
-      const next = slotBase.filter((slot: any) => {
-        const scheduleId = String(slot?.schedule_id ?? "").trim();
-        const day = String(slot?.day ?? "").trim();
-        const start = String(slot?.start_time ?? "").trim();
-        const end = String(slot?.end_time ?? "").trim();
-        return Boolean(scheduleId || (day && start && end));
-      });
-
-      if (next.length === 0) {
-        throw new Error("Missing special class slot identifiers for room save.");
-      }
+      const seBase =
+        Array.isArray(row.schedule_entries) && row.schedule_entries.length > 0
+          ? row.schedule_entries
+          : [row.slot1, row.slot2].filter(Boolean);
+      const next = [...(seBase as any[])].map((x) => ({ ...x }));
 
       const resolveRoomLabel = (specialId: string, idx: 1 | 2, roomId: string | null) => {
         const rid = String(roomId || "").trim();
@@ -2196,6 +2194,24 @@ const loadOfferings = async () => {
         next[1].room_name = lab.room_name;
       }
 
+      const normalizedEntries: NonNullable<
+        ApoSpecialClassUpdatePayload["schedule_entries"]
+      > = [];
+      for (const x of next as any[]) {
+        const entry: NonNullable<ApoSpecialClassUpdatePayload["schedule_entries"]>[number] = {
+          schedule_id: x?.schedule_id ?? null,
+          day: x?.day ?? null,
+          start_time: x?.start_time ?? null,
+          end_time: x?.end_time ?? null,
+          room_type: x?.room_type ?? null,
+          room_id: x?.room_id ?? null,
+        };
+        const hasMeaningfulValue = Object.values(entry).some(
+          (value) => value !== null && String(value ?? "").trim() !== ""
+        );
+        if (hasMeaningfulValue) normalizedEntries.push(entry);
+      }
+
       await updateApoSpecialClassRow(userId, {
         special_id: sid,
         special_ids: targetIds,
@@ -2205,12 +2221,9 @@ const loadOfferings = async () => {
             (row as any)?.section_id ??
             (row as any)?.section?.section_id ??
             (Array.isArray((row as any)?.source_rows)
-              ? (() => {
-                  const hit = (row as any).source_rows.find((r: any) =>
-                    String(r?.section_id ?? r?.section?.section_id ?? "").trim()
-                  );
-                  return hit?.section_id ?? hit?.section?.section_id ?? "";
-                })()
+              ? (row as any).source_rows.find((r: any) =>
+                  String(r?.section_id ?? r?.section?.section_id ?? "").trim()
+                )?.section_id
               : "") ??
             ""
           ).trim() || undefined,
@@ -2240,14 +2253,7 @@ const loadOfferings = async () => {
           ).trim() || undefined,
         section_code: scEditSectionCode,
         remarks: scEditRemarks,
-        schedule_entries: next.map((x) => ({
-          schedule_id: x?.schedule_id ?? null,
-          day: x?.day ?? null,
-          start_time: x?.start_time ?? null,
-          end_time: x?.end_time ?? null,
-          room_type: x?.room_type ?? null,
-          room_id: x?.room_id ?? null,
-        })),
+        schedule_entries: normalizedEntries,
       });
 
       setScRows((prev) =>
