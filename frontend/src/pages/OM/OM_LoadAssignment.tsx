@@ -8130,10 +8130,7 @@ const courseCodeToInfo = useMemo(() => {
                                   />
                                 ) : (
                                   <span>
-                                    {displayTimeFromOptions(
-                                      r.begin1,
-                                      TIME_BEGIN_OPTIONS
-                                    ) || "—"}
+                                    {displayBeginTimeOnly(r.begin1) || "—"}
                                   </span>
                                 )}
                               </td>
@@ -8208,10 +8205,7 @@ const courseCodeToInfo = useMemo(() => {
                                   />
                                 ) : (
                                   <span>
-                                    {displayTimeFromOptions(
-                                      r.begin2,
-                                      TIME_BEGIN_OPTIONS
-                                    ) || "—"}
+                                    {displayBeginTimeOnly(r.begin2) || "—"}
                                   </span>
                                 )}
                               </td>
