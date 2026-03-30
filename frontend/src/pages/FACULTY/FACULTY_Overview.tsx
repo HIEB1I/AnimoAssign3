@@ -816,6 +816,12 @@ type TLItemStudentReasonPair = {
   reason: string;
 };
 
+type TLItemReasonGroup = {
+  reason: string;
+  students: string[];
+  pair_keys: string[];
+};
+
 type TLItem = {
   section_id: string;
   course_id?: string;
@@ -830,6 +836,7 @@ type TLItem = {
   reason?: string;
   reasons?: string[];
   student_reason_pairs?: TLItemStudentReasonPair[];
+  reason_groups?: TLItemReasonGroup[];
   student_count?: number;
   is_serviced?: boolean;
   serviced_department?: string;
@@ -1455,6 +1462,27 @@ const [isAccepting, setIsAccepting] = useState(false);
     [isUnassignedRoomLabel]
   );
 
+  const openSpecialStudentEaf = useCallback((e: React.MouseEvent, pair?: Partial<TLItemStudentReasonPair> | null) => {
+    e.stopPropagation();
+
+    const specialId = String(pair?.special_id || "").trim();
+    if (!specialId) {
+      onToast?.("warning", "No EAF is linked to this student request.", "EAF unavailable");
+      return;
+    }
+
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      const userId = String(raw.userId || raw.user_id || raw.id || "").trim();
+      if (!userId) throw new Error("User is not logged in");
+
+      const url = `/api/faculty/special-class/eaf?user_id=${encodeURIComponent(userId)}&special_id=${encodeURIComponent(specialId)}`;
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (err: any) {
+      onToast?.("error", err?.message || "Failed to open EAF.", "Action failed");
+    }
+  }, [onToast]);
+
   const openEditSpecial = async (it: any) => {
     try {
       const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
@@ -1767,11 +1795,31 @@ const scheduleFinalLabel = (() => {
             if (!pairByKey.has(dedupeKey)) pairByKey.set(dedupeKey, pair);
           });
         });
-        const studentReasonPairs = Array.from(pairByKey.values()).sort((a, b) =>
-          `${a.student}|${a.special_id || ""}`.localeCompare(`${b.student}|${b.special_id || ""}`)
-        );
+        const studentReasonPairs = Array.from(pairByKey.values()).sort((a, b) => {
+          const reasonCompare = String(a.reason || "").localeCompare(String(b.reason || ""), undefined, {
+            sensitivity: "base",
+          });
+          if (reasonCompare !== 0) return reasonCompare;
+          return `${a.student}|${a.special_id || ""}`.localeCompare(`${b.student}|${b.special_id || ""}`, undefined, {
+            sensitivity: "base",
+          });
+        });
+        const reasonGroupMap = new Map<string, TLItemReasonGroup>();
+        studentReasonPairs.forEach((pair, pairIndex) => {
+          const reasonKey = String(pair.reason || "").trim() || "Unspecified";
+          if (!reasonGroupMap.has(reasonKey)) {
+            reasonGroupMap.set(reasonKey, { reason: reasonKey, students: [], pair_keys: [] });
+          }
+          const group = reasonGroupMap.get(reasonKey)!;
+          const studentName = String(pair.student || "").trim();
+          if (studentName && !group.students.includes(studentName)) {
+            group.students.push(studentName);
+          }
+          group.pair_keys.push(`${pair.special_id || reasonKey}-${pairIndex}`);
+        });
+        const reasonGroups = Array.from(reasonGroupMap.values());
         const students = studentReasonPairs.map((pair) => pair.student).filter(Boolean);
-        const reasons = studentReasonPairs.map((pair) => pair.reason);
+        const reasons = reasonGroups.map((group) => group.reason);
         const specialIds = Array.from(new Set(items.flatMap((it) => collectSpecialIds(it))));
         const backendStudentCount = Math.max(
           0,
@@ -1791,6 +1839,7 @@ const scheduleFinalLabel = (() => {
           special_id: specialIds[0] || String((base as any)?.special_id || ""),
           special_ids: specialIds,
           student_reason_pairs: studentReasonPairs,
+          reason_groups: reasonGroups,
           students,
           reasons,
           student: students.join("\n"),
@@ -2392,6 +2441,17 @@ const scheduleFinalLabel = (() => {
 
                 const facStatus = String((it as any)?.special_faculty_status || "PENDING").toUpperCase();
                 const isPending = facStatus !== "ACCEPTED";
+                const reasonGroups = ((((it as any)?.reason_groups || []) as TLItemReasonGroup[]).length
+                  ? (((it as any)?.reason_groups || []) as TLItemReasonGroup[])
+                  : [{
+                      reason: "Unspecified",
+                      students: ((((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
+                        .filter((pair) => String(pair?.student || "").trim())
+                        .map((pair) => String(pair.student || "").trim())
+                        .filter(Boolean)),
+                      pair_keys: [],
+                    }]
+                ).filter((group) => Array.isArray(group.students) && group.students.length > 0);
 
                 const onAcceptSpecial = async (e: React.MouseEvent) => {
                   e.stopPropagation();
@@ -2503,23 +2563,51 @@ const scheduleFinalLabel = (() => {
                         <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">
                           {`${Number((it as any)?.student_count ?? 0)} student${Number((it as any)?.student_count ?? 0) === 1 ? "" : "s"}`}
                         </div>
-                        <div className="mt-1 space-y-1 text-[12px] text-gray-700">
-                          {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
-                            .filter((pair) => String(pair?.student || "").trim())
-                            .map((pair, studentIdx) => (
-                              <div key={`${pair.special_id || pair.student}-${studentIdx}`} className="break-words whitespace-normal">{pair.student}</div>
-                            ))}
+                        <div className="mt-2 space-y-3 text-[12px] text-gray-700">
+                          {reasonGroups.map((group, groupIdx) => (
+                            <div
+                              key={`${String(group.reason || "Unspecified")}-${groupIdx}`}
+                              className="rounded-lg border border-transparent px-0.5 py-0.5"
+                            >
+                              <div className="space-y-1">
+                                {group.students.map((student, studentIdx) => {
+                                  const pair = (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).find((candidate) => {
+                                    const candidateName = String(candidate?.student || "").trim();
+                                    const currentName = String(student || "").trim();
+                                    const reasonName = String(group.reason || "").trim();
+                                    const candidateReason = String(candidate?.reason || "").trim() || "Unspecified";
+                                    return candidateName === currentName && candidateReason === reasonName;
+                                  });
+
+                                  return (
+                                    <button
+                                      key={`${group.pair_keys?.[studentIdx] || `${group.reason}-${student}-${studentIdx}`}`}
+                                      type="button"
+                                      onClick={(e) => openSpecialStudentEaf(e, pair)}
+                                      className="break-words whitespace-normal leading-relaxed text-left text-emerald-700 hover:text-emerald-800 hover:underline"
+                                      title="Open EAF"
+                                    >
+                                      {student}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
                         </div>
                       </div>
                     </td>
 
                     <td className="px-3 py-3 align-top">
-                      <div className="space-y-1 text-[12px] text-gray-800 break-words whitespace-normal">
-                        {(((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
-                          .filter((pair) => String(pair?.student || "").trim())
-                          .map((pair, reasonIdx) => (
-                            <div key={`${pair.special_id || pair.reason}-${reasonIdx}`}>{pair.reason || ""}</div>
-                          ))}
+                      <div className="mt-[30px] space-y-3 text-[12px] text-gray-800 break-words whitespace-normal">
+                        {reasonGroups.map((group, groupIdx) => (
+                          <div
+                            key={`${String(group.reason || "Unspecified")}-${groupIdx}`}
+                            className="rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 leading-relaxed"
+                          >
+                            {group.reason || "Unspecified"}
+                          </div>
+                        ))}
                       </div>
                     </td>
 
