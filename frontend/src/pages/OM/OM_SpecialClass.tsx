@@ -1,5 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Search as SearchIcon, Edit, Check, ChevronDown, Eye, X, Download, MessageSquareText, Send } from "lucide-react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { Search as SearchIcon, Edit, Check, ChevronDown, X, Download, MessageSquareText, Send, AlertTriangle, CalendarClock, Info, Plus, Trash2 } from "lucide-react";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
 import { getSessionUserId } from "../../lib/session";
@@ -7,17 +7,125 @@ import {
   getOMSC_Options,
   listOMSC,
   updateOMSC,
-  getOMSC_SchedulePresets,
   getOMSC_Detail,
   exportOMSC_Pdf,
+  createOMSC,
+  getOMSC_EligibleStudents,
+  assignOMSCStudent,
+  unassignOMSCStudent,
+  deleteOMSCClass,
+  getChairSCOptions,
+  listChairSC,
+  updateChairSC,
+  getChairSC_Detail,
+  exportChairSC_Pdf,
+  createChairSC,
+  getChairSC_EligibleStudents,
+  assignChairSCStudent,
+  unassignChairSCStudent,
+  deleteChairSCClass,
   getOmLoadAssignmentRfc,
   respondOmLoadAssignmentRfc,
   downloadBlob,
+  startOMSCWindow,
   type OMSpecialClassRow,
   type OMSpecialClassOptions,
-  type OMSCSchedulePreset,
   type OMSpecialClassDetail,
+  type OMSpecialClassCandidate,
 } from "../../api";
+
+function useCountdown(targetISO: string) {
+  const [now, setNow] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const target = new Date(targetISO || 0).getTime();
+  const diff = Math.max(0, target - now);
+  const past = targetISO ? now > target : false;
+  const d = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const h = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const m = Math.floor((diff / (1000 * 60)) % 60);
+  const s = Math.floor(diff / 1000) % 60;
+  const label = past ? "Deadline passed" : `${d}d ${h}h ${m}m ${s}s`;
+  return { past, label };
+}
+
+function DeadlineBanner({
+  deadlineISO,
+  className,
+  emptyMessage,
+}: {
+  deadlineISO: string;
+  className?: string;
+  emptyMessage?: string;
+}) {
+  if (!deadlineISO) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-700", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-slate-200 text-slate-700">
+            <Info className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Submission Window Not Started</div>
+            <div className="text-xs text-slate-600">
+              {emptyMessage || "Set a deadline above. Until then, students will not be able to submit requests for this term."}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  const { past: deadlinePassed, label: deadlineLabel } = useCountdown(deadlineISO);
+
+  if (deadlinePassed) {
+    return (
+      <div className={cls("mb-4 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-900", className)}>
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-red-200 text-red-900">
+            <AlertTriangle className="h-5 w-5" />
+          </div>
+          <div>
+            <div className="font-semibold">Editing Locked</div>
+            <div className="text-xs text-red-800">Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"}</div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className={cls("mb-4 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-950", className)}>
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 grid h-9 w-9 place-items-center rounded-full bg-amber-200 text-amber-900">
+          <CalendarClock className="h-5 w-5" />
+        </div>
+        <div>
+          <div className="font-semibold">Submission Deadline Approaching</div>
+          <div className="text-xs text-amber-900">
+            Deadline: {deadlineISO ? new Date(deadlineISO).toLocaleString() : "—"} · {deadlineISO ? deadlineLabel : "TBA"}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function toLocalInput(isoOrDate: string) {
+  const d = new Date(isoOrDate);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function nextMinuteFrom(date = new Date()) {
+  const d = new Date(date);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  return d;
+}
 
 /* ---------------- RFC Conversation Modal (Special Class) ---------------- */
 function SpecialConversationModal({
@@ -257,6 +365,131 @@ const DAY_FROM_LABEL: Record<DayLabel, DayCode> = {
   Saturday: "S",
 };
 
+const DAY_PAIR: Record<DayCode, DayCode> = {
+  M: "H",
+  H: "M",
+  T: "F",
+  F: "T",
+  W: "S",
+  S: "W",
+};
+
+type FacultyBusySlot = {
+  section_id?: string;
+  day: string;
+  begin: string;
+  end: string;
+};
+
+type FacultyAvailabilityMap = Record<string, FacultyBusySlot[]>;
+
+const normalizeBusyDay = (value?: string): DayCode | "" => {
+  const raw = String(value || "").trim().toUpperCase();
+  if (!raw) return "";
+  if (raw.startsWith("TH") || raw === "H") return "H";
+  const c = raw[0] as DayCode;
+  return ["M", "T", "W", "H", "F", "S"].includes(c) ? c : "";
+};
+
+const timeToMinutes = (value?: string): number | null => {
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+  const hhmm = raw.includes(":") ? raw : raw.length === 4 ? `${raw.slice(0, 2)}:${raw.slice(2)}` : raw;
+  const parts = hhmm.split(":");
+  if (parts.length !== 2) return null;
+  const hh = Number(parts[0]);
+  const mm = Number(parts[1]);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
+  return hh * 60 + mm;
+};
+
+const rangesOverlap = (beginA: number, endA: number, beginB: number, endB: number) =>
+  beginA < endB && beginB < endA;
+
+const getMeetingEnd = (begin?: string, fallback?: string) => {
+  const b = String(begin || "").trim();
+  if (!b) return String(fallback || "").trim();
+  const found = GE_TIME_SLOTS.find((slot) => slot.start === b);
+  return found?.end || String(fallback || "").trim();
+};
+
+const buildMeetingSlots = (edit: {
+  day1?: string;
+  begin1?: string;
+  end1?: string;
+  day2?: string;
+  begin2?: string;
+  end2?: string;
+}) => {
+  const meetings: Array<{ slot: 1 | 2; day: DayCode; begin: string; end: string; beginMinutes: number; endMinutes: number }> = [];
+  ([1, 2] as const).forEach((slot) => {
+    const day = normalizeBusyDay(edit[`day${slot}` as const]) as DayCode | "";
+    const begin = String(edit[`begin${slot}` as const] || "").trim();
+    const end = getMeetingEnd(begin, String(edit[`end${slot}` as const] || "").trim());
+    const b = timeToMinutes(begin);
+    const e = timeToMinutes(end);
+    if (!day || b == null || e == null || e <= b) return;
+    meetings.push({ slot, day, begin, end, beginMinutes: b, endMinutes: e });
+  });
+  return meetings;
+};
+
+const facultyHasConflictForMeetings = ({
+  facultyId,
+  meetings,
+  busySlots,
+  excludeSectionId,
+}: {
+  facultyId?: string | null;
+  meetings: ReturnType<typeof buildMeetingSlots>;
+  busySlots: FacultyAvailabilityMap;
+  excludeSectionId?: string;
+}) => {
+  const fid = String(facultyId || "").trim();
+  if (!fid || meetings.length === 0) return false;
+  const excluded = String(excludeSectionId || "").trim();
+  return (busySlots[fid] || []).some((slot) => {
+    if (excluded && String(slot.section_id || "").trim() === excluded) return false;
+    const day = normalizeBusyDay(slot.day);
+    const begin = timeToMinutes(slot.begin);
+    const end = timeToMinutes(slot.end);
+    if (!day || begin == null || end == null || end <= begin) return false;
+    return meetings.some((meeting) => meeting.day === day && rangesOverlap(meeting.beginMinutes, meeting.endMinutes, begin, end));
+  });
+};
+
+const slotOptionIsAvailable = ({
+  facultyId,
+  day,
+  begin,
+  peerMeetings,
+  busySlots,
+  excludeSectionId,
+}: {
+  facultyId?: string | null;
+  day?: string;
+  begin?: string;
+  peerMeetings: ReturnType<typeof buildMeetingSlots>;
+  busySlots: FacultyAvailabilityMap;
+  excludeSectionId?: string;
+}) => {
+  const normDay = normalizeBusyDay(day);
+  const cleanBegin = String(begin || "").trim();
+  const end = getMeetingEnd(cleanBegin, "");
+  const beginMinutes = timeToMinutes(cleanBegin);
+  const endMinutes = timeToMinutes(end);
+  if (!normDay || beginMinutes == null || endMinutes == null || endMinutes <= beginMinutes) return true;
+  return !facultyHasConflictForMeetings({
+    facultyId,
+    meetings: [
+      ...peerMeetings,
+      { slot: 1, day: normDay as DayCode, begin: cleanBegin, end, beginMinutes, endMinutes },
+    ],
+    busySlots,
+    excludeSectionId,
+  });
+};
+
 const GE_TIME_SLOTS = [
   { label: "07:30 - 09:00", start: "0730", end: "0900" },
   { label: "08:00 - 10:00", start: "0800", end: "1000" },
@@ -289,11 +522,45 @@ function prettyHHMM(hhmm?: string) {
   return `${s.slice(0, 2)}:${s.slice(2)}`;
 }
 
-function scheduleTextFromRow(r: Partial<OMSpecialClassRow>) {
-  const parts: string[] = [];
-  if (r.day1 && r.begin1 && r.end1) parts.push(`${r.day1} ${r.begin1}-${r.end1}`);
-  if (r.day2 && r.begin2 && r.end2) parts.push(`${r.day2} ${r.begin2}-${r.end2}`);
-  return parts.join("; ");
+
+type ScheduleSlotView = {
+  key: string;
+  day: string;
+  time: string;
+};
+
+function buildScheduleSlotViews(r: Partial<OMSpecialClassRow>) {
+  const slots: ScheduleSlotView[] = [];
+
+  const addSlot = (slot: 1 | 2) => {
+    const day = String(slot === 1 ? r.day1 || "" : r.day2 || "").trim();
+    const beginRaw = String(slot === 1 ? r.begin1 || "" : r.begin2 || "").trim();
+    const endRaw = String(slot === 1 ? r.end1 || "" : r.end2 || "").trim();
+    const begin = prettyHHMM(beginRaw);
+    const end = prettyHHMM(endRaw);
+    const hasAnyValue = day || beginRaw || endRaw;
+
+    if (!hasAnyValue) return;
+
+    slots.push({
+      key: `slot-${slot}`,
+      day: day || "—",
+      time: begin && end ? `${begin}–${end}` : "—",
+    });
+  };
+
+  addSlot(1);
+  addSlot(2);
+
+  if (slots.length) return slots;
+
+  return [
+    {
+      key: "slot-empty",
+      day: "—",
+      time: "—",
+    },
+  ];
 }
 
 function formatDate(dt?: string) {
@@ -303,7 +570,6 @@ function formatDate(dt?: string) {
   return d.toLocaleString();
 }
 
-const CLEAR_SCHEDULE_LABEL = "Clear schedule";
 const DAY_PLACEHOLDER = "Select day…";
 
 /** SelectBox-styled combo input (type + dropdown in ONE box) */
@@ -392,6 +658,8 @@ const STATUS_PILL: Record<string, string> = {
   "Forwarded To Department": "bg-yellow-100 text-yellow-800",
   Approved: "bg-green-100 text-green-800",
   Rejected: "bg-red-100 text-red-800",
+  "Convert to Regular Class": "bg-blue-100 text-blue-800",
+  Mixed: "bg-slate-100 text-slate-700",
 };
 function pillClass(status?: string) {
   if (!status) return "bg-gray-100 text-gray-600";
@@ -416,7 +684,132 @@ function DetailRow({ label, value }: { label: string; value: any }) {
   );
 }
 
-export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessageIcon?: boolean } = {}) {
+
+
+type SpecialClassGroupStudent = {
+  special_id: string;
+  student_name: string;
+  student_number?: string | number;
+  faculty_id?: string | null;
+  faculty_name?: string;
+  rfc_needs_om?: boolean;
+  term_id: string;
+  status?: string;
+  course_id?: string;
+};
+
+type SpecialClassGroupRow = Partial<OMSpecialClassRow> & {
+  group_key: string;
+  primary_special_id: string;
+  special_ids: string[];
+  count: number;
+  students: SpecialClassGroupStudent[];
+};
+
+function buildGroupedRows(input: OMSpecialClassRow[]): SpecialClassGroupRow[] {
+  const groups = new Map<string, OMSpecialClassRow[]>();
+  input.forEach((row) => {
+    const sectionId = String(row.section_id || '').trim();
+    const pendingAnchorId = String((row as any).pending_anchor_special_id || '').trim();
+    const generated = Boolean(row.generated_from_class_retention);
+    const manual = Boolean(row.manual_special_class);
+    const courseId = String(row.course_id || '').trim();
+    const key = sectionId
+      ? `SEC:${sectionId}`
+      : pendingAnchorId
+      ? `PENDANCHOR:${pendingAnchorId}`
+      : generated
+      ? `RET:${String(row.retention_id || row.special_id || row.course_id || '').trim()}`
+      : manual
+      ? `MAN:${String(row.special_id || row.course_id || '').trim()}`
+      : `PENDING:${courseId || String(row.special_id || '').trim()}`;
+    if (!key) return;
+    const arr = groups.get(key) || [];
+    arr.push(row);
+    groups.set(key, arr);
+  });
+
+  const uniq = (vals: Array<any>) => Array.from(new Set(vals.map((v) => String(v ?? '').trim()).filter(Boolean)));
+  const preferredApprovedRow = (rows: OMSpecialClassRow[]) => rows.find((r) => String(r.status || '').trim() === 'Approved' && String(r.section_id || '').trim()) || rows.find((r) => String(r.section_id || '').trim()) || rows[0];
+  const consensusText = (rows: OMSpecialClassRow[], pick: (r: OMSpecialClassRow) => any, mixedLabel = 'Multiple') => {
+    const vals = uniq(rows.map(pick));
+    if (vals.length <= 1) return vals[0] || '';
+    const approvedValue = String(pick(preferredApprovedRow(rows)) ?? '').trim();
+    if (approvedValue) return approvedValue;
+    return mixedLabel;
+  };
+  const consensusNullable = (rows: OMSpecialClassRow[], pick: (r: OMSpecialClassRow) => any) => {
+    const vals = uniq(rows.map(pick));
+    if (vals.length <= 1) return vals[0] || null;
+    const approvedValue = String(pick(preferredApprovedRow(rows)) ?? '').trim();
+    return approvedValue || null;
+  };
+  const consensusSchedule = (rows: OMSpecialClassRow[], key: keyof OMSpecialClassRow) => {
+    const vals = uniq(rows.map((r) => (r as any)[key]));
+    if (vals.length <= 1) return vals[0] || '';
+    return String((preferredApprovedRow(rows) as any)?.[key] || '').trim();
+  };
+
+  return Array.from(groups.entries())
+    .map(([groupKey, items]) => {
+      const rows = [...items].sort((a, b) => String(a.student_name || '').localeCompare(String(b.student_name || '')));
+      const first = preferredApprovedRow(rows) || rows[0];
+      const approvedRow = preferredApprovedRow(rows);
+      const statuses = uniq(rows.map((r) => r.status));
+      const status = statuses.length <= 1 ? (statuses[0] || '') : (String(approvedRow?.status || '').trim() || 'Mixed');
+      const remarks = consensusText(rows, (r) => r.remarks, '');
+      const facultyId = consensusNullable(rows, (r) => r.faculty_id) as string | null;
+      const applicantRows = rows.filter((r) => !r.generated_from_class_retention && !r.manual_special_class && !!String(r.user_id || '').trim());
+      return {
+        ...first,
+        group_key: groupKey,
+        primary_special_id: String(first.special_id || ''),
+        special_ids: rows.map((r) => String(r.special_id || '')).filter(Boolean),
+        count: applicantRows.length,
+        students: applicantRows.map((r) => ({
+          special_id: String(r.special_id || ''),
+          student_name: String(r.student_name || ''),
+          student_number: r.student_number,
+          faculty_id: r.faculty_id ?? null,
+          faculty_name: r.faculty_name,
+          rfc_needs_om: Boolean((r as any).rfc_needs_om),
+          term_id: String(r.term_id || ''),
+          status: r.status,
+          course_id: String(r.course_id || ''),
+        })),
+        status,
+        remarks,
+        faculty_id: facultyId,
+        faculty_name: facultyId ? consensusText(rows, (r) => r.faculty_name, 'Multiple') : (consensusText(rows, (r) => r.faculty_name, '') || 'UNASSIGNED'),
+        section_id: consensusNullable(rows, (r) => r.section_id) as string | null,
+        section_code: consensusText(rows, (r) => r.section_code, 'Multiple'),
+        day1: consensusSchedule(rows, 'day1') as any,
+        begin1: consensusSchedule(rows, 'begin1'),
+        end1: consensusSchedule(rows, 'end1'),
+        day2: consensusSchedule(rows, 'day2') as any,
+        begin2: consensusSchedule(rows, 'begin2'),
+        end2: consensusSchedule(rows, 'end2'),
+        room_id1: consensusNullable(rows, (r) => r.room_id1),
+        room1: consensusText(rows, (r) => r.room1, 'Multiple'),
+        room_id2: consensusNullable(rows, (r) => r.room_id2),
+        room2: consensusText(rows, (r) => r.room2, 'Multiple'),
+        rfc_needs_om: rows.some((r) => Boolean((r as any).rfc_needs_om)),
+        manual_special_class: rows.some((r) => Boolean(r.manual_special_class)),
+        pending_anchor_special_id: consensusNullable(rows, (r) => (r as any).pending_anchor_special_id),
+      } as SpecialClassGroupRow;
+    })
+    .sort((a, b) => String(a.course_code || '').localeCompare(String(b.course_code || '')) || String(a.section_code || '').localeCompare(String(b.section_code || '')) || String(a.course_title || '').localeCompare(String(b.course_title || '')));
+}
+
+export default function OM_SpecialClass({
+  hideMessageIcon = false,
+  deadlineReadOnly = false,
+  role = "om",
+}: {
+  hideMessageIcon?: boolean;
+  deadlineReadOnly?: boolean;
+  role?: "om" | "chair";
+} = {}) {
   const [status, setStatus] = useState("All Status");
   const [searchInput, setSearchInput] = useState("");
   const [q, setQ] = useState("");
@@ -425,10 +818,17 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
   const [statuses, setStatuses] = useState<string[]>(["All Status"]);
   const [activeTermLabel, setActiveTermLabel] = useState<string>("");
+  const [activeTerm, setActiveTerm] = useState<OMSpecialClassOptions["activeTerm"] | null>(null);
+  const [submissionWindow, setSubmissionWindow] = useState<{ openISO: string; deadlineISO: string }>({ openISO: "", deadlineISO: "" });
+  const [deadlineDraft, setDeadlineDraft] = useState("");
+  const [startingWindow, setStartingWindow] = useState(false);
 
   // Faculty
   const [facultyNames, setFacultyNames] = useState<string[]>(["UNASSIGNED"]);
   const [facultyNameToIdUpper, setFacultyNameToIdUpper] = useState<Record<string, string>>({});
+  const [facultyAvailability, setFacultyAvailability] = useState<FacultyAvailabilityMap>({});
+
+  const [courseOptions, setCourseOptions] = useState<Array<{ course_id: string; course_code: string; course_title?: string }>>([]);
 
   // Rooms (read-only display)
   const [roomIdToInfo, setRoomIdToInfo] = useState<
@@ -440,6 +840,48 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
   // table
   const [rows, setRows] = useState<OMSpecialClassRow[]>([]);
+  const effectiveFacultyAvailability = useMemo<FacultyAvailabilityMap>(() => {
+    const activeBlockingStatuses = new Set(["Forwarded To Department", "Approved"]);
+    const inactiveSectionIds = new Set<string>();
+    const activeSectionIds = new Set<string>();
+    const inactivePendingSpecialIds = new Set<string>();
+    const activePendingSpecialIds = new Set<string>();
+
+    rows.forEach((row) => {
+      const status = String(row.status || "").trim();
+      const facultyResponse = String(((row as any).faculty_response || (row as any).faculty_status || "")).trim().toUpperCase();
+      const scheduleCleared = Boolean((row as any).schedule_cleared);
+      const hasDirectSchedule = Boolean(
+        (String(row.day1 || "").trim() && String(row.begin1 || "").trim() && String(row.end1 || "").trim()) ||
+        (String(row.day2 || "").trim() && String(row.begin2 || "").trim() && String(row.end2 || "").trim())
+      );
+      const sectionId = String(row.section_id || "").trim();
+      const specialId = String(row.special_id || "").trim();
+      const blocks = activeBlockingStatuses.has(status) && !scheduleCleared && !["REJECTED", "REJECT"].includes(facultyResponse);
+
+      if (sectionId) {
+        if (blocks) activeSectionIds.add(sectionId);
+        else inactiveSectionIds.add(sectionId);
+      }
+      if (specialId && !sectionId && hasDirectSchedule) {
+        if (blocks) activePendingSpecialIds.add(specialId);
+        else inactivePendingSpecialIds.add(specialId);
+      }
+    });
+
+    const next: FacultyAvailabilityMap = {};
+    Object.entries(facultyAvailability || {}).forEach(([facultyId, slots]) => {
+      next[facultyId] = (slots || []).filter((slot) => {
+        const sectionId = String(slot.section_id || "").trim();
+        const specialId = String((slot as any).special_id || "").trim();
+
+        if (specialId && inactivePendingSpecialIds.has(specialId) && !activePendingSpecialIds.has(specialId)) return false;
+        if (sectionId && inactiveSectionIds.has(sectionId) && !activeSectionIds.has(sectionId)) return false;
+        return true;
+      });
+    });
+    return next;
+  }, [facultyAvailability, rows]);
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState("");
   const [errKind, setErrKind] = useState<"success" | "error">("error");
@@ -449,20 +891,48 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
   // edit
   const [editId, setEditId] = useState<string | null>(null);
+  const [editTargetIds, setEditTargetIds] = useState<string[]>([]);
   const [draft, setDraft] = useState<Partial<OMSpecialClassRow>>({});
   const [facultyInput, setFacultyInput] = useState<string>("");
 
-  // presets
-  const [presets, setPresets] = useState<OMSCSchedulePreset[]>([]);
-  const [presetChoice, setPresetChoice] = useState<string>("CUSTOM"); 
-  const [clearMode, setClearMode] = useState<"none" | "schedule" | "all">("none");
   const [didClearAll, setDidClearAll] = useState(false);
+
+  // add class
+  const [adding, setAdding] = useState(false);
+  const [addDraft, setAddDraft] = useState<Partial<OMSpecialClassRow>>({ status: "Forwarded To Department" });
+  const [addFacultyInput, setAddFacultyInput] = useState<string>("");
+
+  // student movement
+  const [pendingMove, setPendingMove] = useState<null | {
+    student: SpecialClassGroupStudent;
+    sourceGroupKey: string;
+    sourceSpecialId: string;
+    courseId: string;
+    courseLabel: string;
+    sourceSectionLabel: string;
+  }>(null);
+  const [inlineAssignState, setInlineAssignState] = useState<null | {
+    targetGroupKey: string;
+    targetSpecialId: string;
+    courseLabel: string;
+    sectionLabel: string;
+    candidates: OMSpecialClassCandidate[];
+    selectedStudentId: string;
+    loading: boolean;
+    mode: "add";
+  }>(null);
 
   // view modal
   const [viewOpen, setViewOpen] = useState(false);
   const [viewLoading, setViewLoading] = useState(false);
   const [viewErr, setViewErr] = useState("");
   const [viewData, setViewData] = useState<OMSpecialClassDetail | null>(null);
+
+  const confirmResolverRef = useRef<((v: boolean) => void) | null>(null);
+  const [confirmState, setConfirmState] = useState<
+    | { title: string; message: string; accent: "emerald" | "amber"; confirmText: string; note?: string }
+    | null
+  >(null);
 
   // RFC / conversation modal (Special Class)
   const [conv, setConv] = useState<{
@@ -482,13 +952,97 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     }
   }, []);
 
+  const isChair = role === "chair";
+
+  const apiFns = useMemo(() => ({
+    getOptions: isChair ? getChairSCOptions : getOMSC_Options,
+    list: isChair ? listChairSC : listOMSC,
+    update: isChair ? updateChairSC : updateOMSC,
+    detail: isChair ? getChairSC_Detail : getOMSC_Detail,
+    exportPdf: isChair ? exportChairSC_Pdf : exportOMSC_Pdf,
+    create: isChair ? createChairSC : createOMSC,
+    eligibleStudents: isChair ? getChairSC_EligibleStudents : getOMSC_EligibleStudents,
+    assignStudent: isChair ? assignChairSCStudent : assignOMSCStudent,
+    unassignStudent: isChair ? unassignChairSCStudent : unassignOMSCStudent,
+    deleteClass: isChair ? deleteChairSCClass : deleteOMSCClass,
+  }), [isChair]);
+
+  const modalCourseOptions = useMemo(() => {
+    const map = new Map<string, { course_id: string; course_code: string; course_title?: string }>();
+    (courseOptions || []).forEach((opt) => {
+      if (!opt?.course_id) return;
+      map.set(String(opt.course_id), opt);
+    });
+    (rows || []).forEach((row) => {
+      const cid = String(row.course_id || "").trim();
+      if (!cid || map.has(cid)) return;
+      map.set(cid, {
+        course_id: cid,
+        course_code: String(row.course_code || ""),
+        course_title: String(row.course_title || ""),
+      });
+    });
+    return Array.from(map.values()).sort((a, b) => `${a.course_code} ${a.course_title || ""}`.localeCompare(`${b.course_code} ${b.course_title || ""}`));
+  }, [courseOptions, rows]);
+
+  const modalCourseLabelToId = useMemo(() => Object.fromEntries(
+    modalCourseOptions.map((opt) => [
+      `${opt.course_code}${opt.course_title ? ` — ${opt.course_title}` : ""}`,
+      opt.course_id,
+    ])
+  ) as Record<string, string>, [modalCourseOptions]);
+
+  const modalCourseIdToLabel = useMemo(() => Object.fromEntries(
+    modalCourseOptions.map((opt) => [
+      opt.course_id,
+      `${opt.course_code}${opt.course_title ? ` — ${opt.course_title}` : ""}`,
+    ])
+  ) as Record<string, string>, [modalCourseOptions]);
+
   const toast = (message: string, kind?: "success" | "error") => {
-    // This screen uses an inline banner for feedback; keep it consistent.
     setErrKind(kind === "success" ? "success" : "error");
     setErr(message);
-    if (kind === "success") {
-      window.setTimeout(() => setErr(""), 2500);
-    }
+    if (kind === "success") window.setTimeout(() => setErr(""), 2500);
+  };
+
+  const candidateLabel = (candidate: Pick<OMSpecialClassCandidate, "student_name" | "student_number">) =>
+    `${candidate.student_name || ""}${candidate.student_number ? ` (${candidate.student_number})` : ""}`;
+
+  const visibleStudentsForRow = (row: SpecialClassGroupRow) => {
+    if (!pendingMove || pendingMove.sourceGroupKey !== row.group_key) return row.students;
+    return row.students.filter((student) => student.special_id !== pendingMove.student.special_id);
+  };
+
+  const visibleCountForRow = (row: SpecialClassGroupRow) => {
+    const baseCount = typeof row.count === "number" ? row.count : row.students.length;
+    if (!pendingMove || pendingMove.sourceGroupKey !== row.group_key) return baseCount;
+    return Math.max(0, baseCount - 1);
+  };
+
+  const canReceiveMovedStudent = (row: SpecialClassGroupRow) => {
+    if (!pendingMove) return false;
+    if (row.group_key === pendingMove.sourceGroupKey) return false;
+    if (String(row.course_id || "") !== pendingMove.courseId) return false;
+    if (!row.primary_special_id) return false;
+    return !!String(row.section_id || (row as any).assignment_id || (row as any).pending_anchor_special_id || "").trim();
+  };
+
+  const openConfirm = (payload: {
+    title: string;
+    message: string;
+    accent: "emerald" | "amber";
+    confirmText: string;
+    note?: string;
+  }) => new Promise<boolean>((resolve) => {
+    confirmResolverRef.current = resolve;
+    setConfirmState(payload);
+  });
+
+  const closeConfirm = (result: boolean) => {
+    const resolver = confirmResolverRef.current;
+    confirmResolverRef.current = null;
+    setConfirmState(null);
+    resolver?.(result);
   };
 
   const roomLabel = (r: Partial<OMSpecialClassRow>, slot: 1 | 2) => {
@@ -520,53 +1074,154 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     return parts.length ? parts.join(" • ") : undefined;
   };
 
+  type RoomCellItem = {
+    key: string;
+    label: string;
+    title?: string;
+  };
+
+  const roomCellItems = (r: Partial<OMSpecialClassRow>): RoomCellItem[] => {
+    const items: RoomCellItem[] = [];
+
+    const addSlot = (slot: 1 | 2) => {
+      const day = String(slot === 1 ? r.day1 || "" : r.day2 || "").trim();
+      const beginRaw = String(slot === 1 ? r.begin1 || "" : r.begin2 || "").trim();
+      const endRaw = String(slot === 1 ? r.end1 || "" : r.end2 || "").trim();
+      const roomRaw = String(slot === 1 ? r.room1 || "" : r.room2 || "").trim();
+      const roomId = String(slot === 1 ? r.room_id1 || "" : r.room_id2 || "").trim();
+      const hasAnyValue = day || beginRaw || endRaw || roomRaw || roomId;
+
+      if (!hasAnyValue) return;
+
+      items.push({
+        key: `room-${slot}`,
+        label: roomLabel(r, slot),
+        title: roomTitle(r, slot),
+      });
+    };
+
+    addSlot(1);
+    addSlot(2);
+
+    if (items.length) return items;
+
+    return [
+      {
+        key: 'room-empty',
+        label: 'TBA',
+      },
+    ];
+  };
+
+  const handleStartWindow = async () => {
+    if (startingWindow) return;
+
+    const deadlineDate = new Date(deadlineDraft);
+    if (!deadlineDraft || Number.isNaN(deadlineDate.getTime())) {
+      setErr("Please provide a valid deadline date and time.");
+      return;
+    }
+
+    const minDeadlineDate = nextMinuteFrom();
+    if (deadlineDate.getTime() < minDeadlineDate.getTime()) {
+      setErr(`Deadline must be at or after ${minDeadlineDate.toLocaleString()}.`);
+      return;
+    }
+
+    const openDate = new Date();
+
+    const ok = await openConfirm({
+      title: "Set submission deadline?",
+      message: `Set the submission deadline to ${deadlineDate.toLocaleString()}? This will apply immediately.`,
+      accent: "emerald",
+      confirmText: "Set deadline",
+      note: `Students will be able to submit immediately until the selected deadline. The earliest valid deadline is ${minDeadlineDate.toLocaleString()}.`,
+    });
+    if (!ok) return;
+
+    try {
+      setStartingWindow(true);
+      setErr("");
+      const data = await startOMSCWindow({
+        termId: activeTerm?.term_id,
+        openISO: openDate.toISOString(),
+        deadlineISO: deadlineDate.toISOString(),
+      });
+      if (!data?.ok || !data.submission_window) throw new Error("Failed to set submission window.");
+
+      setSubmissionWindow({
+        openISO: data.submission_window.openISO || "",
+        deadlineISO: data.submission_window.deadlineISO || "",
+      });
+      setDeadlineDraft(toLocalInput(data.submission_window.deadlineISO || deadlineDate.toISOString()));
+    } catch (e: any) {
+      setErr(e?.response?.data?.detail || e?.message || "Failed to set submission window.");
+    } finally {
+      setStartingWindow(false);
+    }
+  };
+
+  const loadOptions = async () => {
+    try {
+      const opt: OMSpecialClassOptions = await apiFns.getOptions();
+      if (!opt.ok) throw new Error("Failed to load options");
+      setStatuses(["All Status", ...(opt.statuses || [])]);
+
+      setActiveTerm(opt.activeTerm || null);
+      const ay = opt.activeTerm?.acad_year_start;
+      const tn = opt.activeTerm?.term_number;
+      setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
+      const win = opt.submission_window || {};
+      const nextWindow = { openISO: win.openISO || "", deadlineISO: win.deadlineISO || "" };
+      setSubmissionWindow(nextWindow);
+      if (nextWindow.deadlineISO) {
+        setDeadlineDraft(toLocalInput(nextWindow.deadlineISO));
+      } else {
+        const base = nextMinuteFrom();
+        const plus7 = new Date(base.getTime() + 7 * 24 * 60 * 60 * 1000);
+        setDeadlineDraft(toLocalInput(plus7.toISOString()));
+      }
+
+      const names = (opt.facultyOptions || [])
+        .map((f) => (f.faculty_name || "").trim())
+        .filter(Boolean);
+
+      const mapUpper: Record<string, string> = {};
+      (opt.facultyOptions || []).forEach((f) => {
+        const nm = (f.faculty_name || "").trim();
+        if (!nm) return;
+        mapUpper[nm.toUpperCase()] = f.faculty_id;
+      });
+
+      setFacultyNames(["UNASSIGNED", ...names]);
+      setFacultyNameToIdUpper(mapUpper);
+      setFacultyAvailability(((opt as any).facultyAvailability || {}) as FacultyAvailabilityMap);
+      setCourseOptions((((opt as any).courseOptions || []) as Array<{ course_id: string; course_code: string; course_title?: string }>));
+
+      const rm: Record<string, any> = {};
+      (opt.roomOptions || []).forEach((x: any) => {
+        const rid = String(x?.room_id || "").trim();
+        const rn = String(x?.room_number || "").trim();
+        if (!rid) return;
+        rm[rid] = {
+          room_number: rn,
+          building: x?.building,
+          capacity: x?.capacity,
+          room_type: x?.room_type,
+          campus_id: x?.campus_id,
+        };
+      });
+      setRoomIdToInfo(rm);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
+    }
+  };
+
   // load options
   useEffect(() => {
-    (async () => {
-      try {
-        const opt: OMSpecialClassOptions = await getOMSC_Options();
-        if (!opt.ok) throw new Error("Failed to load options");
-        setStatuses(["All Status", ...(opt.statuses || [])]);
-
-        const ay = opt.activeTerm?.acad_year_start;
-        const tn = opt.activeTerm?.term_number;
-        setActiveTermLabel(ay ? `Term ${tn ?? "—"} · AY ${ay}-${ay + 1}` : "");
-
-        const names = (opt.facultyOptions || [])
-          .map((f) => (f.faculty_name || "").trim())
-          .filter(Boolean);
-
-        const mapUpper: Record<string, string> = {};
-        (opt.facultyOptions || []).forEach((f) => {
-          const nm = (f.faculty_name || "").trim();
-          if (!nm) return;
-          mapUpper[nm.toUpperCase()] = f.faculty_id;
-        });
-
-        setFacultyNames(["UNASSIGNED", ...names]);
-        setFacultyNameToIdUpper(mapUpper);
-
-        // rooms map for display-only columns
-        const rm: Record<string, any> = {};
-        (opt.roomOptions || []).forEach((x: any) => {
-          const rid = String(x?.room_id || "").trim();
-          const rn = String(x?.room_number || "").trim();
-          if (!rid) return;
-          rm[rid] = {
-            room_number: rn,
-            building: x?.building,
-            capacity: x?.capacity,
-            room_type: x?.room_type,
-            campus_id: x?.campus_id,
-          };
-        });
-        setRoomIdToInfo(rm);
-      } catch (e: any) {
-        setErrKind("error");
-        setErr(e?.response?.data?.detail || e?.message || "Failed to load options.");
-      }
-    })();
-  }, []);
+    void loadOptions();
+  }, [apiFns]);
 
   // debounce search
   useEffect(() => {
@@ -580,19 +1235,10 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
       setErr("");
       setErrKind("error");
       setErrKind("error");
-      const res = await listOMSC({ status, q });
+      const res = await apiFns.list({ status, q });
       if (!res.ok) throw new Error("Failed to load special class applications");
       const incoming = res.rows || [];
       setRows(incoming);
-
-      setSelectedIds((prev) => {
-        const allowed = new Set(incoming.map((r) => r.special_id));
-        const next: Record<string, boolean> = {};
-        Object.entries(prev).forEach(([id, v]) => {
-          if (allowed.has(id) && v) next[id] = true;
-        });
-        return next;
-      });
     } catch (e: any) {
       setRows([]);
       setErrKind("error");
@@ -607,17 +1253,19 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [status, q]);
 
+  const groupedRows = useMemo(() => buildGroupedRows(rows), [rows]);
+
   const selectedList = useMemo(
-    () => rows.filter((r) => !!selectedIds[r.special_id]).map((r) => r.special_id),
-    [rows, selectedIds]
+    () => groupedRows.filter((r) => !!selectedIds[r.group_key]).flatMap((r) => r.special_ids),
+    [groupedRows, selectedIds]
   );
 
   const toggleAllVisible = (checked: boolean) => {
     setSelectedIds((prev) => {
       const next = { ...prev };
-      rows.forEach((r) => {
-        if (checked) next[r.special_id] = true;
-        else delete next[r.special_id];
+      groupedRows.forEach((r) => {
+        if (checked) next[r.group_key] = true;
+        else delete next[r.group_key];
       });
       return next;
     });
@@ -664,7 +1312,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
       // Always export as separate files when multiple are selected.
       for (const id of selectedList) {
-        const blob = await exportOMSC_Pdf({ special_ids: [id] });
+        const blob = await apiFns.exportPdf({ special_ids: [id] });
         downloadBlob(blob, makeFileName(id));
       }
     } catch (e: any) {
@@ -813,73 +1461,18 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
   };
 
 
-  const presetOptions = useMemo(() => {
-    const base = presets.map((p) => {
-      const sec = (p.section_code || "").trim();
-      const head = sec ? `${sec} · ${p.label}` : p.label;
-      return `${head} · ${p.faculty_name || "UNASSIGNED"}`;
-    });
-    return ["Custom", CLEAR_SCHEDULE_LABEL, ...base];
-  }, [presets]);
-
-  const presetLabelToId = useMemo(() => {
-    const m: Record<string, string> = {};
-    presets.forEach((p) => {
-      const sec = (p.section_code || "").trim();
-      const head = sec ? `${sec} · ${p.label}` : p.label;
-      m[`${head} · ${p.faculty_name || "UNASSIGNED"}`] = p.schedule_id;
-    });
-    return m;
-  }, [presets]);
-
-  const applyPreset = (scheduleId: string) => {
-    setDidClearAll(false);
-
-    // Choosing a preset cancels any previous clear-schedule intent
-    setClearMode("none");
-
-    if (scheduleId === "CUSTOM") {
-      setPresetChoice("CUSTOM");
-      setDraft((d) => ({
-        ...d,
-        section_id: null,
-      }));
-      return;
-    }
-
-    const p = presets.find((x) => x.schedule_id === scheduleId);
-    if (!p) return;
-
-    setPresetChoice(scheduleId);
-
-    setDraft((d) => ({
-      ...d,
-      section_id: p.section_id,
-      section_code: p.section_code || "",
-      day1: (p.day1 || "") as any,
-      begin1: p.begin1 || "",
-      end1: p.end1 || "",
-      day2: (p.day2 || "") as any,
-      begin2: p.begin2 || "",
-      end2: p.end2 || "",
-      faculty_id: p.faculty_id ?? null,
-    }));
-
-    setFacultyInput(p.faculty_name && p.faculty_name !== "UNASSIGNED" ? p.faculty_name : "");
-  };
-
-  const beginEdit = async (row: OMSpecialClassRow) => {
-    setEditId(row.special_id);
+  const beginEdit = async (row: SpecialClassGroupRow) => {
+    setEditId(row.group_key);
+    setEditTargetIds(row.special_ids || []);
     setDidClearAll(false);
 
     setDraft({
       course_id: row.course_id,
-      status: row.status,
+      status: row.status === "Mixed" ? "" : row.status,
       remarks: row.remarks || "",
       faculty_id: row.faculty_id || null,
       section_id: row.section_id || null,
-      section_code: row.section_code || "",
-
+      section_code: row.section_code === "Multiple" ? "" : row.section_code || "",
       day1: (row.day1 || "") as any,
       begin1: row.begin1 || "",
       end1: row.end1 || "",
@@ -889,27 +1482,7 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     });
 
     const facName = (row.faculty_name || "").toString().trim();
-    setFacultyInput(facName === "UNASSIGNED" ? "" : facName);
-
-    try {
-      const res = await getOMSC_SchedulePresets(row.course_id);
-      setPresets(res.presets || []);
-      const match = (res.presets || []).find((p) => p.section_id === row.section_id);
-
-      const rowHasNoSchedule =
-        !!row.section_id && !(row.day1 || row.begin1 || row.end1 || row.day2 || row.begin2 || row.end2);
-
-      if (rowHasNoSchedule) {
-        setPresetChoice("CLEAR_SCHEDULE");
-        // Preserve cleared schedule if user saves remarks/status only
-        setClearMode("schedule");
-      } else {
-        setPresetChoice(match ? match.schedule_id : "CUSTOM");
-      }
-    } catch {
-      setPresets([]);
-      setPresetChoice("CUSTOM");
-    }
+    setFacultyInput(facName === "UNASSIGNED" || facName === "Multiple" ? "" : facName);
   };
 
   const setSlotFromBand = (slot: 1 | 2, bandLabel: string) => {
@@ -924,104 +1497,348 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     setDraft((d) => ({
       ...d,
       ...(slot === 1
-        ? { begin1: found.start, end1: found.end, day1: (d.day1 as any) || "M" }
-        : { begin2: found.start, end2: found.end, day2: (d.day2 as any) || "M" }),
+        ? { begin1: found.start, end1: found.end }
+        : { begin2: found.start, end2: found.end }),
+    }));
+  };
+
+  const setAddSlotFromBand = (slot: 1 | 2, bandLabel: string) => {
+    const found = GE_TIME_SLOTS.find((x) => x.label === bandLabel);
+    if (!found) {
+      setAddDraft((d) => ({
+        ...d,
+        ...(slot === 1 ? { begin1: "", end1: "" } : { begin2: "", end2: "" }),
+      }));
+      return;
+    }
+    setAddDraft((d) => ({
+      ...d,
+      ...(slot === 1
+        ? { begin1: found.start, end1: found.end }
+        : { begin2: found.start, end2: found.end }),
     }));
   };
 
 
 
-  const clearScheduleOnlyDraft = () => {
+  const cancelEdit = () => {
+    setEditId(null);
+    setEditTargetIds([]);
+    setDraft({});
+    setFacultyInput("");
     setDidClearAll(false);
-    setDraft((d) => ({
-      ...d,
+  };
+
+  const openAddClass = () => {
+    setAdding(true);
+    setAddFacultyInput("");
+    setAddDraft({
+      status: "Forwarded To Department",
+      remarks: "",
+      course_id: modalCourseOptions[0]?.course_id || "",
+      section_code: "",
+      faculty_id: null,
       day1: "" as any,
       begin1: "",
       end1: "",
       day2: "" as any,
       begin2: "",
       end2: "",
-      schedule_id1: null,
-      schedule_id2: null,
-    }));
+    });
   };
 
-  const cancelEdit = () => {
-    setEditId(null);
-    setDraft({});
-    setPresets([]);
-    setPresetChoice("CUSTOM");
-    setFacultyInput("");
-    setDidClearAll(false);
-    setClearMode("none");
+  const closeAddClass = () => {
+    setAdding(false);
+    setAddDraft({ status: "Forwarded To Department" });
+    setAddFacultyInput("");
+  };
+
+  const saveAddClass = async () => {
+    try {
+      const courseId = String(addDraft.course_id || "").trim();
+      if (!courseId) throw new Error("Please select a course.");
+
+      const typedName = (addFacultyInput || "").trim();
+      const payloadFacultyId =
+        typedName && typedName.toUpperCase() !== "UNASSIGNED"
+          ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
+          : "";
+
+      const hasMeeting1 = !!addDraft.day1 && !!addDraft.begin1 && !!addDraft.end1;
+      const hasAnyMeeting2 = !!addDraft.day2 || !!addDraft.begin2 || !!addDraft.end2;
+      const hasMeeting2 = !!addDraft.day2 && !!addDraft.begin2 && !!addDraft.end2;
+      const attemptedBundleEdit = !!(
+        (addFacultyInput || "").trim() || addDraft.day1 || addDraft.begin1 || addDraft.end1 || addDraft.day2 || addDraft.begin2 || addDraft.end2
+      );
+
+      const payload: any = {
+        course_id: courseId,
+        status: addDraft.status || "Forwarded To Department",
+        remarks: addDraft.remarks || "",
+      };
+
+      setLoading(true);
+      setErr("");
+      const created = await apiFns.create(payload, getSessionUserId() || userId || undefined);
+
+      if (attemptedBundleEdit) {
+        if (!payloadFacultyId) throw new Error("Please select an available faculty.");
+        if (!hasMeeting1) throw new Error("Meeting 1 must include day, begin time, and end time.");
+        if (hasAnyMeeting2 && !hasMeeting2) throw new Error("Meeting 2 must include day, begin time, and end time.");
+
+        await apiFns.update(created.special_id, ({
+          special_ids: [created.special_id],
+          status: addDraft.status || "Forwarded To Department",
+          remarks: addDraft.remarks || "",
+          faculty_id: payloadFacultyId,
+          day1: (addDraft.day1 || "") as any,
+          begin1: addDraft.begin1 || "",
+          end1: addDraft.end1 || "",
+          day2: hasMeeting2 ? ((addDraft.day2 || "") as any) : "",
+          begin2: hasMeeting2 ? (addDraft.begin2 || "") : "",
+          end2: hasMeeting2 ? (addDraft.end2 || "") : "",
+        } as any), getSessionUserId() || userId || undefined);
+      }
+
+      closeAddClass();
+      toast(attemptedBundleEdit ? "Special class added with faculty and schedule. APO can assign the section later." : "Special class added. APO can assign the section later.", "success");
+      await Promise.all([load(), loadOptions()]);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to add special class.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const closeInlineAssign = () => setInlineAssignState(null);
+
+  const openInlineAssign = async (row: SpecialClassGroupRow) => {
+    if (!row.primary_special_id) return;
+
+    const courseLabel = String(row.course_code || row.course_title || "Course");
+    const sectionLabel = String(row.section_code || "—");
+
+    try {
+      setInlineAssignState({
+        targetGroupKey: row.group_key,
+        targetSpecialId: row.primary_special_id,
+        courseLabel,
+        sectionLabel,
+        candidates: [],
+        selectedStudentId: "",
+        loading: true,
+        mode: "add",
+      });
+      const res = await apiFns.eligibleStudents(row.primary_special_id);
+      const firstId = String((res.rows || [])[0]?.special_id || "");
+      setInlineAssignState({
+        targetGroupKey: row.group_key,
+        targetSpecialId: row.primary_special_id,
+        courseLabel,
+        sectionLabel,
+        candidates: res.rows || [],
+        selectedStudentId: firstId,
+        loading: false,
+        mode: "add",
+      });
+    } catch (e: any) {
+      setInlineAssignState(null);
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to load eligible students.");
+    }
+  };
+
+  const confirmInlineAssign = async () => {
+    if (!inlineAssignState?.targetSpecialId || !inlineAssignState.selectedStudentId) return;
+    try {
+      setLoading(true);
+      await apiFns.assignStudent(inlineAssignState.targetSpecialId, inlineAssignState.selectedStudentId, getSessionUserId() || userId || undefined);
+      setInlineAssignState(null);
+      toast("Student added to class.", "success");
+      await Promise.all([load(), loadOptions()]);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to add student to class.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const startStudentMove = (student: SpecialClassGroupStudent, row: SpecialClassGroupRow) => {
+    if (loading || editId === row.group_key) return;
+
+    const sameStudentSelected = pendingMove?.student.special_id === student.special_id;
+    if (sameStudentSelected) {
+      setPendingMove(null);
+      toast("Student move canceled.", "success");
+      return;
+    }
+
+    const nextMove = {
+      student,
+      sourceGroupKey: row.group_key,
+      sourceSpecialId: row.primary_special_id,
+      courseId: String(row.course_id || student.course_id || ""),
+      courseLabel: String(row.course_code || row.course_title || "Course"),
+      sourceSectionLabel: String(row.section_code || "—"),
+    };
+
+    setPendingMove(nextMove);
+    setInlineAssignState(null);
+
+    const availableTargets = groupedRows.some((candidate) => {
+      if (candidate.group_key === row.group_key) return false;
+      if (String(candidate.course_id || "") !== nextMove.courseId) return false;
+      if (!candidate.primary_special_id) return false;
+      return !!String(candidate.section_id || (candidate as any).assignment_id || "").trim();
+    });
+
+    if (availableTargets) toast("Choose another same-course class, then click Move Here.", "success");
+    else toast("No other ready class is available. You can unassign this student instead.", "success");
+  };
+
+  const cancelPendingMove = () => {
+    setPendingMove(null);
+  };
+
+  const moveStudentHere = async (row: SpecialClassGroupRow) => {
+    if (!pendingMove || !canReceiveMovedStudent(row)) return;
+    try {
+      setLoading(true);
+      await apiFns.assignStudent(row.primary_special_id, pendingMove.student.special_id, getSessionUserId() || userId || undefined);
+      const movedStudentName = pendingMove.student.student_name || "Student";
+      setPendingMove(null);
+      setInlineAssignState(null);
+      toast(`${movedStudentName} moved successfully.`, "success");
+      await Promise.all([load(), loadOptions()]);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to move student.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const unassignPendingStudent = async () => {
+    if (!pendingMove?.student?.special_id) return;
+    try {
+      setLoading(true);
+      await apiFns.unassignStudent(pendingMove.student.special_id, getSessionUserId() || userId || undefined);
+      const movedStudentName = pendingMove.student.student_name || "Student";
+      setPendingMove(null);
+      setInlineAssignState(null);
+      toast(`${movedStudentName} unassigned successfully.`, "success");
+      await Promise.all([load(), loadOptions()]);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to unassign student.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const deleteSpecialClassRow = async (row: SpecialClassGroupRow) => {
+    if (loading || editId === row.group_key || !row.primary_special_id) return;
+
+    const applicantCount = row.students.length;
+    const generatedRow = Boolean(row.generated_from_class_retention);
+    const message = applicantCount > 0
+      ? `Delete this special class for ${row.course_code || row.course_title || "this course"}? The students will stay in the same course, but their section/faculty assignment will be cleared so you can reassign them.`
+      : generatedRow
+      ? `Clear this reflected special class for ${row.course_code || row.course_title || "this course"}? It will stay visible from Class Retention, but the section/faculty schedule will be removed.`
+      : `Delete this special class for ${row.course_code || row.course_title || "this course"}? This removes the class row.`;
+
+    const ok = await openConfirm({
+      title: applicantCount > 0 || generatedRow ? "Clear Special Class?" : "Delete Special Class?",
+      message,
+      accent: "amber",
+      confirmText: applicantCount > 0 || generatedRow ? "Clear" : "Delete",
+      note: applicantCount > 0
+        ? "Students will remain available under the same course so you can place them into another special class later."
+        : generatedRow
+        ? "Because this row is reflected from Class Retention, the course stays visible even after clearing its section/faculty schedule."
+        : undefined,
+    });
+    if (!ok) return;
+
+    try {
+      setLoading(true);
+      setErr("");
+      const res = await apiFns.deleteClass(row.primary_special_id, getSessionUserId() || userId || undefined);
+      closeInlineAssign();
+      cancelPendingMove();
+      toast(res?.message || (res?.kept_row ? "Special class cleared." : "Special class deleted."), "success");
+      await Promise.all([load(), loadOptions()]);
+    } catch (e: any) {
+      setErrKind("error");
+      setErr(e?.response?.data?.detail || e?.message || "Failed to delete special class.");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const saveEdit = async () => {
-    if (!editId) return;
+    if (!editId || editTargetIds.length === 0) return;
 
     try {
       setLoading(true);
       setErr("");
 
-      const isCustom = presetChoice === "CUSTOM";
+      const typedName = (facultyInput || "").trim();
+      const payloadFacultyId =
+        typedName && typedName.toUpperCase() !== "UNASSIGNED"
+          ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
+          : "";
 
-      // NOTE: rooms are DISPLAY ONLY (no edits)
       const payload: any = {
         status: draft.status,
         remarks: draft.remarks,
       };
 
-      if (didClearAll) {
-        // Clear icon: clear EVERYTHING (faculty, section, schedule/day/time)
-        payload.section_id = ""; // backend interprets empty section_id as clear-all
-        payload.section_code = "";
-        payload.faculty_id = null;
+      const currentSectionId = String((draft.section_id || "") as string).trim();
+      const hasAssignedSection = !!currentSectionId;
+      const hasMeeting1 = !!draft.day1 && !!draft.begin1 && !!draft.end1;
+      const hasAnyMeeting2 = !!draft.day2 || !!draft.begin2 || !!draft.end2;
+      const hasMeeting2 = !!draft.day2 && !!draft.begin2 && !!draft.end2;
+      const attemptedBundleEdit = !!(
+        (facultyInput || "").trim() || draft.day1 || draft.begin1 || draft.end1 || draft.day2 || draft.begin2 || draft.end2
+      );
 
+      if (didClearAll) {
+        payload.section_id = "";
+        payload.faculty_id = null;
         payload.day1 = "";
         payload.begin1 = "";
         payload.end1 = "";
         payload.day2 = "";
         payload.begin2 = "";
         payload.end2 = "";
-      } else {
-        let payloadFacultyId: string | null = null;
-        if (isCustom) {
-          const typedName = (facultyInput || "").trim();
-          const fid =
-            typedName && typedName.toUpperCase() !== "UNASSIGNED"
-              ? facultyNameToIdUpper[typedName.toUpperCase()] || ""
-              : "";
-          payloadFacultyId = fid ? fid : null;
-        }
+      } else if (attemptedBundleEdit || hasAssignedSection) {
+        if (!payloadFacultyId) throw new Error("Please select an available faculty.");
+        if (!hasMeeting1) throw new Error("Meeting 1 must include day, begin time, and end time.");
+        if (hasAnyMeeting2 && !hasMeeting2) throw new Error("Meeting 2 must include day, begin time, and end time.");
 
-        payload.section_id = isCustom ? null : draft.section_id || null;
-        payload.section_code = isCustom ? draft.section_code || "" : "";
-        if (isCustom) payload.faculty_id = payloadFacultyId;
-
-        if (clearMode === "schedule") {
-          payload.clear_schedule_only = true;
-          payload.section_id = draft.section_id || payload.section_id;
-        }
-
-        if (isCustom) {
-          payload.day1 = (draft.day1 || "") as any;
-          payload.begin1 = draft.begin1 || "";
-          payload.end1 = draft.end1 || "";
-          payload.day2 = (draft.day2 || "") as any;
-          payload.begin2 = draft.begin2 || "";
-          payload.end2 = draft.end2 || "";
-        }
+        if (hasAssignedSection) payload.section_id = currentSectionId;
+        payload.faculty_id = payloadFacultyId;
+        payload.day1 = (draft.day1 || "") as any;
+        payload.begin1 = draft.begin1 || "";
+        payload.end1 = draft.end1 || "";
+        payload.day2 = hasMeeting2 ? ((draft.day2 || "") as any) : "";
+        payload.begin2 = hasMeeting2 ? (draft.begin2 || "") : "";
+        payload.end2 = hasMeeting2 ? (draft.end2 || "") : "";
       }
 
-      await updateOMSC(editId, payload, getSessionUserId());
+      await apiFns.update(editTargetIds[0], {
+        ...payload,
+        special_ids: editTargetIds,
+      }, getSessionUserId());
 
       setEditId(null);
       setDraft({});
-      setPresets([]);
-      setPresetChoice("CUSTOM");
       setFacultyInput("");
       setDidClearAll(false);
-      await load();
+      await Promise.all([load(), loadOptions()]);
     } catch (e: any) {
       setErrKind("error");
       setErr(e?.response?.data?.detail || e?.message || "Failed to update special class.");
@@ -1030,14 +1847,14 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     }
   };
 
-  const openView = async (row: OMSpecialClassRow) => {
+  const openView = async (specialId: string) => {
     setViewOpen(true);
     setViewLoading(true);
     setViewErr("");
     setViewData(null);
 
     try {
-      const res = await getOMSC_Detail(row.special_id);
+      const res = await apiFns.detail(specialId);
       if (!res.ok) throw new Error("Failed to load application detail.");
       setViewData(res.row);
     } catch (e: any) {
@@ -1054,16 +1871,126 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
     setViewLoading(false);
   };
 
-  const allVisibleSelected = rows.length > 0 && rows.every((r) => !!selectedIds[r.special_id]);
+  const openEaf = (url?: string) => {
+    if (!url) return;
+    window.open(url, "_blank", "noopener,noreferrer");
+  };
+
+  const allVisibleSelected = groupedRows.length > 0 && groupedRows.every((r) => !!selectedIds[r.group_key]);
+  const addSelectedFacultyId = String((
+    (addFacultyInput.trim() && addFacultyInput.toUpperCase() !== "UNASSIGNED"
+      ? (facultyNameToIdUpper[addFacultyInput.trim().toUpperCase()] || "")
+      : "")
+    || addDraft.faculty_id
+    || ""
+  )).trim();
+  const addPeerMeetings = buildMeetingSlots({
+    day1: addDraft.day1 as string | undefined,
+    begin1: addDraft.begin1 as string | undefined,
+    end1: addDraft.end1 as string | undefined,
+    day2: addDraft.day2 as string | undefined,
+    begin2: addDraft.begin2 as string | undefined,
+    end2: addDraft.end2 as string | undefined,
+  });
+  const addSlot1PeerMeetings = addPeerMeetings.filter((m) => m.slot !== 1);
+  const addSlot2PeerMeetings = addPeerMeetings.filter((m) => m.slot !== 2);
+  const availableAddFacultyNames = facultyNames.filter((name) => {
+    if (name === "UNASSIGNED") return true;
+    const fid = facultyNameToIdUpper[name.toUpperCase()] || "";
+    if (!fid) return false;
+    return !facultyHasConflictForMeetings({
+      facultyId: fid,
+      meetings: addPeerMeetings,
+      busySlots: effectiveFacultyAvailability,
+    });
+  });
+  const availableAddDay1Options = DAY_OPTS_LABELS.filter((label) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: DAY_FROM_LABEL[label],
+      begin: String(addDraft.begin1 || ""),
+      peerMeetings: addSlot1PeerMeetings,
+      busySlots: effectiveFacultyAvailability,
+    })
+  );
+  const availableAddBegin1Options = GE_TIME_SLOTS.filter((slot) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: String(addDraft.day1 || ""),
+      begin: slot.start,
+      peerMeetings: addSlot1PeerMeetings,
+      busySlots: effectiveFacultyAvailability,
+    })
+  );
+  const availableAddDay2Options = DAY_OPTS_LABELS.filter((label) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: DAY_FROM_LABEL[label],
+      begin: String(addDraft.begin2 || ""),
+      peerMeetings: addSlot2PeerMeetings,
+      busySlots: effectiveFacultyAvailability,
+    })
+  );
+  const availableAddBegin2Options = GE_TIME_SLOTS.filter((slot) =>
+    slotOptionIsAvailable({
+      facultyId: addSelectedFacultyId,
+      day: String(addDraft.day2 || ""),
+      begin: slot.start,
+      peerMeetings: addSlot2PeerMeetings,
+      busySlots: effectiveFacultyAvailability,
+    })
+  );
+  const minDeadlineLocal = toLocalInput(nextMinuteFrom().toISOString());
 
   return (
     <main className="w-full px-8 py-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold">Special Class</h1>
-        <p className="text-sm text-gray-600">
-          Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
-        </p>
+      <header className="mb-4 flex items-center justify-between">
+        <div>
+          <h1 className="text-2xl font-bold">Special Class</h1>
+          <p className="text-sm text-gray-600">
+            Review Special Class applications {activeTermLabel && `for ${activeTermLabel}`}
+          </p>
+        </div>
+        <div className="flex items-center gap-3">
+          {deadlineReadOnly ? (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
+                <span className="text-sm font-medium text-slate-700">Deadline</span>
+                <input
+                  type="datetime-local"
+                  min={minDeadlineLocal}
+                  className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
+                  value={deadlineDraft}
+                  onChange={(e) => setDeadlineDraft(e.target.value)}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={handleStartWindow}
+                disabled={startingWindow}
+                className="inline-flex h-9 items-center rounded-md bg-emerald-700 px-3 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800 disabled:opacity-50"
+                title="Set or update the submission deadline"
+              >
+                {startingWindow ? "Saving…" : "Set Deadline"}
+              </button>
+            </div>
+          )}
+        </div>
       </header>
+
+      <DeadlineBanner
+        deadlineISO={submissionWindow.deadlineISO}
+        className="mb-6"
+        emptyMessage={
+          deadlineReadOnly
+            ? "The Operations Manager has not set a submission deadline for this term yet."
+            : undefined
+        }
+      />
 
       {err && (
         <div
@@ -1091,13 +2018,25 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
 
         <SelectBox value={status} onChange={setStatus} options={statuses} />
 
+        <div className="ml-auto flex items-center gap-2">
+        <button
+          type="button"
+          onClick={openAddClass}
+          disabled={loading}
+          className="inline-flex items-center gap-2 rounded-md bg-emerald-500 px-3 py-2 text-sm font-medium text-white shadow-sm disabled:cursor-not-allowed disabled:opacity-50"
+          title="Add Class"
+        >
+          <Plus className="h-4 w-4" />
+          Add Class
+        </button>
+
         <div className="relative">
           <button
             type="button"
             onClick={() => setExportOpen((v) => !v)}
             disabled={loading}
             title="Export"
-            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-2 rounded-md bg-emerald-600 px-3 py-2 text-sm font-medium text-white shadow-sm hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Download className="h-4 w-4" />
             Export
@@ -1142,11 +2081,13 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
             </div>
           )}
         </div>
+        </div>
       </div>
 
+
       <div className="table-wrapper w-full overflow-hidden">
-        <div className="border border-gray-200 bg-white shadow-sm overflow-auto rounded-xl">
-          <table className="w-full text-sm table-auto">
+        <div className="border border-gray-200 bg-white shadow-sm overflow-x-auto rounded-xl">
+          <table className="w-full min-w-[1800px] text-sm table-auto">
             <thead className="bg-gray-50 border-b text-gray-900">
               <tr>
                 <th className="text-left px-3 py-2 whitespace-nowrap w-10">
@@ -1159,322 +2100,653 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                   />
                 </th>
 
-                <th className="text-left px-4 py-2 whitespace-nowrap">Student</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Course</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Section</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Faculty</th>
+                <th className="w-[280px] min-w-[280px] text-left px-4 py-3 whitespace-nowrap">Course Code &amp; Title</th>
+                <th className="w-[90px] min-w-[90px] text-center px-4 py-3 whitespace-nowrap">Count</th>
+                <th className="w-[260px] min-w-[260px] text-left px-4 py-3 whitespace-nowrap">Students</th>
+                <th className="w-[120px] min-w-[120px] text-center px-4 py-3 whitespace-nowrap">Section</th>
+                <th className="w-[240px] min-w-[240px] text-left px-4 py-3 whitespace-nowrap">Faculty</th>
 
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End1</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room1</th>
+                <th className="w-[150px] min-w-[150px] text-center px-4 py-3 whitespace-nowrap">Day</th>
+                <th className="w-[180px] min-w-[180px] text-center px-4 py-3 whitespace-nowrap">Time</th>
+                <th className="w-[120px] min-w-[120px] text-center px-4 py-3 whitespace-nowrap">Room</th>
 
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Day2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Begin2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">End2</th>
-                <th className="text-left px-3 py-2 whitespace-nowrap w-fit">Room2</th>
-
-                <th className="text-center px-4 py-2 whitespace-nowrap">Status</th>
-                <th className="text-left px-4 py-2 whitespace-nowrap">Remarks</th>
-                <th className="w-20 px-4 py-2 text-center whitespace-nowrap"> </th>
+                <th className="w-[160px] min-w-[160px] text-center px-4 py-3 whitespace-nowrap">Status</th>
+                <th className="w-[260px] min-w-[260px] text-left px-4 py-3 whitespace-nowrap">Remarks</th>
+                <th className="w-12 px-2 py-2 text-center whitespace-nowrap"></th>
+                <th className="w-[88px] px-2 py-2 text-center whitespace-nowrap">Actions</th>
               </tr>
             </thead>
 
             <tbody className="divide-y">
+              {adding && (
+                <tr className="bg-white align-top">
+                  <td className="px-3 py-3"></td>
+
+                  <td className="px-4 py-3 min-w-[280px] align-top">
+                    <ComboSelect
+                      value={modalCourseIdToLabel[String(addDraft.course_id || "")] || ""}
+                      onChange={(v) => {
+                        const nextId = modalCourseLabelToId[v] || modalCourseLabelToId[(v || "").trim()] || "";
+                        setAddDraft((d) => ({ ...d, course_id: nextId }));
+                      }}
+                      options={Object.keys(modalCourseLabelToId)}
+                      placeholder="Type or select course"
+                    />
+                    <div className="mt-1 text-xs leading-5 text-gray-500 whitespace-normal break-words">
+                      {modalCourseOptions.find((opt) => String(opt.course_id) === String(addDraft.course_id || ""))?.course_title || " "}
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <span className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">0</span>
+                  </td>
+
+                  <td className="px-4 py-3 align-top">
+                    <div className="min-w-[260px] rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                      No student application yet. You can add same-course applicants after saving this class.
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">—</div>
+                  </td>
+
+                  <td className="px-4 py-3 min-w-[240px] align-top">
+                    <ComboSelect
+                      value={addFacultyInput?.trim() ? addFacultyInput : ""}
+                      onChange={(v) => {
+                        const t = (v || "").trim();
+                        if (t === "" || t.toUpperCase() === "UNASSIGNED") {
+                          setAddFacultyInput("");
+                          setAddDraft((d) => ({ ...d, faculty_id: null }));
+                          return;
+                        }
+                        setAddFacultyInput(t);
+                        const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
+                        setAddDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
+                      }}
+                      options={["", "UNASSIGNED", ...availableAddFacultyNames.filter((n) => n !== "UNASSIGNED")]}
+                      placeholder={facultyNames.length > 1 ? (availableAddFacultyNames.length > 1 ? "Select Faculty" : "No available faculty") : "Loading…"}
+                    />
+                  </td>
+
+                  <td className="px-4 py-3 align-top min-w-[620px]" colSpan={2}>
+                    <div className="rounded-xl border border-neutral-200 bg-white px-4 py-4">
+                      <div className="space-y-5">
+                        <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                          Section stays blank here until APO assigns the section and room. OM/CHAIR can already save faculty, schedule, status, and remarks.
+                        </div>
+                        <div className="space-y-2">
+                          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Day 1</div>
+                              <SelectBox
+                                value={addDraft.day1 ? DAY_LABELS[addDraft.day1 as DayCode] : DAY_PLACEHOLDER}
+                                onChange={(lbl) => {
+                                  const nextDay1 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                  const autoDay2 = nextDay1 ? (DAY_PAIR[nextDay1] || "") : "";
+                                  setAddDraft((d) => {
+                                    const next = { ...d, day1: nextDay1 as any, day2: autoDay2 as any };
+                                    if (addSelectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: addSlot1PeerMeetings, busySlots: effectiveFacultyAvailability })) {
+                                      next.begin1 = "";
+                                      next.end1 = "";
+                                    }
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: effectiveFacultyAvailability })) {
+                                      next.begin2 = "";
+                                      next.end2 = "";
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                options={[DAY_PLACEHOLDER, ...(addSelectedFacultyId ? availableAddDay1Options : DAY_OPTS_LABELS)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Begin 1</div>
+                              <SelectBox
+                                value={prettyHHMM(addDraft.begin1 || "") || "Select time…"}
+                                onChange={(band) => {
+                                  if (band === "Select time…") {
+                                    setAddSlotFromBand(1, "");
+                                    return;
+                                  }
+                                  setAddSlotFromBand(1, band);
+                                }}
+                                options={["Select time…", ...(addSelectedFacultyId ? availableAddBegin1Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">End 1</div>
+                              <input
+                                value={prettyHHMM(addDraft.end1 || "")}
+                                disabled
+                                className={cls(
+                                  "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                  "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                )}
+                              />
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2 border-t border-neutral-200 pt-5">
+                          <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Day 2</div>
+                              <SelectBox
+                                value={addDraft.day2 ? DAY_LABELS[addDraft.day2 as DayCode] : DAY_PLACEHOLDER}
+                                onChange={(lbl) => {
+                                  const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                  setAddDraft((d) => {
+                                    const next = { ...d, day2: nextDay2 as any };
+                                    if (addSelectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: addSelectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: addSlot2PeerMeetings, busySlots: effectiveFacultyAvailability })) {
+                                      next.begin2 = "";
+                                      next.end2 = "";
+                                    }
+                                    return next;
+                                  });
+                                }}
+                                options={[DAY_PLACEHOLDER, ...(addSelectedFacultyId ? availableAddDay2Options : DAY_OPTS_LABELS)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">Begin 2</div>
+                              <SelectBox
+                                value={prettyHHMM(addDraft.begin2 || "") || "Select time…"}
+                                onChange={(band) => {
+                                  if (band === "Select time…") {
+                                    setAddSlotFromBand(2, "");
+                                    return;
+                                  }
+                                  setAddSlotFromBand(2, band);
+                                }}
+                                options={["Select time…", ...(addSelectedFacultyId ? availableAddBegin2Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                              />
+                            </div>
+
+                            <div className="space-y-1.5">
+                              <div className="text-[12px] font-semibold text-emerald-800">End 2</div>
+                              <input
+                                value={prettyHHMM(addDraft.end2 || "")}
+                                disabled
+                                className={cls(
+                                  "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                  "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                )}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">TBA</div>
+                  </td>
+
+                  <td className="px-4 py-3 text-center align-top">
+                    <SelectBox
+                      value={String(addDraft.status || "Forwarded To Department")}
+                      onChange={(v) => setAddDraft((d) => ({ ...d, status: v }))}
+                      options={statuses.filter((s) => s !== "All Status")}
+                    />
+                  </td>
+
+                  <td className="px-4 py-3 align-top">
+                    <textarea
+                      value={String(addDraft.remarks || "")}
+                      onChange={(e) => setAddDraft((d) => ({ ...d, remarks: e.target.value }))}
+                      rows={3}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm resize-none focus:ring-2 focus:ring-emerald-500/30"
+                      placeholder="Optional remarks"
+                    />
+                  </td>
+
+                  <td className="px-2 py-3 text-center align-top">
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={saveAddClass}
+                        disabled={loading}
+                        className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Save"
+                      >
+                        <Check className="h-4 w-4" />
+                      </button>
+                    </div>
+                  </td>
+
+                  <td className="px-2 py-3 text-center align-top">
+                    <div className="flex items-center justify-center">
+                      <button
+                        type="button"
+                        onClick={closeAddClass}
+                        disabled={loading}
+                        className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-400 text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                        title="Cancel"
+                      >
+                        <X className="h-4 w-4" strokeWidth={2.5} />
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )}
+
               {loading ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     Loading…
                   </td>
                 </tr>
-              ) : rows.length === 0 ? (
+              ) : groupedRows.length === 0 ? (
                 <tr>
-                  <td className="px-4 py-6 text-center text-gray-500" colSpan={16}>
+                  <td className="px-4 py-6 text-center text-gray-500" colSpan={13}>
                     No results
                   </td>
                 </tr>
               ) : (
-                rows.map((r) => {
-                  const editing = editId === r.special_id;
-                  const isCustom = presetChoice === "CUSTOM";
-                  const canEditSectionFaculty = isCustom || presetChoice === "CLEAR_SCHEDULE";
-
+                groupedRows.map((r) => {
+                  const editing = editId === r.group_key;
+                  const canEditFacultySchedule = true;
+                  const visibleStudents = visibleStudentsForRow(r);
+                  const displayCount = visibleCountForRow(r);
+                  const moveSourceRow = pendingMove?.sourceGroupKey === r.group_key;
+                  const assignInlineOpen = inlineAssignState?.targetGroupKey === r.group_key;
                   return (
-                    <tr key={r.special_id} className="hover:bg-gray-50 align-top">
+                    <Fragment key={r.group_key}>
+                    <tr className="hover:bg-gray-50 align-top">
                       <td className="px-3 py-3">
                         <input
                           type="checkbox"
-                          checked={!!selectedIds[r.special_id]}
-                          onChange={(e) => toggleOne(r.special_id, e.target.checked)}
+                          checked={!!selectedIds[r.group_key]}
+                          onChange={(e) => toggleOne(r.group_key, e.target.checked)}
                           className="h-4 w-4 accent-emerald-600"
                           disabled={loading}
                         />
                       </td>
 
-                      <td className="px-4 py-3 whitespace-nowrap">
-                        <div className="font-semibold">{r.student_name || "—"}</div>
-                        <div className="text-xs text-gray-500">{r.student_number || "—"}</div>
-                      </td>
-
-                      <td className="px-4 py-3 whitespace-nowrap">
+                      <td className="px-4 py-3 min-w-[280px] align-top">
                         <div className="font-semibold text-emerald-700">{r.course_code || "—"}</div>
-                        <div className="text-xs text-gray-500">{r.course_title || ""}</div>
+                        <div className="mt-1 text-xs leading-5 text-gray-500 whitespace-normal break-words">{r.course_title || ""}</div>
                       </td>
 
-                      <td className="px-4 py-3">
-                        {editing ? (
-                          canEditSectionFaculty ? (
-                            <input
-                              value={(draft.section_code || "") as string}
-                              onChange={(e) => {
-                                if (presetChoice === "CLEAR_SCHEDULE") {
-                                  setClearMode("none");
-                                  setPresetChoice("CUSTOM");
-                                }
-                                setDraft((d) => ({ ...d, section_id: null, section_code: e.target.value }));
-                              }}
-                              placeholder=" "
-                              className={cls(
-                                "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                "focus:ring-2 focus:ring-emerald-500/30 focus:border-emerald-500 outline-none transition",
-                                "min-w-[60px]"
-                              )}
-                            />
+                      <td className="px-4 py-3 text-center align-top">
+                        <span className="inline-flex min-w-8 items-center justify-center rounded-full bg-slate-100 px-2.5 py-1 text-xs font-semibold text-slate-700">
+                          {displayCount}
+                        </span>
+                      </td>
+
+                      <td className="px-4 py-3 align-top">
+                        <div className="space-y-2 min-w-[260px]">
+                          {moveSourceRow && pendingMove ? (
+                            <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                              <div className="font-medium">{pendingMove.student.student_name || "Student"} is selected.</div>
+                              <div className="text-xs text-amber-800">Choose another same-course class and click Move Here, or unassign the student from this section.</div>
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <button
+                                  type="button"
+                                  onClick={unassignPendingStudent}
+                                  disabled={loading}
+                                  className="inline-flex items-center rounded-md border border-amber-400 bg-amber-100 px-3 py-2 text-sm font-medium text-amber-950 hover:bg-amber-200 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Unassign Student
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={cancelPendingMove}
+                                  disabled={loading}
+                                  className="inline-flex items-center rounded-md border border-amber-300 bg-white px-3 py-2 text-sm font-medium text-amber-900 hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-50"
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            </div>
+                          ) : null}
+
+                          {visibleStudents.length > 0 ? (
+                            visibleStudents.map((student) => {
+                              const selectedForMove = pendingMove?.student.special_id === student.special_id;
+                              return (
+                              <div key={student.special_id} className="flex items-center justify-between gap-2 rounded-lg border border-emerald-100 bg-emerald-50/40 px-3 py-2">
+                                <button
+                                  type="button"
+                                  onClick={() => openView(student.special_id)}
+                                  className="min-w-0 flex-1 text-left text-sm font-medium text-emerald-700 hover:text-emerald-800 hover:underline"
+                                  title="View application"
+                                >
+                                  <div className="truncate">{student.student_name || "—"}</div>
+                                  {student.student_number ? (
+                                    <div className="text-xs text-emerald-900/70">{student.student_number}</div>
+                                  ) : null}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => startStudentMove(student, r)}
+                                  disabled={editing || loading}
+                                  className={cls(
+                                    "inline-flex h-8 w-8 items-center justify-center rounded-full border text-red-600 disabled:cursor-not-allowed disabled:opacity-50",
+                                    selectedForMove ? "border-amber-300 bg-amber-100 text-amber-900" : "border-red-200 hover:bg-red-50"
+                                  )}
+                                  title={selectedForMove ? "Cancel move" : "Move student to another special class"}
+                                  aria-label={selectedForMove ? "Cancel move" : "Move student to another special class"}
+                                >
+                                  <Trash2 className="h-4 w-4" />
+                                </button>
+                              </div>
+                            )})
                           ) : (
-                            <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
-                              {(draft.section_code || r.section_code || "—") as string}
+                            <div className="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                              {moveSourceRow && pendingMove
+                                ? "Student is waiting to be placed in another class of this same course."
+                                : r.generated_from_class_retention
+                                ? "No student application. Reflected from Class Retention."
+                                : r.manual_special_class
+                                ? "No student application yet. You can add eligible students for this same course."
+                                : "No unassigned student application in this class yet."}
                             </div>
-                          )
-                        ) : (
-                          <div className="font-medium">{r.section_code?.trim() ? r.section_code : "—"}</div>
-                        )}
+                          )}
+
+                          {pendingMove ? (
+                            canReceiveMovedStudent(r) ? (
+                              <button
+                                type="button"
+                                onClick={() => moveStudentHere(r)}
+                                disabled={editing || loading}
+                                className="inline-flex items-center gap-2 rounded-md border border-amber-500 bg-amber-200 px-3 py-2 text-sm font-semibold text-amber-950 hover:bg-amber-300 disabled:cursor-not-allowed disabled:opacity-50"
+                                title="Move the selected student into this class"
+                              >
+                                Move Here
+                              </button>
+                            ) : String(r.course_id || "") === pendingMove.courseId && !moveSourceRow ? (
+                              <button
+                                type="button"
+                                disabled
+                                className="inline-flex items-center gap-2 rounded-md border border-slate-200 bg-slate-100 px-3 py-2 text-sm font-medium text-slate-400 disabled:cursor-not-allowed"
+                                title="This class needs a section/faculty assignment first"
+                              >
+                                Unavailable
+                              </button>
+                            ) : null
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => openInlineAssign(r)}
+                              disabled={editing || loading || !r.primary_special_id}
+                              className="inline-flex items-center gap-2 rounded-md border border-emerald-200 px-3 py-2 text-sm font-medium text-emerald-700 hover:bg-emerald-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Add a same-course student who already applied"
+                            >
+                              <Plus className="h-4 w-4" />
+                              Add Student
+                            </button>
+                          )}
+                        </div>
                       </td>
 
-                      <td className="px-4 py-3">
-                        {editing ? (
-                          <ComboSelect
-                            value={facultyInput?.trim() ? facultyInput : ""}
-                            onChange={(v) => {
-                              if (!canEditSectionFaculty) return;
+                      {(() => {
+                        const currentSectionId = String((draft.section_id || r.section_id || "") as string).trim();
+                        const selectedFacultyId = String((draft.faculty_id || "") as string).trim();
+                        const peerMeetings = buildMeetingSlots({
+                          day1: draft.day1 as string | undefined,
+                          begin1: draft.begin1 as string | undefined,
+                          end1: draft.end1 as string | undefined,
+                          day2: draft.day2 as string | undefined,
+                          begin2: draft.begin2 as string | undefined,
+                          end2: draft.end2 as string | undefined,
+                        });
+                        const slot1PeerMeetings = peerMeetings.filter((m) => m.slot !== 1);
+                        const slot2PeerMeetings = peerMeetings.filter((m) => m.slot !== 2);
+                        const availableFacultyNames = facultyNames.filter((name) => {
+                          if (name === "UNASSIGNED") return true;
+                          const fid = facultyNameToIdUpper[name.toUpperCase()] || "";
+                          if (!fid) return false;
+                          return !facultyHasConflictForMeetings({
+                            facultyId: fid,
+                            meetings: peerMeetings,
+                            busySlots: effectiveFacultyAvailability,
+                            excludeSectionId: currentSectionId,
+                          });
+                        });
+                        const availableDay1Options = DAY_OPTS_LABELS.filter((label) =>
+                          slotOptionIsAvailable({
+                            facultyId: selectedFacultyId,
+                            day: DAY_FROM_LABEL[label],
+                            begin: String(draft.begin1 || ""),
+                            peerMeetings: slot1PeerMeetings,
+                            busySlots: effectiveFacultyAvailability,
+                            excludeSectionId: currentSectionId,
+                          })
+                        );
+                        const availableBegin1Options = GE_TIME_SLOTS.filter((slot) =>
+                          slotOptionIsAvailable({
+                            facultyId: selectedFacultyId,
+                            day: String(draft.day1 || ""),
+                            begin: slot.start,
+                            peerMeetings: slot1PeerMeetings,
+                            busySlots: effectiveFacultyAvailability,
+                            excludeSectionId: currentSectionId,
+                          })
+                        );
+                        const availableDay2Options = DAY_OPTS_LABELS.filter((label) =>
+                          slotOptionIsAvailable({
+                            facultyId: selectedFacultyId,
+                            day: DAY_FROM_LABEL[label],
+                            begin: String(draft.begin2 || ""),
+                            peerMeetings: slot2PeerMeetings,
+                            busySlots: effectiveFacultyAvailability,
+                            excludeSectionId: currentSectionId,
+                          })
+                        );
+                        const availableBegin2Options = GE_TIME_SLOTS.filter((slot) =>
+                          slotOptionIsAvailable({
+                            facultyId: selectedFacultyId,
+                            day: String(draft.day2 || ""),
+                            begin: slot.start,
+                            peerMeetings: slot2PeerMeetings,
+                            busySlots: effectiveFacultyAvailability,
+                            excludeSectionId: currentSectionId,
+                          })
+                        );
 
-                              // If the row is in "Clear schedule" mode, switching faculty means you want Custom mode.
-                              if (presetChoice === "CLEAR_SCHEDULE") {
-                                setClearMode("none");
-                                setPresetChoice("CUSTOM");
-                                setDraft((d) => ({ ...d, section_id: null }));
-                              }
-
-                              const t = (v || "").trim();
-
-                              if (t === "" || t.toUpperCase() === "UNASSIGNED") {
-                                setFacultyInput("");
-                                setDraft((d) => ({ ...d, faculty_id: null }));
-                                return;
-                              }
-
-                              setFacultyInput(t);
-                              const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
-                              setDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
-                            }}
-                            options={["", "UNASSIGNED", ...facultyNames.filter((n) => n !== "UNASSIGNED")]}
-                            placeholder="Select Faculty"
-                            disabled={!canEditSectionFaculty}
-                          />
-                        ) : (
-                          <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
-                        )}
-
-                      </td>
-
-                      {/* Schedule columns */}
-                      {editing ? (
-                        <>
-                          {/* Editor cell occupies Day1/Begin1/End1 */}
-                          <td className="px-3 py-3 whitespace-nowrap" colSpan={3}>
-                            <div className="space-y-2 min-w-[520px]">
-                              <SelectBox
-                                value={
-                                  presetChoice === "CUSTOM"
-                                    ? "Custom"
-                                    : presetChoice === "CLEAR_SCHEDULE"
-                                    ? CLEAR_SCHEDULE_LABEL
-                                    : (() => {
-                                        const p = presets.find((x) => x.schedule_id === presetChoice);
-                                        if (!p) return "Custom";
-                                        const sec = (p.section_code || "").trim();
-                                        const head = sec ? `${sec} · ${p.label}` : p.label;
-                                        return `${head} · ${p.faculty_name || "UNASSIGNED"}`;
-                                      })()
-                                }
-                                onChange={(label) => {
-                                  // Any manual change cancels a pending "clear all" state
-                                  setDidClearAll(false);
-
-                                  if (label === CLEAR_SCHEDULE_LABEL) {
-                                    // Clear schedule only (keeps current binding)
-                                    setPresetChoice("CLEAR_SCHEDULE");
-                                    setClearMode("schedule");
-                                    clearScheduleOnlyDraft();
-                                    return;
-                                  }
-
-                                  // Any other selection cancels clear-schedule mode
-                                  setClearMode("none");
-
-                                  if (label === "Custom") {
-                                    setPresetChoice("CUSTOM");
-                                    setDraft((d) => ({
-                                      ...d,
-                                      section_id: null,
-                                      section_code: d.section_code || "",
-                                      day1: (d.day1 as any) || "M",
-                                      day2: (d.day2 as any) || "M",
-                                    }));
-                                    return;
-                                  }
-
-                                  const sid = presetLabelToId[label] || "";
-                                  if (sid) applyPreset(sid);
-                                }}
-                                options={presetOptions}
-                              />
-
-                              {presetChoice === "CUSTOM" ? (
-                                <div className="rounded-lg border border-gray-200 bg-white p-3">
-                                  <div className="text-xs text-gray-600 mb-2">
-                                    Custom Schedule (max 2 entries). Begin uses preset time slots and auto-fills End.
-                                  </div>
-
-                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center mb-2 min-w-0">
-                                    <SelectBox
-                                      value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : DAY_PLACEHOLDER}
-                                      onChange={(lbl) =>
-                                        setDraft((d) => ({
-                                          ...d,
-                                          day1: (lbl === DAY_PLACEHOLDER
-                                            ? ("" as any)
-                                            : (DAY_FROM_LABEL[lbl as DayLabel] || "M")) as any,
-                                        }))
-                                      }
-                                      options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
-                                    />
-
-                                    <SelectBox
-                                      value={(() => {
-                                        const b = (draft.begin1 || "").toString();
-                                        const e = (draft.end1 || "").toString();
-                                        const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
-                                        return f?.label || "Select time…";
-                                      })()}
-                                      onChange={(band) => {
-                                        if (band === "Select time…") {
-                                          setSlotFromBand(1, "");
-                                          return;
-                                        }
-                                        setSlotFromBand(1, band);
-                                      }}
-                                      options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                                    />
-
-                                    <input
-                                      value={prettyHHMM(draft.end1 || "")}
-                                      disabled
-                                      className={cls(
-                                        "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                        "bg-gray-100 text-gray-700 cursor-not-allowed"
-                                      )}
-                                    />
-                                  </div>
-
-                                  <div className="grid grid-cols-[minmax(180px,5px)_minmax(100px,1fr)_minmax(90px,120px)] gap-2 items-center">
-                                    <SelectBox
-                                      value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : DAY_PLACEHOLDER}
-                                      onChange={(lbl) =>
-                                        setDraft((d) => ({
-                                          ...d,
-                                          day2: (lbl === DAY_PLACEHOLDER
-                                            ? ("" as any)
-                                            : (DAY_FROM_LABEL[lbl as DayLabel] || "M")) as any,
-                                        }))
-                                      }
-                                      options={[DAY_PLACEHOLDER, ...DAY_OPTS_LABELS]}
-                                    />
-
-                                    <SelectBox
-                                      value={(() => {
-                                        const b = (draft.begin2 || "").toString();
-                                        const e = (draft.end2 || "").toString();
-                                        const f = GE_TIME_SLOTS.find((x) => x.start === b && x.end === e);
-                                        return f?.label || "Select time…";
-                                      })()}
-                                      onChange={(band) => {
-                                        if (band === "Select time…") {
-                                          setSlotFromBand(2, "");
-                                          return;
-                                        }
-                                        setSlotFromBand(2, band);
-                                      }}
-                                      options={["Select time…", ...GE_TIME_SLOTS.map((x) => x.label)]}
-                                    />
-
-                                    <input
-                                      value={prettyHHMM(draft.end2 || "")}
-                                      disabled
-                                      className={cls(
-                                        "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
-                                        "bg-gray-100 text-gray-700 cursor-not-allowed"
-                                      )}
-                                    />
-                                  </div>
-
-                                  <div className="mt-2 text-xs text-gray-600">
-                                    Preview:{" "}
-                                    <span className="font-semibold">{scheduleTextFromRow(draft) || "—"}</span>
-                                  </div>
+                        return (
+                          <>
+                            <td className="px-4 py-3 text-center">
+                              {editing ? (
+                                <div className="rounded-lg border border-gray-200 bg-gray-100 px-3 py-2 text-sm text-gray-700">
+                                  {(draft.section_code || r.section_code || "—") as string}
                                 </div>
-                              ) : null}
-                            </div>
-                          </td>
+                              ) : (
+                                <div className="font-medium">{r.section_code?.trim() ? r.section_code : "—"}</div>
+                              )}
+                            </td>
 
-                          {/* Room1 (display-only) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 1)} className="inline-block">
-                              {roomLabel(r, 1)}
-                            </span>
-                          </td>
+                            <td className="px-4 py-3 min-w-[240px] align-top">
+                              {editing ? (
+                                <ComboSelect
+                                  value={facultyInput?.trim() ? facultyInput : ""}
+                                  onChange={(v) => {
+                                    if (!canEditFacultySchedule) return;
+                                    const t = (v || "").trim();
+                                    if (t === "" || t.toUpperCase() === "UNASSIGNED") {
+                                      setFacultyInput("");
+                                      setDraft((d) => ({ ...d, faculty_id: null }));
+                                      return;
+                                    }
+                                    setFacultyInput(t);
+                                    const fid = facultyNameToIdUpper[t.toUpperCase()] || "";
+                                    setDraft((d) => ({ ...d, faculty_id: fid ? fid : null }));
+                                  }}
+                                  options={["", "UNASSIGNED", ...availableFacultyNames.filter((n) => n !== "UNASSIGNED")]}
+                                  placeholder={facultyNames.length > 1 ? (availableFacultyNames.length > 1 ? "Select Faculty" : "No available faculty") : "Loading…"}
+                                  disabled={!canEditFacultySchedule}
+                                />
+                              ) : (
+                                <div className="font-medium">{r.faculty_name || "UNASSIGNED"}</div>
+                              )}
+                            </td>
 
-                          {/* Day2/Begin2/End2 (read values) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{draft.day2 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.begin2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(draft.end2 || "") || "—"}</td>
+                            {editing ? (
+                              <>
+                                <td className="px-4 py-3 align-top min-w-[620px]" colSpan={2}>
+                                  <div className="rounded-xl border border-neutral-200 bg-white px-4 py-4">
+                                    <div className="space-y-5">
+                                      <div className="rounded-lg border border-dashed border-slate-300 bg-slate-50 px-3 py-2 text-sm text-slate-700">
+                                        Section stays blank here until APO assigns the section and room. OM/CHAIR can still save faculty, schedule, status, and remarks.
+                                      </div>
+                                      <div className="space-y-2">
+                                        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">Day 1</div>
+                                            <SelectBox
+                                              disabled={!canEditFacultySchedule}
+                                              value={draft.day1 ? DAY_LABELS[draft.day1 as DayCode] : DAY_PLACEHOLDER}
+                                              onChange={(lbl) => {
+                                                const nextDay1 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                                const autoDay2 = nextDay1 ? (DAY_PAIR[nextDay1] || "") : "";
+                                                setDraft((d) => {
+                                                  const next = { ...d, day1: nextDay1 as any, day2: autoDay2 as any };
+                                                  if (selectedFacultyId && String(next.begin1 || "") && nextDay1 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay1, begin: String(next.begin1 || ""), peerMeetings: slot1PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
+                                                    next.begin1 = "";
+                                                    next.end1 = "";
+                                                  }
+                                                  if (selectedFacultyId && String(next.begin2 || "") && autoDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: autoDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
+                                                    next.begin2 = "";
+                                                    next.end2 = "";
+                                                  }
+                                                  return next;
+                                                });
+                                              }}
+                                              options={[DAY_PLACEHOLDER, ...(selectedFacultyId ? availableDay1Options : DAY_OPTS_LABELS)]}
+                                            />
+                                          </div>
 
-                          {/* Room2 (display-only) */}
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 2)} className="inline-block">
-                              {roomLabel(r, 2)}
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">Begin 1</div>
+                                            <SelectBox
+                                              disabled={!canEditFacultySchedule}
+                                              value={prettyHHMM(draft.begin1 || "") || "Select time…"}
+                                              onChange={(band) => {
+                                                if (band === "Select time…") {
+                                                  setSlotFromBand(1, "");
+                                                  return;
+                                                }
+                                                setSlotFromBand(1, band);
+                                              }}
+                                              options={["Select time…", ...(selectedFacultyId ? availableBegin1Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                                            />
+                                          </div>
+
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">End 1</div>
+                                            <input
+                                              value={prettyHHMM(draft.end1 || "")}
+                                              disabled
+                                              className={cls(
+                                                "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                                "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                              )}
+                                            />
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      <div className="space-y-2 border-t border-neutral-200 pt-5">
+                                        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">Day 2</div>
+                                            <SelectBox
+                                              disabled={!canEditFacultySchedule}
+                                              value={draft.day2 ? DAY_LABELS[draft.day2 as DayCode] : DAY_PLACEHOLDER}
+                                              onChange={(lbl) => {
+                                                const nextDay2 = lbl === DAY_PLACEHOLDER ? "" : (DAY_FROM_LABEL[lbl as DayLabel] || "M");
+                                                setDraft((d) => {
+                                                  const next = { ...d, day2: nextDay2 as any };
+                                                  if (selectedFacultyId && String(next.begin2 || "") && nextDay2 && !slotOptionIsAvailable({ facultyId: selectedFacultyId, day: nextDay2, begin: String(next.begin2 || ""), peerMeetings: slot2PeerMeetings, busySlots: effectiveFacultyAvailability, excludeSectionId: currentSectionId })) {
+                                                    next.begin2 = "";
+                                                    next.end2 = "";
+                                                  }
+                                                  return next;
+                                                });
+                                              }}
+                                              options={[DAY_PLACEHOLDER, ...(selectedFacultyId ? availableDay2Options : DAY_OPTS_LABELS)]}
+                                            />
+                                          </div>
+
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">Begin 2</div>
+                                            <SelectBox
+                                              disabled={!canEditFacultySchedule}
+                                              value={prettyHHMM(draft.begin2 || "") || "Select time…"}
+                                              onChange={(band) => {
+                                                if (band === "Select time…") {
+                                                  setSlotFromBand(2, "");
+                                                  return;
+                                                }
+                                                setSlotFromBand(2, band);
+                                              }}
+                                              options={["Select time…", ...(selectedFacultyId ? availableBegin2Options : GE_TIME_SLOTS).map((x) => x.label)]}
+                                            />
+                                          </div>
+
+                                          <div className="space-y-1.5">
+                                            <div className="text-[12px] font-semibold text-emerald-800">End 2</div>
+                                            <input
+                                              value={prettyHHMM(draft.end2 || "")}
+                                              disabled
+                                              className={cls(
+                                                "w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm",
+                                                "bg-gray-100 text-gray-700 cursor-not-allowed"
+                                              )}
+                                            />
+                                          </div>
+                                        </div>
+                                      </div>
+                                    </div>
+                                  </div>
+                                </td>
+
+                                <td className="px-4 py-3 align-top min-w-[180px]">
+                                  <div className="space-y-1.5 text-center leading-5 whitespace-nowrap">
+                                    {buildScheduleSlotViews(draft).map((slot) => (
+                                      <div key={slot.key}>{slot.time}</div>
+                                    ))}
+                                  </div>
+                                </td>
+                              </>
+                            ) : (
+                              <>
+                                <td className="px-4 py-3 align-top min-w-[180px]">
+                                  <div className="space-y-1.5 text-center leading-5 whitespace-nowrap">
+                                    {buildScheduleSlotViews(r).map((slot) => (
+                                      <div key={slot.key}>{slot.day}</div>
+                                    ))}
+                                  </div>
+                                </td>
+                                <td className="px-4 py-3 align-top min-w-[180px]">
+                                  <div className="space-y-1.5 text-center leading-5 whitespace-nowrap">
+                                    {buildScheduleSlotViews(r).map((slot) => (
+                                      <div key={slot.key}>{slot.time}</div>
+                                    ))}
+                                  </div>
+                                </td>
+                              </>
+                            )}
+                          </>
+                        );
+                      })()}
+
+                      <td className="px-4 py-3 align-top min-w-[180px]">
+                        <div className="space-y-1.5 text-center leading-5 whitespace-nowrap">
+                          {roomCellItems(r).map((item) => (
+                            <span key={item.key} title={item.title} className="block">
+                              {item.label}
                             </span>
-                          </td>
-                        </>
-                      ) : (
-                        <>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day1 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin1 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end1 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 1)} className="inline-block">
-                              {roomLabel(r, 1)}
-                            </span>
-                          </td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{r.day2 || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.begin2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">{prettyHHMM(r.end2 || "") || "—"}</td>
-                          <td className="px-3 py-3 whitespace-nowrap w-fit">
-                            <span title={roomTitle(r, 2)} className="inline-block">
-                              {roomLabel(r, 2)}
-                            </span>
-                          </td>
-                        </>
-                      )}
+                          ))}
+                        </div>
+                      </td>
 
                       <td className="px-4 py-3 text-center whitespace-nowrap">
                         {editing ? (
@@ -1508,86 +2780,154 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
                         )}
                       </td>
 
-                      <td className="px-2 py-3 whitespace-nowrap">
-  <div className="flex items-center justify-center gap-1">
-    {editing ? (
-      <>
-        <button
-          onClick={saveEdit}
-          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
-          title="Save"
-          aria-label="Save"
-        >
-          <Check className="h-4 w-4" />
-        </button>
+                      <td className="px-2 py-3 whitespace-nowrap text-center">
+                        {!hideMessageIcon ? (() => {
+                          const messageTarget = r.students.find((student) => !!student.faculty_id) || null;
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                if (!messageTarget) return;
+                                setConv({
+                                  open: true,
+                                  termId: String(messageTarget.term_id || r.term_id || ""),
+                                  facultyId: messageTarget.faculty_id ?? r.faculty_id ?? null,
+                                  facultyName: messageTarget.faculty_name || r.faculty_name || "UNASSIGNED",
+                                  sectionId: messageTarget.special_id,
+                                });
+                              }}
+                              disabled={!messageTarget || editing}
+                              className={cls(
+                                "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
+                                (!messageTarget || editing) && "opacity-50 cursor-not-allowed hover:bg-transparent"
+                              )}
+                              title={messageTarget ? "Message" : "Assign a faculty first to open conversation"}
+                              aria-label="Message"
+                            >
+                              <MessageSquareText className="h-4 w-4" />
+                              {Boolean((r as any)?.rfc_needs_om) && (
+                                <span
+                                  className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
+                                  aria-label="New message"
+                                  title="New message"
+                                />
+                              )}
+                            </button>
+                          );
+                        })() : null}
+                      </td>
 
-        <button
-          type="button"
-          onClick={cancelEdit}
-          className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
-          title="Cancel"
-          aria-label="Cancel"
-        >
-          <X className="h-4 w-4" />
-        </button>
-      </>
-    ) : (
-      <>
-        {!hideMessageIcon && (
-        <button
-          type="button"
-          onClick={() => {
-            setConv({
-              open: true,
-              termId: r.term_id,
-              facultyId: r.faculty_id ?? null,
-              facultyName: r.faculty_name || "UNASSIGNED",
-              sectionId: r.special_id,
-            });
-          }}
-          disabled={!r.faculty_id}
-          className={cls(
-            "relative inline-flex items-center justify-center p-1 rounded-md text-blue-700 hover:bg-blue-50",
-            !r.faculty_id && "opacity-50 cursor-not-allowed hover:bg-transparent"
-          )}
-          title={r.faculty_id ? "Message" : "Assign a faculty first to open conversation"}
-          aria-label="Message"
-        >
-          <MessageSquareText className="h-4 w-4" />
-          {Boolean((r as any)?.rfc_needs_om) && (
-            <span
-              className="absolute -top-0.5 -right-0.5 h-2.5 w-2.5 rounded-full bg-red-600"
-              aria-label="New message"
-              title="New message"
-            />
-          )}
-        </button>
-        )}
+                      <td className="px-2 py-3 whitespace-nowrap text-center">
+                        {editing ? (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              onClick={saveEdit}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-green-600 text-green-600 hover:bg-green-50"
+                              title="Save"
+                              aria-label="Save"
+                            >
+                              <Check className="h-4 w-4" />
+                            </button>
 
-        <button
-          type="button"
-          onClick={() => openView(r)}
-          className="inline-flex items-center justify-center p-1 rounded-md text-gray-700 hover:bg-gray-100"
-          title="View Application"
-          aria-label="View Application"
-        >
-          <Eye className="h-4 w-4" />
-        </button>
-
-        <button
-          type="button"
-          onClick={() => beginEdit(r)}
-          className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
-          title="Edit"
-          aria-label="Edit"
-        >
-          <Edit className="h-4 w-4" />
-        </button>
-      </>
-    )}
-  </div>
-</td>
+                            <button
+                              type="button"
+                              onClick={cancelEdit}
+                              className="flex h-8 w-8 items-center justify-center rounded-full border-2 border-red-600 text-red-600 hover:bg-red-50"
+                              title="Cancel"
+                              aria-label="Cancel"
+                            >
+                              <X className="h-4 w-4" />
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center justify-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => beginEdit(r)}
+                              className="inline-flex items-center justify-center p-1 rounded-md text-emerald-700 hover:bg-emerald-50"
+                              title="Edit"
+                              aria-label="Edit"
+                            >
+                              <Edit className="h-4 w-4" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => deleteSpecialClassRow(r)}
+                              disabled={loading || assignInlineOpen}
+                              className="inline-flex items-center justify-center p-1 rounded-md text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50"
+                              title="Delete special class"
+                              aria-label="Delete special class"
+                            >
+                              <Trash2 className="h-4 w-4" />
+                            </button>
+                          </div>
+                        )}
+                      </td>
                     </tr>
+
+                    {assignInlineOpen && inlineAssignState ? (
+                      <tr className="bg-emerald-50/40">
+                        <td colSpan={13} className="border-t border-emerald-100 px-4 py-4">
+                          <div className="rounded-xl border border-emerald-200 bg-white p-4 shadow-sm">
+                            <div className="flex flex-wrap items-start justify-between gap-3">
+                              <div>
+                                <div className="text-base font-semibold text-emerald-800">
+                                  Add Student to Class
+                                </div>
+                                <div className="text-sm text-gray-600">
+                                  {inlineAssignState.courseLabel} • {inlineAssignState.sectionLabel || "—"}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mt-4 grid gap-4 md:grid-cols-[minmax(0,1fr)_auto] md:items-end">
+                              <div className="space-y-1.5">
+                                <div className="text-sm font-medium text-gray-700">
+                                  Eligible student
+                                </div>
+                                {inlineAssignState.loading ? (
+                                  <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-sm text-gray-600">Loading eligible students…</div>
+                                ) : inlineAssignState.candidates.length === 0 ? (
+                                  <div className="rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-800">
+                                    No students are available for this course right now.
+                                  </div>
+                                ) : (
+                                  <SelectBox
+                                    value={(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)
+                                      ? candidateLabel(inlineAssignState.candidates.find((candidate) => candidate.special_id === inlineAssignState.selectedStudentId)!)
+                                      : "")}
+                                    onChange={(v) => {
+                                      const match = inlineAssignState.candidates.find((candidate) => candidateLabel(candidate) === v);
+                                      setInlineAssignState((current) => current ? { ...current, selectedStudentId: match?.special_id || "" } : current);
+                                    }}
+                                    options={inlineAssignState.candidates.map((candidate) => candidateLabel(candidate))}
+                                  />
+                                )}
+                              </div>
+
+                              <div className="flex items-center justify-end gap-2">
+                                <button
+                                  type="button"
+                                  onClick={closeInlineAssign}
+                                  className="rounded-md border border-gray-300 px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-100"
+                                >
+                                  Cancel
+                                </button>
+                                <button
+                                  type="button"
+                                  disabled={inlineAssignState.loading || !inlineAssignState.selectedStudentId}
+                                  onClick={confirmInlineAssign}
+                                  className="rounded-md bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:opacity-50"
+                                >
+                                  Add Student
+                                </button>
+                              </div>
+                            </div>
+                          </div>
+                        </td>
+                      </tr>
+                    ) : null}
+                    </Fragment>
                   );
                 })
               )}
@@ -1596,129 +2936,130 @@ export default function OM_SpecialClass({ hideMessageIcon = false }: { hideMessa
         </div>
       </div>
 
-      {/* View Application Modal */}
+
       {viewOpen && (
-        <div
-          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
-          onMouseDown={(e) => {
-            if (e.target === e.currentTarget) closeView();
-          }}
-        >
-          <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl border border-gray-200 overflow-hidden">
-            <div className="flex items-center justify-between px-5 py-4 border-b bg-gray-50">
+        <div className="fixed inset-0 z-[125] flex items-center justify-center bg-black/40 px-4 py-6">
+          <div className="max-h-[90vh] w-full max-w-3xl overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+            <div className="flex items-start justify-between gap-3 border-b border-gray-200 px-5 py-4">
               <div>
-                <div className="text-lg font-bold text-gray-900">View Application</div>
+                <div className="text-lg font-semibold text-slate-900">Special Class Application</div>
+                <div className="mt-1 text-sm text-slate-500">
+                  {viewData?.student_name || "View submitted details"}
+                </div>
               </div>
               <button
                 type="button"
                 onClick={closeView}
-                className="h-9 w-9 inline-flex items-center justify-center rounded-full hover:bg-gray-200/70"
-                title="Close"
+                className="rounded-lg p-1 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
+                aria-label="Close application detail"
               >
-                <X className="h-5 w-5 text-gray-700" />
+                <X className="h-5 w-5" />
               </button>
             </div>
 
-            <div className="p-5 max-h-[75vh] overflow-auto">
+            <div className="max-h-[calc(90vh-88px)] overflow-y-auto px-5 py-4">
               {viewLoading ? (
-                <div className="py-10 text-center text-gray-500">Loading application…</div>
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+                  Loading application details…
+                </div>
               ) : viewErr ? (
-                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-4 text-sm text-red-700">
                   {viewErr}
                 </div>
-              ) : !viewData ? (
-                <div className="py-10 text-center text-gray-500">No data</div>
-              ) : (
-                <div className="space-y-5">
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Student</div>
-                    </div>
-                    <div className="px-4">
-                      <DetailRow label="Student Name" value={viewData.student_name} />
+              ) : viewData ? (
+                <div className="space-y-6">
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Application</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Student" value={viewData.student_name} />
                       <DetailRow label="Student Number" value={viewData.student_number} />
-                      <DetailRow label="Program" value={viewData.program_code} />
-                      <DetailRow label="Department" value={viewData.department_name || viewData.course_department} />
+                      <DetailRow label="Status" value={viewData.status} />
+                      <DetailRow label="Submitted" value={formatDate(viewData.submitted_at)} />
+                      <DetailRow label="Updated" value={formatDate(viewData.updated_at)} />
                     </div>
-                  </div>
+                  </section>
 
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Course</div>
-                    </div>
-                    <div className="px-4">
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Course and class</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
                       <DetailRow label="Course Code" value={viewData.course_code} />
                       <DetailRow label="Course Title" value={viewData.course_title} />
+                      <DetailRow label="Section" value={viewData.section_code} />
+                      <DetailRow label="Faculty" value={viewData.faculty_name} />
+                      <DetailRow label="Schedule" value={viewData.schedule_text} />
+                      <DetailRow label="Remarks" value={viewData.remarks} />
+                    </div>
+                  </section>
+
+                  <section>
+                    <div className="mb-2 text-sm font-semibold uppercase tracking-wide text-slate-500">Student details</div>
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Department" value={viewData.department_name} />
                       <DetailRow label="Course Units" value={viewData.course_units} />
                       <DetailRow label="Units Remaining" value={viewData.units_remaining} />
                       <DetailRow label="Graduating After Term" value={viewData.graduating_after_term} />
                     </div>
-                  </div>
+                  </section>
 
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Request</div>
+                  <section>
+                    <div className="mb-2 flex items-center justify-between gap-3 text-sm font-semibold uppercase tracking-wide text-slate-500">
+                      <span>Attached EAF</span>
+                      {viewData.eaf_view_url ? (
+                        <button
+                          type="button"
+                          onClick={() => openEaf(viewData.eaf_view_url)}
+                          className="inline-flex items-center rounded-md bg-emerald-700 px-3 py-1.5 text-xs font-semibold normal-case tracking-normal text-white hover:bg-emerald-800"
+                        >
+                          Open EAF
+                        </button>
+                      ) : null}
                     </div>
-                    <div className="px-4">
-                      <DetailRow label="Reason" value={viewData.reason} />
-                      <DetailRow label="Reason (Other)" value={viewData.reason_other} />
+                    <div className="rounded-xl border border-gray-200 bg-white px-4">
+                      <DetailRow label="Uploaded" value={viewData.has_eaf ? 'Yes' : 'No'} />
+                      <DetailRow label="Filename" value={viewData.eaf_original_name} />
+                      <DetailRow label="Content Type" value={viewData.eaf_content_type} />
+                      <DetailRow label="File Size" value={viewData.eaf_size ? `${viewData.eaf_size} bytes` : ''} />
+                      <DetailRow label="Uploaded At" value={formatDate(viewData.eaf_uploaded_at)} />
                     </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Schedule</div>
-                    </div>
-                    <div className="px-4">
-                      <DetailRow label="Section" value={viewData.section_code || "—"} />
-
-                      <DetailRow
-                        label="Schedule 1"
-                        value={
-                          viewData.day1 && viewData.begin1 && viewData.end1
-                            ? `${viewData.day1} ${prettyHHMM(viewData.begin1)}–${prettyHHMM(viewData.end1)}`
-                            : "—"
-                        }
-                      />
-                      <DetailRow label="Room 1" value={roomLabel(viewData, 1)} />
-
-                      <DetailRow
-                        label="Schedule 2"
-                        value={
-                          viewData.day2 && viewData.begin2 && viewData.end2
-                            ? `${viewData.day2} ${prettyHHMM(viewData.begin2)}–${prettyHHMM(viewData.end2)}`
-                            : "—"
-                        }
-                      />
-                      <DetailRow label="Room 2" value={roomLabel(viewData, 2)} />
-
-                      <DetailRow label="Section ID" value={viewData.section_id} />
-                      <DetailRow label="Faculty" value={viewData.faculty_name || "UNASSIGNED"} />
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 overflow-hidden">
-                    <div className="px-4 py-3 bg-white border-b">
-                      <div className="text-sm font-semibold text-gray-900">Status</div>
-                    </div>
-                    <div className="px-4">
-                      <DetailRow label="Status" value={viewData.status} />
-                      <DetailRow label="Remarks" value={viewData.remarks} />
-                      <DetailRow label="Submitted At" value={formatDate(viewData.submitted_at)} />
-                      <DetailRow label="Updated At" value={formatDate(viewData.updated_at)} />
-                    </div>
-                  </div>
+                  </section>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-slate-200 bg-slate-50 px-4 py-6 text-sm text-slate-600">
+                  No application details available.
                 </div>
               )}
             </div>
+          </div>
+        </div>
+      )}
 
-            <div className="px-5 py-4 border-t bg-gray-50 flex items-center justify-end">
+
+      {confirmState && (
+        <div className="fixed inset-0 z-[120] flex items-center justify-center bg-black/35 px-4">
+          <div className="w-full max-w-lg overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-black/5">
+            <div className={cls("flex items-start gap-3 px-5 py-4 text-white", confirmState.accent === "amber" ? "bg-amber-600" : "bg-emerald-700")}>
+              <div className="mt-0.5 rounded-full bg-white/15 p-2">
+                <AlertTriangle className="h-5 w-5" />
+              </div>
+              <div className="min-w-0 flex-1">
+                <div className="text-base font-semibold">{confirmState.title}</div>
+                {confirmState.note && <div className="mt-1 text-sm text-white/85">{confirmState.note}</div>}
+              </div>
+              <button type="button" onClick={() => closeConfirm(false)} className="rounded-lg p-1 text-white/90 transition hover:bg-white/10" aria-label="Close confirmation">
+                <X className="h-5 w-5" />
+              </button>
+            </div>
+            <div className="px-5 py-4 text-sm whitespace-pre-line text-slate-700">{confirmState.message}</div>
+            <div className="flex items-center justify-end gap-2 border-t border-gray-100 px-5 py-4">
+              <button type="button" onClick={() => closeConfirm(false)} className="rounded-lg border border-gray-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-gray-50">
+                Cancel
+              </button>
               <button
                 type="button"
-                onClick={closeView}
-                className="rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm hover:bg-gray-100"
+                onClick={() => closeConfirm(true)}
+                className={cls("rounded-lg px-4 py-2 text-sm font-semibold text-white shadow-sm", confirmState.accent === "amber" ? "bg-amber-600 hover:bg-amber-700" : "bg-emerald-700 hover:bg-emerald-800")}
               >
-                Close
+                {confirmState.confirmText}
               </button>
             </div>
           </div>

@@ -42,10 +42,12 @@ import {
   importCurriculumCsv,    
   editCatalogCourse,  
   getSpecialClassData,
+  getApoSpecialClassDetail,
   updateApoSpecialClassRow,
   setApoOmSubmitWindow,
   downloadBlob,
   exportOMSC_Pdf,
+  type ApoSpecialClassUpdatePayload,
   type ApiConflict,
   type CreateCoursePayload,  
   type CourseCatalogItem,
@@ -785,6 +787,11 @@ type SpecialClassRow = {
   campus_name?: string;
   term_id?: string;
   term_label?: string;
+  section_id?: string | null;
+  course_id?: string | null;
+  assignment_id?: string | null;
+  faculty_id?: string | null;
+  section_code?: string | null;
   student?: { student_number?: string; student_name?: string };
   course?: { course_code?: string; course_title?: string };
   section?: { section_id?: string; section_code?: string; section_remarks?: string };
@@ -802,6 +809,250 @@ type SpecialClassResponse = {
   term_id?: string;
   term_label?: string;
   rows: SpecialClassRow[];
+};
+
+type ApoSpecialClassDetail = {
+  special_id: string;
+  student_name?: string;
+  student_number?: string | number;
+  program_code?: string;
+  graduating_after_term?: boolean;
+  reason?: string;
+  reason_other?: string;
+  has_eaf?: boolean;
+  eaf_original_name?: string;
+  eaf_uploaded_at?: string;
+  eaf_view_url?: string;
+  [k: string]: any;
+};
+
+type SpecialClassGroupStudent = {
+  special_id: string;
+  student_name: string;
+  student_number?: string | number;
+};
+
+type SpecialClassGroupRow = SpecialClassRow & {
+  group_key: string;
+  primary_special_id: string;
+  special_ids: string[];
+  count: number;
+  students: SpecialClassGroupStudent[];
+  source_rows: SpecialClassRow[];
+};
+
+function specialClassCourseCode(row: any): string {
+  const raw = row?.course?.course_code ?? row?.course_code ?? "";
+  if (Array.isArray(raw)) return String(raw[0] ?? "").trim();
+  return String(raw ?? "").trim();
+}
+
+function specialClassCourseTitle(row: any): string {
+  return String(row?.course?.course_title ?? row?.course_title ?? "").trim();
+}
+
+function specialClassStudentName(row: any): string {
+  return String(row?.student?.student_name ?? row?.student_name ?? "").trim();
+}
+
+function specialClassStudentNumber(row: any): string {
+  return String(row?.student?.student_number ?? row?.student_number ?? "").trim();
+}
+
+function specialClassSectionCode(row: any): string {
+  return String(row?.section?.section_code ?? row?.section_code ?? "").trim();
+}
+
+function specialClassFacultyName(row: any): string {
+  return String(row?.faculty?.faculty_name ?? row?.faculty_name ?? "").trim();
+}
+
+function specialClassSlotRoomLabel(slot: any): string {
+  const rn = String(slot?.room_number || slot?.room_name || "").trim();
+  const rid = String(slot?.room_id || "").trim();
+  const ridOrRn = String(rn || rid).trim().toUpperCase();
+  if (ridOrRn === "ONLINE") return "TBA";
+  if (!rn && !rid) return "TBA";
+  return rn || rid || "TBA";
+}
+
+function specialClassSlotTime(slot: any): string {
+  const st = fmtTime(slot?.start_time);
+  const en = fmtTime(slot?.end_time);
+  if (st === "—" && en === "—") return "—";
+  if (st === "—") return en;
+  if (en === "—") return st;
+  return `${st} - ${en}`;
+}
+
+function buildGroupedSpecialClassRows(input: SpecialClassRow[]): SpecialClassGroupRow[] {
+  const groups = new Map<string, SpecialClassRow[]>();
+
+  const hasRealStudent = (row: SpecialClassRow) => {
+    const name = specialClassStudentName(row).trim();
+    const num = specialClassStudentNumber(row).trim();
+    return Boolean((name && name !== "—") || num);
+  };
+
+  const slotSig = (slot: any) => {
+    if (!slot) return "";
+    return [
+      String(slot?.schedule_id ?? "").trim(),
+      String(slot?.day ?? "").trim(),
+      String(slot?.start_time ?? "").trim(),
+      String(slot?.end_time ?? "").trim(),
+    ].join("|");
+  };
+
+  const rowScheduleSig = (row: SpecialClassRow) => {
+    const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
+    const s1 = row?.slot1 ?? se[0] ?? null;
+    const s2 = row?.slot2 ?? se[1] ?? null;
+    return [slotSig(s1), slotSig(s2)].join("||");
+  };
+
+  input.forEach((row) => {
+    const sectionId = String((row as any)?.section_id ?? (row as any)?.section?.section_id ?? "").trim();
+    const assignmentId = String((row as any)?.assignment_id ?? "").trim();
+    const facultyId = String((row as any)?.faculty_id ?? "").trim();
+    const sectionCode = String((row as any)?.section_code ?? (row as any)?.section?.section_code ?? "").trim();
+    const courseId = String((row as any)?.course_id ?? "").trim();
+    const courseCode = specialClassCourseCode(row);
+    const schedSig = rowScheduleSig(row);
+
+    const key = sectionId
+      ? `sec:${sectionId}`
+      : assignmentId
+      ? `asg:${assignmentId}|sch:${schedSig}`
+      : (courseId || courseCode)
+      ? `course:${courseId || courseCode}|fac:${facultyId}|scode:${sectionCode}|sch:${schedSig}`
+      : `special:${String(row?.special_id ?? "").trim()}`;
+
+    const arr = groups.get(key) || [];
+    arr.push(row);
+    groups.set(key, arr);
+  });
+
+  const pickPrimary = (rows: SpecialClassRow[]) => {
+    const hasBinding = (row: SpecialClassRow) => {
+      if (String((row as any)?.section_id ?? "").trim()) return true;
+      if (String((row as any)?.assignment_id ?? "").trim()) return true;
+      const allSlots = [
+        ...(Array.isArray(row?.schedule_entries) ? row.schedule_entries : []),
+        row?.slot1,
+        row?.slot2,
+      ].filter(Boolean) as any[];
+      return allSlots.some((slot) => Boolean(String(slot?.schedule_id ?? "").trim()));
+    };
+
+    return (
+      rows.find((row) => hasBinding(row)) ||
+      rows.find((row) =>
+        Boolean(
+          specialClassSectionCode(row) ||
+          specialClassFacultyName(row) ||
+          row?.slot1 ||
+          row?.slot2 ||
+          (Array.isArray(row?.schedule_entries) && row.schedule_entries.length > 0)
+        )
+      ) || rows[0]
+    );
+  };
+
+  return Array.from(groups.entries())
+    .map(([groupKey, rows]) => {
+      const sorted = [...rows].sort((a, b) =>
+        specialClassStudentName(a).localeCompare(specialClassStudentName(b))
+      );
+      const primary = pickPrimary(sorted);
+      const scheduleEntries = Array.isArray(primary?.schedule_entries) ? primary.schedule_entries : [];
+      const slot1 = primary?.slot1 ?? scheduleEntries[0] ?? null;
+      const slot2 = primary?.slot2 ?? scheduleEntries[1] ?? null;
+      const realStudentRows = sorted.filter((row) => hasRealStudent(row));
+      return {
+        ...(primary as any),
+        group_key: groupKey,
+        primary_special_id: String(primary?.special_id ?? "").trim(),
+        special_ids: sorted.map((row) => String(row?.special_id ?? "").trim()).filter(Boolean),
+        count: realStudentRows.length,
+        students: realStudentRows.map((row) => ({
+          special_id: String(row?.special_id ?? "").trim(),
+          student_name: specialClassStudentName(row),
+          student_number: specialClassStudentNumber(row) || undefined,
+        })),
+        source_rows: sorted,
+        course_code: specialClassCourseCode(primary),
+        course_title: specialClassCourseTitle(primary),
+        section_code: specialClassSectionCode(primary),
+        faculty_name: specialClassFacultyName(primary) || "UNASSIGNED",
+        remarks: String(primary?.remarks ?? primary?.section?.section_remarks ?? primary?.section_remarks ?? "").trim(),
+        schedule_entries: scheduleEntries,
+        slot1,
+        slot2,
+      } as SpecialClassGroupRow;
+    })
+    .sort((a, b) => {
+      const ac = specialClassCourseCode(a);
+      const bc = specialClassCourseCode(b);
+      if (ac !== bc) return ac.localeCompare(bc);
+      return String((a as any)?.section_code ?? "").localeCompare(String((b as any)?.section_code ?? ""));
+    });
+}
+
+function DetailRow({ label, value }: { label: string; value: any }) {
+  const shown =
+    value === null || value === undefined || value === ""
+      ? "—"
+      : typeof value === "boolean"
+      ? value
+        ? "Yes"
+        : "No"
+      : String(value);
+
+  return (
+    <div className="grid grid-cols-[180px_1fr] gap-3 py-2 border-b border-gray-100">
+      <div className="text-sm text-gray-500">{label}</div>
+      <div className="text-sm text-gray-800 whitespace-pre-wrap break-words">{shown}</div>
+    </div>
+  );
+}
+
+const formatSpecialClassDate = (value?: string | null) => {
+  if (!value) return "—";
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString();
+};
+
+type DissolvedClassSlot = {
+  day?: string;
+  start_time?: string;
+  end_time?: string;
+  room_id?: string | null;
+  room_number?: string | null;
+};
+
+type DissolvedClassRow = {
+  section_id: string;
+  course_id?: string;
+  course_code?: string;
+  course_title?: string;
+  section_code?: string;
+  faculty_name?: string;
+  schedule_entries?: DissolvedClassSlot[];
+  slot1?: DissolvedClassSlot | null;
+  slot2?: DissolvedClassSlot | null;
+  schedule_text?: string;
+  enrolled_students?: number;
+  status?: string;
+  updated_at?: string;
+};
+
+type DissolvedClassesResponse = {
+  campus?: { campus_id?: string; campus_name?: string };
+  term_id?: string;
+  term_label?: string;
+  rows: DissolvedClassRow[];
 };
 
 type CurriculumItem = {
@@ -904,7 +1155,7 @@ type ConflictState = {
   reason: string;
 };
 
-type ViewMode = "offerings" | "curriculum" | "specialclass";
+type ViewMode = "offerings" | "curriculum" | "specialclass" | "dissolved";
 
 /* ----------------------- SECTION CODE RULES (NEW) ----------------------- */
 
@@ -1196,15 +1447,24 @@ export default function CourseOfferingsPage() {
   const [scRows, setScRows] = useState<SpecialClassRow[]>([]);
   const [scLoading, setScLoading] = useState(false);
   const [scErr, setScErr] = useState<string | null>(null);
+  const [dissolvedRows, setDissolvedRows] = useState<DissolvedClassRow[]>([]);
+  const [dissolvedLoading, setDissolvedLoading] = useState(false);
+  const [dissolvedErr, setDissolvedErr] = useState<string | null>(null);
 
-  const [scSelectedIds, setScSelectedIds] = useState<Record<string, boolean>>({});
   const [scExporting, setScExporting] = useState(false);
   const [scExportErr, setScExportErr] = useState<string>("");
   const [scExportOpen, setScExportOpen] = useState(false);
 
   /** ------------------ Editing state ------------------ */
   const [scEditingId, setScEditingId] = useState<string | null>(null);
+  const [scEditingSpecialIds, setScEditingSpecialIds] = useState<string[]>([]);
+  const [scEditSectionCode, setScEditSectionCode] = useState<string>("");
   const [scEditRemarks, setScEditRemarks] = useState<string>("");
+
+  const [scViewOpen, setScViewOpen] = useState(false);
+  const [scViewLoading, setScViewLoading] = useState(false);
+  const [scViewErr, setScViewErr] = useState("");
+  const [scViewData, setScViewData] = useState<ApoSpecialClassDetail | null>(null);
 
   /** room edits (we store room_id because backend update wants room_id) */
   const [scEditRoom1, setScEditRoom1] = useState<string>(""); // room_id or "ONLINE"
@@ -1311,38 +1571,18 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
     });
   }, [scRows, apoCampus, scData?.campus?.campus_name, data?.campus?.campus_name]);
 
-
-  const scSelectedList = useMemo(
-    () => scRowsForCampus.filter((r) => !!scSelectedIds[String((r as any)?.special_id)]).map((r) => String((r as any)?.special_id)),
-    [scRowsForCampus, scSelectedIds]
+  const scGroupedRowsForCampus = useMemo(
+    () => buildGroupedSpecialClassRows(scRowsForCampus),
+    [scRowsForCampus]
   );
 
-  const toggleAllSpecialClassVisible = (checked: boolean) => {
-    setScSelectedIds((prev) => {
-      const next = { ...prev };
-      scRowsForCampus.forEach((r) => {
-        const id = String((r as any)?.special_id ?? "").trim();
-        if (!id) return;
-        if (checked) next[id] = true;
-        else delete next[id];
-      });
-      return next;
-    });
-  };
+  const scExportAllList = useMemo(
+    () => scRowsForCampus.map((r) => String((r as any)?.special_id || "").trim()).filter(Boolean),
+    [scRowsForCampus]
+  );
 
-  const toggleOneSpecialClass = (id: string, checked: boolean) => {
-    const sid = String(id ?? "").trim();
-    if (!sid) return;
-    setScSelectedIds((prev) => {
-      const next = { ...prev };
-      if (checked) next[sid] = true;
-      else delete next[sid];
-      return next;
-    });
-  };
-
-  const exportSelectedSpecialClassPdf = async () => {
-    // Export each selected application as its own PDF file (separate downloads)
+  const exportSpecialClassPdf = async () => {
+    // Export each visible application as its own PDF file (separate downloads)
     const safe = (s: string) =>
       (s || "")
         .replace(/[\\/:*?"<>|]+/g, "_")
@@ -1370,13 +1610,13 @@ const [currImportErr, setCurrImportErr] = useState<string | null>(null);
 
     try {
       setScExportErr("");
-      if (scSelectedList.length === 0) {
-        setScExportErr("Select at least one row to export.");
+      if (scExportAllList.length === 0) {
+        setScExportErr("No visible rows to export.");
         return;
       }
 
       setScExporting(true);
-      for (const id of scSelectedList) {
+      for (const id of scExportAllList) {
         const blob = await exportOMSC_Pdf({
           termId: scData?.term_id,
           special_ids: [id],
@@ -1705,7 +1945,6 @@ const loadOfferings = async () => {
       setScData(data);
       setScRows(data.rows || []);
     
-      setScSelectedIds({});
       setScExportErr("");
     } catch (e: any) {
       setScErr(
@@ -1713,6 +1952,30 @@ const loadOfferings = async () => {
       );
     } finally {
       setScLoading(false);
+    }
+  };
+
+
+  const loadDissolvedClasses = async () => {
+    setDissolvedLoading(true);
+    setDissolvedErr(null);
+    try {
+      const userId = user?.userId;
+      if (!userId) {
+        setDissolvedErr("User is not logged in");
+        return;
+      }
+
+      const resp = (await getApoCourseOfferings(userId, {
+        view: "dissolved",
+      })) as unknown as DissolvedClassesResponse;
+
+      setDissolvedRows(Array.isArray(resp?.rows) ? resp.rows : []);
+    } catch (e: any) {
+      setDissolvedErr(e?.message || "Failed to load dissolved classes.");
+      setDissolvedRows([]);
+    } finally {
+      setDissolvedLoading(false);
     }
   };
 
@@ -1797,54 +2060,103 @@ const loadOfferings = async () => {
     }
   };
 
-  const beginEditSpecialClassRow = async (row: SpecialClassRow) => {
-    setScEditingId(row.special_id);
+  const beginEditSpecialClassRow = async (row: SpecialClassRow | SpecialClassGroupRow) => {
+    const primaryId = String((row as any).primary_special_id ?? row.special_id ?? "").trim();
+    const targetIds = Array.isArray((row as any).special_ids) && (row as any).special_ids.length > 0
+      ? ((row as any).special_ids as string[]).map((id) => String(id).trim()).filter(Boolean)
+      : [String(row.special_id || "").trim()].filter(Boolean);
 
-    // remarks edit (special class remarks)
-    setScEditRemarks(String(row.remarks ?? ""));
+    setScEditingId(primaryId || String(row.special_id || "").trim());
+    setScEditingSpecialIds(targetIds);
+    setScEditSectionCode(String((row as any)?.section?.section_code ?? (row as any)?.section_code ?? ""));
+    setScEditRemarks(String(row.remarks ?? (row as any)?.section?.section_remarks ?? (row as any)?.section_remarks ?? ""));
 
-    // room edits (we store room_id)
     const s1 = _slotFromRow(row as any, 1);
     const s2 = _slotFromRow(row as any, 2);
     setScEditRoom1(_roomIdFromSlot(s1));
     setScEditRoom2(_roomIdFromSlot(s2));
 
-    // preload eligible rooms for dropdowns (same logic as offerings)
-    await Promise.all([ensureEligibleRoomsForSlot(row, 1), ensureEligibleRoomsForSlot(row, 2)]);
+    await Promise.all([ensureEligibleRoomsForSlot(row as SpecialClassRow, 1), ensureEligibleRoomsForSlot(row as SpecialClassRow, 2)]);
   };
 
   const cancelEditSpecialClassRow = () => {
     setScEditingId(null);
+    setScEditingSpecialIds([]);
+    setScEditSectionCode("");
     setScEditRemarks("");
     setScEditRoom1("");
     setScEditRoom2("");
     setScSaveLoadingId(null);
   };
 
-  const saveSpecialClassRowEdits = async (row: SpecialClassRow) => {
+  const openSpecialClassView = async (specialId: string) => {
+    if (!user?.userId) {
+      setScErr("User is not logged in");
+      return;
+    }
+
+    setScViewOpen(true);
+    setScViewLoading(true);
+    setScViewErr("");
+    setScViewData(null);
+
+    try {
+      const res = await getApoSpecialClassDetail(user.userId, specialId, scData?.term_id ?? currentTermId ?? undefined);
+      setScViewData(res.row);
+    } catch (e: any) {
+      setScViewErr(e?.message || "Failed to load application detail.");
+    } finally {
+      setScViewLoading(false);
+    }
+  };
+
+  const closeSpecialClassView = () => {
+    setScViewOpen(false);
+    setScViewLoading(false);
+    setScViewErr("");
+    setScViewData(null);
+  };
+
+  const openSpecialClassEaf = (url?: string) => {
+    if (!url) return;
+    const uid = String(user?.userId || "").trim();
+    let nextUrl = url;
+    try {
+      const full = new URL(url, window.location.origin);
+      if (uid && !full.searchParams.get("userId")) {
+        full.searchParams.set("userId", uid);
+      }
+      nextUrl = full.pathname + full.search + full.hash;
+    } catch {
+      nextUrl = url + (uid && !/[?&]userId=/.test(url) ? `${url.includes("?") ? "&" : "?"}userId=${encodeURIComponent(uid)}` : "");
+    }
+    window.open(nextUrl, "_blank", "noopener,noreferrer");
+  };
+
+  const saveSpecialClassRowEdits = async (row: SpecialClassRow | SpecialClassGroupRow) => {
     const userId = user?.userId;
     if (!userId) {
       setScErr("User is not logged in");
       return;
     }
 
-    setScSaveLoadingId(row.special_id);
+    const primaryId = String((row as any).primary_special_id ?? row.special_id ?? "").trim();
+    const targetIds = (scEditingSpecialIds.length > 0
+      ? scEditingSpecialIds
+      : (Array.isArray((row as any).special_ids) ? (row as any).special_ids : [row.special_id]))
+      .map((id: any) => String(id ?? "").trim())
+      .filter(Boolean);
+
+    setScSaveLoadingId(primaryId || String(row.special_id || "").trim());
     setScErr(null);
 
     try {
-      // build schedule_entries payload (keep day/start/end; update room_id only)
-      // IMPORTANT: some Special Class rows may not have schedule_entries populated,
-      // but do have slot1/slot2. Use those as fallback so room changes persist and
-      // immediately reflect in the table.
       const seBase =
         Array.isArray(row.schedule_entries) && row.schedule_entries.length > 0
           ? row.schedule_entries
           : [row.slot1, row.slot2].filter(Boolean);
       const next = [...(seBase as any[])].map((x) => ({ ...x }));
 
-      // Keep the displayed room label in-sync immediately after saving.
-      // Many rows include `room_number`/`room_name` from the backend; if we only update `room_id`,
-      // the table can keep showing the previous `room_number` until a full reload.
       const resolveRoomLabel = (specialId: string, idx: 1 | 2, roomId: string | null) => {
         const rid = String(roomId || "").trim();
         if (!rid) return { room_number: null as any, room_name: null as any };
@@ -1864,13 +2176,12 @@ const loadOfferings = async () => {
         };
       };
 
-      const sid = String(row.special_id || "").trim();
+      const sid = primaryId || String(row.special_id || "").trim();
 
       if (next[0]) {
         const rid = scEditRoom1 ? String(scEditRoom1).trim() : null;
         next[0].room_id = rid || null;
         const lab = resolveRoomLabel(sid, 1, rid);
-        // Mirror label fields so the read-only view updates instantly
         next[0].room_number = lab.room_number;
         next[0].room_name = lab.room_name;
       }
@@ -1883,32 +2194,81 @@ const loadOfferings = async () => {
         next[1].room_name = lab.room_name;
       }
 
-      await updateApoSpecialClassRow(userId, {
-        special_id: row.special_id,
-        term_id: row.term_id ?? scData?.term_id, // important for correct record
-        remarks: scEditRemarks,
-        schedule_entries: next.map((x) => ({
+      const normalizedEntries: NonNullable<
+        ApoSpecialClassUpdatePayload["schedule_entries"]
+      > = [];
+      for (const x of next as any[]) {
+        const entry: NonNullable<ApoSpecialClassUpdatePayload["schedule_entries"]>[number] = {
           schedule_id: x?.schedule_id ?? null,
           day: x?.day ?? null,
           start_time: x?.start_time ?? null,
           end_time: x?.end_time ?? null,
           room_type: x?.room_type ?? null,
           room_id: x?.room_id ?? null,
-        })),
+        };
+        const hasMeaningfulValue = Object.values(entry).some(
+          (value) => value !== null && String(value ?? "").trim() !== ""
+        );
+        if (hasMeaningfulValue) normalizedEntries.push(entry);
+      }
+
+      await updateApoSpecialClassRow(userId, {
+        special_id: sid,
+        special_ids: targetIds,
+        term_id: row.term_id ?? scData?.term_id,
+        section_id:
+          String(
+            (row as any)?.section_id ??
+            (row as any)?.section?.section_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) =>
+                  String(r?.section_id ?? r?.section?.section_id ?? "").trim()
+                )?.section_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        course_id:
+          String(
+            (row as any)?.course_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.course_id ?? "").trim())?.course_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        assignment_id:
+          String(
+            (row as any)?.assignment_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.assignment_id ?? "").trim())?.assignment_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        faculty_id:
+          String(
+            (row as any)?.faculty_id ??
+            (Array.isArray((row as any)?.source_rows)
+              ? (row as any).source_rows.find((r: any) => String(r?.faculty_id ?? "").trim())?.faculty_id
+              : "") ??
+            ""
+          ).trim() || undefined,
+        section_code: scEditSectionCode,
+        remarks: scEditRemarks,
+        schedule_entries: normalizedEntries,
       });
 
-      // Update UI after successful save
       setScRows((prev) =>
         prev.map((r) =>
-          r.special_id !== row.special_id
-            ? r
-            : {
+          targetIds.includes(String(r.special_id))
+            ? {
                 ...r,
+                section_code: scEditSectionCode,
+                section: { ...(r.section || {}), section_code: scEditSectionCode },
                 remarks: scEditRemarks,
                 schedule_entries: next,
                 slot1: next[0] ?? r.slot1 ?? null,
                 slot2: next[1] ?? r.slot2 ?? null,
               }
+            : r
         )
       );
 
@@ -1919,17 +2279,21 @@ const loadOfferings = async () => {
           ? `Failed to save special class edits: ${e.message}`
           : "Failed to save special class edits"
       );
-      // keep edit mode open so user doesn’t lose input
     } finally {
       setScSaveLoadingId(null);
     }
   };
 
-  // View switching: specialclass + curriculum only
+  // View switching: specialclass + dissolved + curriculum
   useEffect(() => {
     if (view === "specialclass") {
       const tid = currentTermId || data?.term_id || curr?.term_id || undefined;
       loadSpecialClass(tid);
+      return;
+    }
+
+    if (view === "dissolved") {
+      loadDissolvedClasses();
       return;
     }
 
@@ -4031,6 +4395,35 @@ const promptSaveEdit = () => {
     await loadCurriculum();
   };
 
+  const dissolvedCellLines = (row: DissolvedClassRow) => {
+    const rawEntries = Array.isArray(row?.schedule_entries)
+      ? row.schedule_entries
+      : [row?.slot1, row?.slot2].filter(Boolean);
+    const entries = (rawEntries || []).slice(0, 2);
+
+    const timeLine = (slot?: DissolvedClassSlot | null) => {
+      if (!slot) return "—";
+      const st = fmtTime(slot.start_time || "");
+      const en = fmtTime(slot.end_time || "");
+      if (st === "—" && en === "—") return "—";
+      if (st !== "—" && en !== "—") return `${st}-${en}`;
+      return [st !== "—" ? st : "", en !== "—" ? en : ""].filter(Boolean).join("-") || "—";
+    };
+
+    const roomLine = (slot?: DissolvedClassSlot | null) => {
+      const room = String(slot?.room_number || slot?.room_id || "").trim();
+      if (!room) return "TBA";
+      if (room.toUpperCase() === "ONLINE") return "TBA";
+      return room;
+    };
+
+    return {
+      days: entries.length ? entries.map((slot) => String(slot?.day || "—").trim() || "—") : ["—"],
+      times: entries.length ? entries.map((slot) => timeLine(slot)) : ["—"],
+      rooms: entries.length ? entries.map((slot) => roomLine(slot)) : ["TBA"],
+    };
+  };
+
   /* ----------------------------------- UI ----------------------------------- */
 
   return (
@@ -4079,6 +4472,15 @@ const promptSaveEdit = () => {
             )}
           >
             Special Class
+          </button>
+          <button
+            onClick={() => setView("dissolved")}
+            className={cls(
+              "px-3 py-1.5 text-sm font-medium border-l border-emerald-700",
+              view === "dissolved" ? "bg-emerald-700 text-white" : "bg-white text-emerald-700"
+            )}
+          >
+            Dissolved Classes
           </button>
           </div>
 
@@ -4268,16 +4670,16 @@ const promptSaveEdit = () => {
             type="button"
             onClick={() => {
               setScExportOpen(false);
-              exportSelectedSpecialClassPdf();
+              exportSpecialClassPdf();
             }}
-            disabled={scSelectedList.length === 0 || scExporting}
+            disabled={scExportAllList.length === 0 || scExporting}
             className={cls(
               "w-full text-left px-3 py-2 text-sm hover:bg-gray-50",
-              (scSelectedList.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
+              (scExportAllList.length === 0 || scExporting) && "opacity-60 cursor-not-allowed"
             )}
-            title={scSelectedList.length === 0 ? "Select at least one row" : "Export selected rows to PDF"}
+            title={scExportAllList.length === 0 ? "No visible rows" : "Export visible rows to PDF"}
           >
-            Export selected (PDF)
+            Export visible (PDF)
           </button>
           <button
             type="button"
@@ -4757,7 +5159,8 @@ ${msg}`,
             <div>
               <h2 className="text-lg font-bold">
                 {view === "curriculum" ? "List of Courses" :
-                view === "specialclass" ? "Special Class" : "Course Offerings"}
+                view === "specialclass" ? "Special Class" :
+                view === "dissolved" ? "Dissolved Classes" : "Course Offerings"}
               </h2>
               <p className="text-sm text-gray-500">{loading ? "Loading…" : data?.term_label || curr?.term_label || ""}</p>
               {err && <p className="text-sm text-red-600">{err}</p>}
@@ -5966,6 +6369,68 @@ ${msg}`,
               )}
             </div>
           )}
+          {/* ------------------------------ Dissolved Classes ------------------------------ */}
+          {view === "dissolved" && (
+            <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
+              <div className="bg-emerald-700 text-white px-4 py-3 flex items-center justify-between">
+                <div className="font-semibold">Dissolved Classes</div>
+              </div>
+
+              <div className="p-3">
+                {dissolvedErr && <div className="mb-2 text-sm text-red-600">{dissolvedErr}</div>}
+
+                {dissolvedLoading ? (
+                  <div className="text-sm text-neutral-500">Loading…</div>
+                ) : dissolvedErr ? (
+                  <div className="text-sm text-red-600">Failed to load dissolved classes: {dissolvedErr}</div>
+                ) : dissolvedRows.length === 0 ? (
+                  <div className="text-sm text-neutral-500">No dissolved classes found.</div>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-sm border-collapse">
+                      <thead className="bg-gray-50 text-emerald-800">
+                        <tr className="text-[13px] font-semibold">
+                          <th className="px-3 py-2 text-left border border-gray-300">Course</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Section</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Day</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Time</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Room</th>
+                          <th className="px-3 py-2 text-left border border-gray-300">Enrolled Students</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {dissolvedRows.map((row) => {
+                          const lines = dissolvedCellLines(row);
+                          return (
+                            <tr key={String(row.section_id || `${row.course_id}-${row.section_code}`)} className="hover:bg-neutral-50">
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="font-semibold text-emerald-700">{row.course_code || "—"}</div>
+                                <div className="text-xs text-gray-500">{row.course_title || "—"}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{row.section_code || "—"}</td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{row.faculty_name || "UNASSIGNED"}</td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.days.map((v, i) => <div key={`day-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.times.map((v, i) => <div key={`time-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">
+                                <div className="space-y-1">{lines.rooms.map((v, i) => <div key={`room-${row.section_id}-${i}`}>{v}</div>)}</div>
+                              </td>
+                              <td className="px-3 py-2 border border-gray-300 align-top">{typeof row.enrolled_students === "number" ? row.enrolled_students : "—"}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* ------------------------------ Special Class ------------------------------ */}
           {view === "specialclass" && (
             <div className="rounded-xl border border-gray-300 bg-white shadow-sm overflow-hidden">
@@ -5977,97 +6442,36 @@ ${msg}`,
                 {scErr && <div className="mb-2 text-sm text-red-600">{scErr}</div>}
                 {scExportErr && <div className="mb-2 text-sm text-red-600">{scExportErr}</div>}
 
-{scLoading ? (
+                {scLoading ? (
                   <div className="text-sm text-neutral-500">Loading…</div>
                 ) : scErr ? (
                   <div className="text-sm text-red-600">Failed to load special class: {scErr}</div>
-                ) : scRowsForCampus.length === 0 ? (
+                ) : scGroupedRowsForCampus.length === 0 ? (
                   <div className="text-sm text-neutral-500">No special class records found.</div>
                 ) : (
                   <div className="overflow-x-auto">
                     <table className="w-full text-sm border-collapse">
                       <thead className="bg-gray-50 text-emerald-800">
                         <tr className="text-[13px] font-semibold">
-
-<th className="px-3 py-2 text-left border border-gray-300 w-10">
-  <input
-    type="checkbox"
-    className="h-4 w-4 accent-emerald-700"
-    checked={
-      scRowsForCampus.length > 0 &&
-      scRowsForCampus.every((r) => !!scSelectedIds[String((r as any)?.special_id)])
-    }
-    onChange={(e) => toggleAllSpecialClassVisible(e.target.checked)}
-    aria-label="Select all visible special class rows"
-  />
-</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Student</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Course</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Section</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Faculty</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Day 1</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Begin 1</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">End 1</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Room 1</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Day 2</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Begin 2</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">End 2</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Room 2</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Remarks</th>
-                        <th className="px-3 py-2 text-left border border-gray-300">Actions</th>
-                      </tr>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[190px]">Course</th>
+                          <th className="px-3 py-2 text-center border border-gray-300 w-16">Count</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[240px]">Students</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[110px]">Section</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[180px]">Faculty</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[90px]">Day</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[140px]">Time</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[180px]">Room</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 min-w-[180px]">Remarks</th>
+                          <th className="px-3 py-2 text-left border border-gray-300 w-24">Actions</th>
+                        </tr>
                       </thead>
 
                       <tbody>
-                        {scRowsForCampus.map((raw) => {
-                          const row = raw as any;
-                          const isEditing = scEditingId === String(row.special_id);
-
-                          const student_name = row?.student?.student_name ?? row?.student_name ?? "—";
-                          const student_number = row?.student?.student_number ?? row?.student_number ?? "—";
-
-                          const course_code_raw = row?.course?.course_code ?? row?.course_code ?? "";
-                          const course_code = Array.isArray(course_code_raw)
-                            ? String(course_code_raw[0] ?? "—")
-                            : String(course_code_raw || "—");
-
-                          const course_title = row?.course?.course_title ?? row?.course_title ?? "—";
-
-                          const section_code = row?.section?.section_code ?? row?.section_code ?? "—";
-                          const faculty_name = row?.faculty?.faculty_name ?? row?.faculty_name ?? "—";
-
-                          const se = Array.isArray(row?.schedule_entries) ? row.schedule_entries : [];
-                          const slot1 = row?.slot1 ?? se[0] ?? null;
-                          const slot2 = row?.slot2 ?? se[1] ?? null;
-
-                          const slotDay = (s: any) => (s?.day || "—");
-
-                          const safeTime = (x: any) => {
-                            const digits = String(x ?? "").replace(/\D/g, "");
-                            if (!digits) return "—";
-                            const hhmm = digits.padStart(4, "0");
-                            return typeof fmtTime === "function" ? fmtTime(hhmm) : hhmm;
-                          };
-                          const slotStart = (s: any) => safeTime(s?.start_time);
-                          const slotEnd = (s: any) => safeTime(s?.end_time);
-
-                          const slotRoomLabel = (s: any) => {
-                          const rn = String(s?.room_number || s?.room_name || "").trim();
-                          const rid = String(s?.room_id || "").trim();
-
-                          // Treat ONLINE as "no physical room". If a room_id exists, display it even
-                          // if room_type was (incorrectly) stored as "Online" (delivery mode).
-                          const ridOrRn = String(rn || rid).trim().toUpperCase();
-                          if (ridOrRn === "ONLINE") return "TBA";
-                          if (!rn && !rid) return "TBA";
-                          return rn || rid || "TBA";
-
-                          };
-
-
-                          // Prefer row.remarks; fallback to section_remarks if backend sends it there
-                          const remarks =
-                            row?.remarks ?? row?.section?.section_remarks ?? row?.section_remarks ?? "—";
+                        {scGroupedRowsForCampus.map((group) => {
+                          const isEditing = scEditingId === String(group.primary_special_id);
+                          const slot1 = group.slot1 ?? null;
+                          const slot2 = group.slot2 ?? null;
+                          const slots = [slot1, slot2].filter(Boolean) as any[];
 
                           const slotReadySC = (s: any) =>
                             !!String(s?.day ?? "").trim() &&
@@ -6079,107 +6483,131 @@ ${msg}`,
                             (data as any)?.campus?.campus_id ||
                             "";
 
-                          const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(row) : undefined;
+                          const minCap = typeof _minCapacityFromRow === "function" ? _minCapacityFromRow(group as any) : undefined;
                           const excludeScheduleIds =
-                            typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(row) : [];
+                            typeof _scheduleIdsFromRow === "function" ? _scheduleIdsFromRow(group as any) : [];
 
-                          const fallbackRoomsBase = filterRoomsByCap(
+                          const fallbackRooms = filterRoomsByCap(
                             ((data as any)?.room_options || []) as any[],
                             minCap
                           );
 
-                          const fallbackRooms = fallbackRoomsBase;;
-
                           return (
-                            <tr key={String(row.special_id)} className="hover:bg-neutral-50">
+                            <tr key={group.group_key} className="hover:bg-neutral-50 align-top">
+
                               <td className="px-3 py-2 border border-gray-300">
-                                <input
-                                  type="checkbox"
-                                  className="h-4 w-4 accent-emerald-700"
-                                  checked={!!scSelectedIds[String(row.special_id)]}
-                                  onChange={(e) => toggleOneSpecialClass(String(row.special_id), e.target.checked)}
-                                  aria-label={`Select special class ${String(row.special_id)}`}
-                                />
+                                <div className="font-semibold text-emerald-700">{group.course_code || "—"}</div>
+                                <div className="text-xs text-gray-500">{group.course_title || "—"}</div>
                               </td>
 
-<td className="px-3 py-2 border border-gray-300">
-                                <div className="font-medium">{student_name || "—"}</div>
-                                <div className="text-xs text-gray-500">{student_number || "—"}</div>
+                              <td className="px-3 py-2 border border-gray-300 text-center">
+                                <span className="inline-flex h-7 min-w-7 items-center justify-center rounded-full bg-slate-100 px-2 text-xs font-semibold text-slate-700">
+                                  {group.count}
+                                </span>
                               </td>
 
                               <td className="px-3 py-2 border border-gray-300">
-                                <div className="font-semibold text-emerald-700">{course_code || "—"}</div>
-                                <div className="text-xs text-gray-500">{course_title || "—"}</div>
-                              </td>
-
-                              <td className="px-3 py-2 border border-gray-300">{section_code || "—"}</td>
-                              <td className="px-3 py-2 border border-gray-300">{faculty_name || "—"}</td>
-
-                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot1)}</td>
-                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot1)}</td>
-                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot1)}</td>
-                              <td className="px-3 py-2 border border-gray-300">
-                              {isEditing ? (
-                              <div className="w-full max-w-[160px] overflow-visible">
-                                <EligibleRoomSelect
-                                    userId={user?.userId}
-                                    campusId={campusId}
-                                    spec={{
-                                      day: String(slot1?.day ?? "").trim(),
-                                      start: String(slot1?.start_time ?? "").trim(),
-                                      end: String(slot1?.end_time ?? "").trim(),
-                                      roomType: String(slot1?.room_type ?? row?.course?.room_type ?? "").trim() || null,
-                                      capacity: minCap ?? null,
-                                      excludeScheduleIds,
-                                      // Let backend infer the correct section enrollment_cap from DB
-                                      sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
-                                      scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
-                                    }}
-                                    fallbackRooms={fallbackRooms}
-                                    value={scEditRoom1 || null}
-                                    disabled={ 
-                                      !slotReadySC(slot1) || !user?.userId || !campusId || scEligibleRoomsLoading[slot1?.room_id ?? ""] || fallbackRooms.length === 0
-                                    }
-
-
-                                    onChange={(roomId) => setScEditRoom1(roomId ?? "")}
-                                  />
+                                <div className="space-y-2">
+                                  {group.students.map((student) => (
+                                    <button
+                                      key={student.special_id}
+                                      type="button"
+                                      onClick={() => openSpecialClassView(student.special_id)}
+                                      className="block text-left hover:opacity-80"
+                                    >
+                                      <div className="text-emerald-700 font-medium">
+                                        {student.student_name || "—"}
+                                        {student.student_number ? (
+                                          <span className="text-xs text-gray-500 font-normal"> ({student.student_number})</span>
+                                        ) : null}
+                                      </div>
+                                    </button>
+                                  ))}
                                 </div>
-                              ) : (
-                                slotRoomLabel(slot1)
-                              )}
                               </td>
 
-                              <td className="px-3 py-2 border border-gray-300">{slotDay(slot2)}</td>
-                              <td className="px-3 py-2 border border-gray-300">{slotStart(slot2)}</td>
-                              <td className="px-3 py-2 border border-gray-300">{slotEnd(slot2)}</td>
                               <td className="px-3 py-2 border border-gray-300">
                                 {isEditing ? (
-                                <div className="w-full max-w-[160px] overflow-visible">
-                                  <EligibleRoomSelect
-                                      userId={user?.userId}
-                                      campusId={campusId}
-                                      spec={{
-                                        day: String(slot2?.day ?? "").trim(),
-                                        start: String(slot2?.start_time ?? "").trim(),
-                                        end: String(slot2?.end_time ?? "").trim(),
-                                        roomType:
-                                          String(slot2?.room_type ?? slot1?.room_type ?? row?.course?.room_type ?? "")
-                                            .trim() || null,
-                                        capacity: minCap ?? null,
-                                        excludeScheduleIds,
-                                        // Let backend infer the correct section enrollment_cap from DB
-                                        sectionId: String(row?.section_id ?? row?.section?.section_id ?? "").trim() || null,
-                                        scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
-                                      }}
-                                      fallbackRooms={fallbackRooms}
-                                      value={scEditRoom2 || null}
-                                      disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
-                                      onChange={(roomId) => setScEditRoom2(roomId ?? "")}
-                                    />
+                                  <input
+                                    className={cls(SOFT_INPUT, "w-24")}
+                                    value={scEditSectionCode}
+                                    onChange={(e) => setScEditSectionCode(e.target.value)}
+                                    placeholder="Section"
+                                  />
+                                ) : (
+                                  <div className="font-medium">{group.section_code || "—"}</div>
+                                )}
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">{group.faculty_name || "UNASSIGNED"}</td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                <div className="space-y-1 leading-5 whitespace-nowrap">
+                                  {slots.length > 0 ? slots.map((slot, idx) => (
+                                    <div key={`day-${idx}`}>{String(slot?.day || "—") || "—"}</div>
+                                  )) : <div>—</div>}
+                                </div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                <div className="space-y-1 leading-5 whitespace-nowrap">
+                                  {slots.length > 0 ? slots.map((slot, idx) => (
+                                    <div key={`time-${idx}`}>{specialClassSlotTime(slot)}</div>
+                                  )) : <div>—</div>}
+                                </div>
+                              </td>
+
+                              <td className="px-3 py-2 border border-gray-300">
+                                {isEditing ? (
+                                  <div className="space-y-2 w-full max-w-[180px] overflow-visible">
+                                    {slot1 ? (
+                                      <EligibleRoomSelect
+                                        userId={user?.userId}
+                                        campusId={campusId}
+                                        spec={{
+                                          day: String(slot1?.day ?? "").trim(),
+                                          start: String(slot1?.start_time ?? "").trim(),
+                                          end: String(slot1?.end_time ?? "").trim(),
+                                          roomType: String(slot1?.room_type ?? (group as any)?.course?.room_type ?? "").trim() || null,
+                                          capacity: minCap ?? null,
+                                          excludeScheduleIds,
+                                          sectionId: String((group as any)?.section_id ?? (group as any)?.section?.section_id ?? "").trim() || null,
+                                          scheduleId: String(slot1?.schedule_id ?? "").trim() || null,
+                                        }}
+                                        fallbackRooms={fallbackRooms}
+                                        value={scEditRoom1 || null}
+                                        disabled={!slotReadySC(slot1) || !user?.userId || !campusId || fallbackRooms.length === 0}
+                                        onChange={(roomId) => setScEditRoom1(roomId ?? "")}
+                                      />
+                                    ) : null}
+
+                                    {slot2 ? (
+                                      <EligibleRoomSelect
+                                        userId={user?.userId}
+                                        campusId={campusId}
+                                        spec={{
+                                          day: String(slot2?.day ?? "").trim(),
+                                          start: String(slot2?.start_time ?? "").trim(),
+                                          end: String(slot2?.end_time ?? "").trim(),
+                                          roomType: String(slot2?.room_type ?? slot1?.room_type ?? (group as any)?.course?.room_type ?? "").trim() || null,
+                                          capacity: minCap ?? null,
+                                          excludeScheduleIds,
+                                          sectionId: String((group as any)?.section_id ?? (group as any)?.section?.section_id ?? "").trim() || null,
+                                          scheduleId: String(slot2?.schedule_id ?? "").trim() || null,
+                                        }}
+                                        fallbackRooms={fallbackRooms}
+                                        value={scEditRoom2 || null}
+                                        disabled={!slotReadySC(slot2) || !user?.userId || !campusId}
+                                        onChange={(roomId) => setScEditRoom2(roomId ?? "")}
+                                      />
+                                    ) : null}
                                   </div>
                                 ) : (
-                                  slotRoomLabel(slot2)
+                                  <div className="space-y-1 leading-5 whitespace-nowrap">
+                                    {slots.length > 0 ? slots.map((slot, idx) => (
+                                      <div key={`room-${idx}`}>{specialClassSlotRoomLabel(slot)}</div>
+                                    )) : <div>TBA</div>}
+                                  </div>
                                 )}
                               </td>
 
@@ -6192,7 +6620,7 @@ ${msg}`,
                                     placeholder="Enter remarks…"
                                   />
                                 ) : (
-                                  String(remarks || "—")
+                                  String(group.remarks || "—")
                                 )}
                               </td>
 
@@ -6200,12 +6628,12 @@ ${msg}`,
                                 {isEditing ? (
                                   <div className="flex items-center gap-2">
                                     <button
-                                      onClick={() => saveSpecialClassRowEdits(row)}
-                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      onClick={() => saveSpecialClassRowEdits(group)}
+                                      disabled={scSaveLoadingId === String(group.primary_special_id)}
                                       className={cls(
                                         "flex h-8 w-8 items-center justify-center rounded-full border-2",
                                         "border-green-600 text-green-600 hover:bg-green-50",
-                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                        scSaveLoadingId === String(group.primary_special_id) && "opacity-50 cursor-not-allowed"
                                       )}
                                       title="Save"
                                     >
@@ -6214,26 +6642,22 @@ ${msg}`,
 
                                     <button
                                       onClick={cancelEditSpecialClassRow}
-                                      disabled={scSaveLoadingId === String(row.special_id)}
+                                      disabled={scSaveLoadingId === String(group.primary_special_id)}
                                       className={cls(
                                         "flex h-8 w-8 items-center justify-center rounded-full border-2",
                                         "border-red-600 text-red-600 hover:bg-red-50",
-                                        scSaveLoadingId === String(row.special_id) && "opacity-50 cursor-not-allowed"
+                                        scSaveLoadingId === String(group.primary_special_id) && "opacity-50 cursor-not-allowed"
                                       )}
                                       title="Cancel"
                                     >
                                       <X className="h-4 w-4" strokeWidth={2.5} />
                                     </button>
-
-                                    {scSaveLoadingId === String(row.special_id) && (
-                                      <span className="text-xs text-gray-500">Saving…</span>
-                                    )}
                                   </div>
                                 ) : (
                                   <button
                                     className="text-emerald-700 hover:text-emerald-900"
                                     title="Edit"
-                                    onClick={() => beginEditSpecialClassRow(row)}
+                                    onClick={() => beginEditSpecialClassRow(group)}
                                   >
                                     <Edit className="h-4 w-4" />
                                   </button>
@@ -6253,6 +6677,110 @@ ${msg}`,
       </main>
 
       {/* --------------------- OM Submission Deadline (APO-set) --------------------- */}
+
+      {scViewOpen && (
+        <div
+          className="fixed inset-0 z-[100] flex items-center justify-center bg-black/40 p-4"
+          onMouseDown={(e) => {
+            if (e.target === e.currentTarget) closeSpecialClassView();
+          }}
+        >
+          <div className="w-full max-w-3xl rounded-2xl bg-white shadow-xl border border-gray-200 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-4 border-b bg-gray-50">
+              <div>
+                <div className="text-lg font-bold text-gray-900">View Application</div>
+              </div>
+              <button
+                type="button"
+                onClick={closeSpecialClassView}
+                className="h-9 w-9 inline-flex items-center justify-center rounded-full hover:bg-gray-200/70"
+                title="Close"
+              >
+                <X className="h-5 w-5 text-gray-700" />
+              </button>
+            </div>
+
+            <div className="p-5 max-h-[75vh] overflow-auto">
+              {scViewLoading ? (
+                <div className="py-10 text-center text-gray-500">Loading application…</div>
+              ) : scViewErr ? (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">
+                  {scViewErr}
+                </div>
+              ) : !scViewData ? (
+                <div className="py-10 text-center text-gray-500">No data</div>
+              ) : (
+                <div className="space-y-5">
+                  <div className="rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-4 py-3 bg-white border-b">
+                      <div className="text-sm font-semibold text-gray-900">Student Details</div>
+                    </div>
+                    <div className="px-4">
+                      <DetailRow label="Name" value={scViewData.student_name} />
+                      <DetailRow label="ID Number" value={scViewData.student_number} />
+                      <DetailRow label="Program" value={scViewData.program_code} />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-4 py-3 bg-white border-b">
+                      <div className="text-sm font-semibold text-gray-900">Request</div>
+                    </div>
+                    <div className="px-4">
+                      <DetailRow label="Graduating After Term" value={scViewData.graduating_after_term} />
+                      <DetailRow
+                        label="Reason"
+                        value={scViewData.reason_other ? `${scViewData.reason || ""}${scViewData.reason ? " — " : ""}${scViewData.reason_other}` : scViewData.reason}
+                      />
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 overflow-hidden">
+                    <div className="px-4 py-3 bg-white border-b">
+                      <div className="text-sm font-semibold text-gray-900">EAF Submission</div>
+                    </div>
+                    <div className="px-4 py-4 space-y-3">
+                      {scViewData.has_eaf && scViewData.eaf_view_url ? (
+                        <>
+                          <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3">
+                            <div className="text-sm font-medium text-gray-900">{scViewData.eaf_original_name || "Uploaded EAF"}</div>
+                            <div className="mt-1 text-xs text-gray-500">
+                              Uploaded: {formatSpecialClassDate(scViewData.eaf_uploaded_at)}
+                            </div>
+                          </div>
+                          <div>
+                            <button
+                              type="button"
+                              onClick={() => openSpecialClassEaf(scViewData.eaf_view_url)}
+                              className="inline-flex items-center rounded-lg bg-emerald-700 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-800"
+                            >
+                              Open PDF
+                            </button>
+                          </div>
+                        </>
+                      ) : (
+                        <div className="rounded-lg border border-gray-200 bg-gray-50 px-3 py-3 text-sm text-gray-500">
+                          No EAF submission found.
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="px-5 py-4 border-t bg-gray-50 flex items-center justify-end">
+              <button
+                type="button"
+                onClick={closeSpecialClassView}
+                className="inline-flex items-center rounded-lg border border-gray-300 bg-white px-4 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ----------------------------- Conflict Modal ----------------------------- */}
       {conflict && (

@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, HTTPException, Query, Body
 from ..main import db
 from ..Notifications import create_notification
@@ -13,6 +14,7 @@ COL_USERS = "users"
 COL_ROLE_ASSIGN = "role_assignments"
 COL_USER_ROLES = "user_roles"
 COL_PREEN_COUNT = "preenlistment_count" 
+COL_PETITION_WINDOWS = "student_petition_windows"
 
 
 # --- helpers ---
@@ -81,6 +83,46 @@ async def _active_term() -> Dict[str, Any]:
     # If no next term, stick with current (still better than returning nothing)
     return current
 
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _petition_window_override_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_PETITION_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
+
+
 def _course_code_expr():
     # Normalize string | array to a single display code
     return {
@@ -95,13 +137,16 @@ def _course_code_expr():
 # --- route ---
 @router.post("/student-petition")
 async def om_student_petitions_handler(
-    action: str = Query("list", description="options | list | update | bulkForward | header"),
+    action: str = Query("list", description="options | list | update | bulkForward | header | startWindow"),
     status: Optional[str] = Query(None, description="Filter by last status (list)"),
     search: Optional[str] = Query(None, description="Search by course code/title (list)"),
     courseId: Optional[str] = Query(None, description="For single update"),
     termId: Optional[str] = Query(None, description="Override active term"),
     userEmail: Optional[str] = Query(None, description="Header: user email"),
     userId: Optional[str] = Query(None, description="Header: user id"),
+    durationDays: Optional[int] = Query(None),
+    openISO: Optional[str] = Query(None, description="(Optional) Exact open datetime in ISO 8601"),
+    deadlineISO: Optional[str] = Query(None, description="(Optional) Exact deadline datetime in ISO 8601"),
     payload: Optional[Dict[str, Any]] = Body(None),
 ):
     """
@@ -219,6 +264,7 @@ async def om_student_petitions_handler(
             {"_id": 0, "statuses": 1},
         )
         statuses = (cfg or {}).get("statuses") or []
+        window = await _petition_window_override_for_term(active or {})
         return {
             "ok": True,
             "statuses": statuses,
@@ -226,6 +272,79 @@ async def om_student_petitions_handler(
                 "term_id": active.get("term_id", ""),
                 "acad_year_start": active.get("acad_year_start"),
                 "term_number": active.get("term_number"),
+            },
+            "submission_window": {
+                "openISO": window.get("openISO") or "",
+                "deadlineISO": window.get("deadlineISO") or "",
+                "term_id": window.get("term_id"),
+            },
+        }
+
+    if action == "startWindow":
+        if termId:
+            term_doc = await db[COL_TERMS].find_one(
+                {"term_id": termId},
+                {"_id": 0, "term_id": 1, "acad_year_start": 1, "term_number": 1},
+            )
+        else:
+            term_doc = active or await _active_term()
+
+        if not term_doc or not term_doc.get("term_id"):
+            raise HTTPException(status_code=400, detail="Active term not found; cannot start window.")
+
+        term_id = term_doc["term_id"]
+
+        def _parse_iso_as_utc(s: Optional[str]) -> Optional[datetime]:
+            if not s:
+                return None
+            try:
+                dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            except Exception:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+
+        open_dt = _parse_iso_as_utc(openISO)
+        deadline_dt = _parse_iso_as_utc(deadlineISO)
+        if open_dt and deadline_dt:
+            if deadline_dt <= open_dt:
+                raise HTTPException(status_code=400, detail="deadlineISO must be after openISO.")
+        else:
+            days = durationDays if durationDays is not None else 7
+            try:
+                days = int(days)
+            except Exception:
+                days = 7
+            if days <= 0:
+                raise HTTPException(status_code=400, detail="durationDays must be a positive integer.")
+            now = datetime.now(timezone.utc)
+            open_dt = now
+            deadline_dt = now + timedelta(days=days)
+
+        await db[COL_PETITION_WINDOWS].update_one(
+            {"term_id": term_id},
+            {
+                "$set": {
+                    "term_id": term_id,
+                    "open_dt": open_dt,
+                    "deadline_dt": deadline_dt,
+                    "openISO": open_dt.isoformat(),
+                    "deadlineISO": deadline_dt.isoformat(),
+                    "updated_at": datetime.now(timezone.utc),
+                },
+                "$setOnInsert": {"created_at": datetime.now(timezone.utc)},
+            },
+            upsert=True,
+        )
+
+        window = await _petition_window_override_for_term(term_doc)
+        return {
+            "ok": True,
+            "submission_window": {
+                "openISO": window.get("openISO") or "",
+                "deadlineISO": window.get("deadlineISO") or "",
+                "term_id": window.get("term_id"),
             },
         }
 
@@ -253,18 +372,14 @@ async def om_student_petitions_handler(
             }},
         ]
 
-        # client filters
-        post: Dict[str, Any] = {}
-        if status and status.strip().lower() != "all status":
-            post["last_status"] = status.strip()
         if search and search.strip():
             s = search.strip()
-            post["$or"] = [
-                {"course_code": {"$regex": s, "$options": "i"}},
-                {"course_title": {"$regex": s, "$options": "i"}},
-            ]
-        if post:
-            pipeline.append({"$match": post})
+            pipeline.append({"$match": {
+                "$or": [
+                    {"course_code": {"$regex": s, "$options": "i"}},
+                    {"course_title": {"$regex": s, "$options": "i"}},
+                ]
+            }})
 
         pipeline += [
             {"$project": {
@@ -280,7 +395,33 @@ async def om_student_petitions_handler(
         ]
 
         rows = [r async for r in db[COL_PETITIONS].aggregate(pipeline)]
-        return {"ok": True, "rows": rows, "term_id": current_term_id}
+
+        threshold_managed_statuses = {"", "Less Than Minimum", "Forwarded To Department"}
+        status_filter = (status or "").strip()
+        if status_filter.lower() == "all status":
+            status_filter = ""
+
+        normalized_rows: List[Dict[str, Any]] = []
+        for row in rows:
+            count = int(row.get("count") or 0)
+            raw_status = str(row.get("status") or "").strip()
+            effective_status = raw_status
+
+            if raw_status in threshold_managed_statuses:
+                effective_status = "Forwarded To Department" if count >= 15 else "Less Than Minimum"
+
+            highlight_yellow = count >= 15 and effective_status == "Forwarded To Department"
+
+            normalized = {
+                **row,
+                "status": effective_status,
+                "highlight_yellow": highlight_yellow,
+            }
+            if status_filter and effective_status != status_filter:
+                continue
+            normalized_rows.append(normalized)
+
+        return {"ok": True, "rows": normalized_rows, "term_id": current_term_id}
 
     # ---------- UPDATE (single course) ----------
     if action == "update":

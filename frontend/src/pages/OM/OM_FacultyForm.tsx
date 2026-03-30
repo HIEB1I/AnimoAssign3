@@ -1,5 +1,5 @@
 // frontend/src/pages/OM/OM_FacultyForm.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import SelectBox from "../../component/SelectBox";
 import { cls } from "../../utilities/cls";
@@ -127,6 +127,28 @@ function DeadlineBanner({
     </div>
   );
 }
+function toLocalInput(isoOrDate: string) {
+  const d = new Date(isoOrDate);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+function getNextMinuteDate(from: Date | number = Date.now()) {
+  const d = new Date(from);
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  return d;
+}
+
+function getMinuteAfter(localInputValue: string) {
+  const d = new Date(localInputValue);
+  if (Number.isNaN(d.getTime())) return getNextMinuteDate();
+  d.setSeconds(0, 0);
+  d.setMinutes(d.getMinutes() + 1);
+  return d;
+}
+
 /* ------------------------------------------------------------------------- */
 
 /* ---------------- Page ---------------- */
@@ -161,6 +183,7 @@ export default function OM_FacultyForm() {
   });
 
   const [startingWindow, setStartingWindow] = useState(false);
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
   // Exact window schedule (like APO_CourseOfferings)
   const [openDraft, setOpenDraft] = useState<string>("");
   const [deadlineDraft, setDeadlineDraft] = useState<string>("");
@@ -175,6 +198,18 @@ export default function OM_FacultyForm() {
   const [selected, setSelected] = useState<OMFRow | null>(null);
   const [pref, setPref] = useState<any>(null);
   const [prefLoading, setPrefLoading] = useState(false);
+
+  useEffect(() => {
+    const id = setInterval(() => setNowTick(Date.now()), 15000);
+    return () => clearInterval(id);
+  }, []);
+
+  const minOpenInput = useMemo(() => toLocalInput(getNextMinuteDate(nowTick).toISOString()), [nowTick]);
+  const minDeadlineInput = useMemo(() => {
+    if (prefsWindow.openISO) return minOpenInput;
+    if (openDraft) return toLocalInput(getMinuteAfter(openDraft).toISOString());
+    return minOpenInput;
+  }, [minOpenInput, openDraft, prefsWindow.openISO]);
 
   /* ---- Custom confirm modal (replaces window.confirm) ---- */
   const confirmResolverRef = useRef<((v: boolean) => void) | null>(null);
@@ -481,6 +516,7 @@ useEffect(() => {
                     type="datetime-local"
                     className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                     value={openDraft}
+                    min={minOpenInput}
                     onChange={(e) => setOpenDraft(e.target.value)}
                   />
                 </div>
@@ -491,6 +527,7 @@ useEffect(() => {
                   type="datetime-local"
                   className="h-9 rounded-md border border-gray-300 bg-white px-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-emerald-500/30"
                   value={deadlineDraft}
+                  min={minDeadlineInput}
                   onChange={(e) => setDeadlineDraft(e.target.value)}
                 />
               </div>

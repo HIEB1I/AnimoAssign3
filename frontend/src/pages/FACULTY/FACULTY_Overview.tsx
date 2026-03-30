@@ -5,7 +5,7 @@ import {
   Send as SendIcon,
   X,
   Check,
-  Inbox,
+  MessageSquareText,
   BookOpen as SyllabusIcon,
   Edit,
   AlertTriangle,
@@ -22,14 +22,8 @@ import { InboxContent } from "./FACULTY_Inbox";
 // Requirements:
 // - For special classes, show TBA instead of ONLINE.
 // - For special classes (List view), show day initials (M/T/W/H/F/S/U) instead of full words.
-// - For special classes, mode should be FOL if BOTH rooms are unassigned (empty/TBA/ONLINE), else HYB.
-const isRoomUnassignedForSpecial = (v?: unknown) => {
-  const s = String(v ?? "").trim();
-  if (!s) return true;
-  const u = s.toUpperCase();
-  return u === "TBA" || u === "ONLINE";
-};
-
+// - For special classes, do not invent FOL/HYB from room emptiness.
+//   Use the stored mode when available and otherwise leave the UI blank.
 const normalizeRoomDisplayForSpecial = (v?: unknown) => {
   const s = String(v ?? "").trim();
   if (!s) return "—";
@@ -57,10 +51,10 @@ const dayInitial = (d?: unknown) => {
   return s.charAt(0).toUpperCase();
 };
 
-const specialModeFromRooms = (room1?: unknown, room2?: unknown) => {
-  return isRoomUnassignedForSpecial(room1) && isRoomUnassignedForSpecial(room2)
-    ? "FOL"
-    : "HYB";
+const specialModeDisplay = (value?: unknown) => {
+  const raw = String(value ?? "").trim();
+  if (!raw || raw.toUpperCase() == "SPECIAL CLASS") return "—";
+  return raw;
 };
 
 
@@ -256,6 +250,105 @@ function ConfirmDialog({
             )}
           >
             {confirmText}
+          </button>
+        </div>
+      </div>
+    </div>,
+    document.body
+  );
+}
+
+
+function BulkSpecialMessageDialog({
+  open,
+  selectedCount,
+  message,
+  sending,
+  onChangeMessage,
+  onClose,
+  onSend,
+}: {
+  open: boolean;
+  selectedCount: number;
+  message: string;
+  sending: boolean;
+  onChangeMessage: (value: string) => void;
+  onClose: () => void;
+  onSend: () => void;
+}) {
+  const textRef = useRef<HTMLTextAreaElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const t = window.setTimeout(() => textRef.current?.focus(), 0);
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => {
+      window.clearTimeout(t);
+      window.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+
+  if (!open) return null;
+
+  return ReactDOM.createPortal(
+    <div className="fixed inset-0 z-[1300] flex items-center justify-center p-4">
+      <button
+        type="button"
+        className="absolute inset-0 bg-black/40"
+        aria-label="Close dialog"
+        onClick={onClose}
+      />
+
+      <div className="relative w-full max-w-2xl overflow-hidden rounded-2xl border border-neutral-200 bg-white shadow-2xl">
+        <div className="border-b border-neutral-100 px-5 py-4">
+          <div className="text-base font-semibold text-neutral-900">Send message to students</div>
+          <div className="mt-1 text-sm text-neutral-600">
+            Accepted special class confirmations will be grouped into one inbox message per student whenever possible.
+            Students will also receive in-app and Gmail notifications and can reply in Inbox.
+          </div>
+        </div>
+
+        <div className="px-5 py-4">
+          <label className="mb-2 block text-sm font-medium text-neutral-800">Additional note (optional)</label>
+          <textarea
+            ref={textRef}
+            rows={5}
+            value={message}
+            onChange={(e) => onChangeMessage(e.target.value)}
+            placeholder="Add an optional note to include in every message…"
+            className="w-full resize-none rounded-xl border border-neutral-300 bg-white p-3 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+          />
+          <div className="mt-2 text-xs text-neutral-500">
+            The system will automatically include each confirmed course, section, and reflected schedule in a clear grouped message for every student.
+          </div>
+        </div>
+
+        <div className="flex items-center justify-end gap-2.5 border-t border-neutral-100 px-5 py-4">
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-white px-4 text-sm font-medium text-neutral-800 shadow-sm hover:bg-neutral-50"
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={onSend}
+            disabled={sending || selectedCount === 0}
+            className={cls(
+              "inline-flex h-9 items-center justify-center rounded-xl px-4 text-sm font-semibold text-white shadow-sm",
+              sending || selectedCount === 0
+                ? "cursor-not-allowed bg-neutral-300 text-neutral-600"
+                : "bg-emerald-700 hover:bg-emerald-800"
+            )}
+          >
+            {sending ? "Sending…" : `Send to ${selectedCount} student${selectedCount === 1 ? "" : "s"}`}
           </button>
         </div>
       </div>
@@ -717,14 +810,34 @@ function normalizeDay(raw?: string): DayLong | null {
 }
 
 // --- *** NEW: This type matches the backend (Python) output *** ---
+type TLItemStudentReasonPair = {
+  special_id?: string;
+  student: string;
+  reason: string;
+};
+
+type TLItemReasonGroup = {
+  reason: string;
+  students: string[];
+  pair_keys: string[];
+};
+
 type TLItem = {
   section_id: string;
+  course_id?: string;
   // Special Class reflection (OM_SpecialClass -> Faculty)
   is_special_class?: boolean;
   special_id?: string;
-  special_faculty_status?: "PENDING" | "ACCEPTED" | string;
+  special_ids?: string[];
+  special_group_key?: string;
+  special_faculty_status?: "PENDING" | "ACCEPTED" | "REJECTED" | string;
   student?: string;
+  students?: string[];
   reason?: string;
+  reasons?: string[];
+  student_reason_pairs?: TLItemStudentReasonPair[];
+  reason_groups?: TLItemReasonGroup[];
+  student_count?: number;
   is_serviced?: boolean;
   serviced_department?: string;
   course_code: string;
@@ -741,6 +854,22 @@ type TLItem = {
   syllabus?: string;
 };
 
+const collectSpecialIds = (item?: Partial<TLItem> | null): string[] => {
+  if (!item) return [];
+  const ids = new Set<string>();
+
+  const push = (value: unknown) => {
+    const sid = String(value ?? "").trim();
+    if (sid) ids.add(sid);
+  };
+
+  (item.special_ids || []).forEach(push);
+  push(item.special_id);
+  (item.student_reason_pairs || []).forEach((pair) => push(pair?.special_id));
+
+  return Array.from(ids);
+};
+
 
 // --- *** NEW: This type is for the Calendar items *** ---
 type TLItemForCalendar = {
@@ -754,6 +883,7 @@ type TLItemForCalendar = {
   syllabus?: string;
   is_special_class?: boolean;
   special_id?: string;
+  special_ids?: string[];
   is_serviced?: boolean;
   serviced_department?: string;
   // Store original item for modal
@@ -858,7 +988,8 @@ function placeItems(teachingLoad: TLItem[]): Placed[] {
           room: (() => {
             const base = (room && String(room).trim()) ? String(room).trim() : "TBA";
             const isSpecial = Boolean((it as any)?.is_special_class);
-            if (isSpecial && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
+            const isConvertedFromSpecial = Boolean((it as any)?.converted_from_special);
+            if ((isSpecial || isConvertedFromSpecial) && String(base).trim().toUpperCase() === "ONLINE") return "TBA";
             return base;
           })(),
           time: time,
@@ -899,9 +1030,9 @@ function groupPlacedByCell(placed: Placed[]): CellGroup[] {
 const cls = (...s: (string | false | undefined)[]) => s.filter(Boolean).join(" ");
 
 const CAMPUS_COLORS = {
-  manila: "#444f24",
-  laguna: "#b6bbd9",
-  serviced: "#ad8820",
+  manila: "#4F7A5A",
+  laguna: "#819171",
+  serviced: "#CBD5C0",
 } as const;
 
 const getScheduleVisual = (it: TLItemForCalendar): {
@@ -920,7 +1051,7 @@ const getScheduleVisual = (it: TLItemForCalendar): {
   if (it.is_serviced) {
     return {
       backgroundColor: CAMPUS_COLORS.serviced,
-      textColor: "#ffffff",
+      textColor: "#000000",
       borderClass: "border-transparent",
       hoverClass: "hover:brightness-[1.05]",
     };
@@ -930,7 +1061,7 @@ const getScheduleVisual = (it: TLItemForCalendar): {
   if (s.startsWith("XX") || s.startsWith("XC")) {
     return {
       backgroundColor: CAMPUS_COLORS.laguna,
-      textColor: "#111827",
+      textColor: "#ffffff",
       borderClass: "border-transparent",
       hoverClass: "hover:brightness-[1.03]",
     };
@@ -1008,6 +1139,10 @@ const LIST_HEADERS = [
 // Special Class tab columns: keep details but group schedule fields so rows fit without horizontal scrolling.
 const SPECIAL_TABLE_HEADERS = ["Student", "Reason", "Course Code & Title", "Section", "Day", "Time", "Room", "Mode", "Syllabus", "Action"];
 
+const TABLE_HEADER_BASE = "h-12 px-4 text-sm font-semibold align-middle";
+const TABLE_HEADER_CENTER = `${TABLE_HEADER_BASE} text-center`;
+const TABLE_HEADER_LEFT = `${TABLE_HEADER_BASE} text-left`;
+
 function splitBeginEnd(time?: string): { begin: string; end: string } {
   const raw = (time || "").trim();
   if (!raw || raw.toUpperCase() === "TBA") return { begin: "—", end: "—" };
@@ -1028,10 +1163,16 @@ function TeachingLoadEnhanced({ teachingLoad, term, workflow, onToast, onRefresh
   const [modal, setModal] = useState<{ day: DayLong; item: TLItemForCalendar } | null>(null);
   const [specialEdit, setSpecialEdit] = useState<null | {
     special_id: string;
+    special_ids: string[];
     section_id: string;
     original: any;
   }>(null);
   const [specialEditBusy, setSpecialEditBusy] = useState(false);
+  const [selectedSpecialIds, setSelectedSpecialIds] = useState<Record<string, boolean>>({});
+  const [specialActionOverrides, setSpecialActionOverrides] = useState<Record<string, "ACCEPTED" | "REJECTED">>({});
+  const [bulkSpecialOpen, setBulkSpecialOpen] = useState(false);
+  const [bulkSpecialSending, setBulkSpecialSending] = useState(false);
+  const [bulkSpecialMessage, setBulkSpecialMessage] = useState("");
   const [specialRooms1, setSpecialRooms1] = useState<any[]>([]);
   const [specialRooms2, setSpecialRooms2] = useState<any[]>([]);
   const [specialRoomsLoading, setSpecialRoomsLoading] = useState(false);
@@ -1233,6 +1374,10 @@ const [isAccepting, setIsAccepting] = useState(false);
   const [isSyncingSpecial, setIsSyncingSpecial] = useState(false);
   const [sendToGcal, setSendToGcal] = useState(true); // default ON to keep current behavior
 
+  useEffect(() => {
+    setSpecialActionOverrides({});
+  }, [teachingLoad]);
+
   const TIME_POINTS = useMemo(
     () =>
       Array.from(
@@ -1317,13 +1462,48 @@ const [isAccepting, setIsAccepting] = useState(false);
     [isUnassignedRoomLabel]
   );
 
+  const openSpecialStudentEaf = useCallback((e: React.MouseEvent, pair?: Partial<TLItemStudentReasonPair> | null) => {
+    e.stopPropagation();
+
+    const specialId = String(pair?.special_id || "").trim();
+    if (!specialId) {
+      onToast?.("warning", "No EAF is linked to this student request.", "EAF unavailable");
+      return;
+    }
+
+    try {
+      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+      const userId = String(raw.userId || raw.user_id || raw.id || "").trim();
+      if (!userId) throw new Error("User is not logged in");
+
+      const url = `/api/faculty/special-class/eaf?user_id=${encodeURIComponent(userId)}&special_id=${encodeURIComponent(specialId)}`;
+      window.open(url, "_blank", "noopener,noreferrer");
+    } catch (err: any) {
+      onToast?.("error", err?.message || "Failed to open EAF.", "Action failed");
+    }
+  }, [onToast]);
+
   const openEditSpecial = async (it: any) => {
     try {
       const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
       const userId = raw.userId || raw.user_id || raw.id;
       const special_id = String(it?.special_id || it?.originalItem?.special_id || "").trim();
-      const section_id = String(it?.section_id || it?.originalItem?.section_id || "").trim();
-      if (!userId || !special_id || !section_id) {
+      const special_ids = Array.from(
+        new Set(
+          ((it?.special_ids || it?.originalItem?.special_ids || []) as any[])
+            .map((v) => String(v || "").trim())
+            .filter(Boolean)
+        )
+      );
+      if (special_id && !special_ids.includes(special_id)) special_ids.unshift(special_id);
+      const section_id = String(
+        it?.real_section_id ||
+        it?.originalItem?.real_section_id ||
+        it?.section_id ||
+        it?.originalItem?.section_id ||
+        ""
+      ).trim();
+      if (!userId || !special_id) {
         onToast?.("error", "Missing special class identifiers.");
         return;
       }
@@ -1337,7 +1517,7 @@ const [isAccepting, setIsAccepting] = useState(false);
       const room1Label = String((oi as any)?.room1 || "").trim();
       const room2Label = String((oi as any)?.room2 || "").trim();
 
-      setSpecialEdit({ special_id, section_id, original: oi });
+      setSpecialEdit({ special_id, special_ids, section_id, original: oi });
 
       const day1Val = d1 && d1 !== "TBA" ? d1 : "Monday";
       const begin1Val = t1.begin && t1.begin !== "—" ? t1.begin : "";
@@ -1372,11 +1552,11 @@ const [isAccepting, setIsAccepting] = useState(false);
         `&end_time=${encodeURIComponent(hmToHHMM(end))}`;
 
       const list1 =
-        d1 && t1.begin !== "—" && t1.end !== "—"
+        section_id && d1 && t1.begin !== "—" && t1.end !== "—"
           ? await apiGet(paramsBase(d1, t1.begin, t1.end))
           : [];
       const list2 =
-        d2 && t2.begin !== "—" && t2.end !== "—"
+        section_id && d2 && t2.begin !== "—" && t2.end !== "—"
           ? await apiGet(paramsBase(d2, t2.begin, t2.end))
           : [];
       setSpecialRooms1(Array.isArray(list1) ? list1 : []);
@@ -1411,20 +1591,15 @@ const [isAccepting, setIsAccepting] = useState(false);
 
       setSpecialEditBusy(true);
 
-      // Ensure we post room_id (not room label). If the current value is a label,
-      // map it using the latest eligible rooms list.
-      const room1Id = resolveRoomIdFromEligible(specialRooms1, specialEditDraft.room1);
-      const room2Id = resolveRoomIdFromEligible(specialRooms2, specialEditDraft.room2);
-
-      await apiPost("/api/faculty/special-class/update-schedule", {
+      const resp = await apiPost("/api/faculty/special-class/update-schedule", {
         user_id: userId,
         special_id: specialEdit.special_id,
+        special_ids: specialEdit.special_ids,
         section_id: specialEdit.section_id,
         meeting1: {
           day: specialEditDraft.day1,
           begin: hmToHHMM(specialEditDraft.begin1),
           end: hmToHHMM(specialEditDraft.end1),
-          room_id: room1Id || "",
         },
         meeting2:
           specialEditDraft.day2 && specialEditDraft.begin2 && specialEditDraft.end2
@@ -1432,12 +1607,22 @@ const [isAccepting, setIsAccepting] = useState(false);
                 day: specialEditDraft.day2,
                 begin: hmToHHMM(specialEditDraft.begin2),
                 end: hmToHHMM(specialEditDraft.end2),
-                room_id: room2Id || "",
               }
             : {},
       });
 
-      onToast?.("success", "Special class schedule updated. Notifications sent to OM/Chair.");
+      const updatedEvents = Number(resp?.calendar_sync_stats?.updated || 0);
+      const matchedExisting = Number(resp?.calendar_sync_stats?.matched_existing || 0);
+      const calendarSyncFailed = resp?.calendar_sync_ok === false;
+      const syncMsg = calendarSyncFailed
+        ? " Calendar auto-update to Google Calendar failed."
+        : updatedEvents > 0
+        ? ` Updated ${updatedEvents} Google Calendar event${updatedEvents === 1 ? "" : "s"} automatically.`
+        : matchedExisting > 0
+        ? " Google Calendar was already in sync."
+        : " No existing Google Calendar event was found, so no new calendar event was created automatically.";
+
+      onToast?.("success", `Special class schedule updated. Notifications sent to OM, Chair, and student(s).${syncMsg}`);
       setSpecialEdit(null);
       setSpecialRooms1([]);
       setSpecialRooms2([]);
@@ -1554,6 +1739,164 @@ const scheduleFinalLabel = (() => {
     () => (teachingLoad || []).filter((it) => Boolean((it as any)?.is_special_class)),
     [teachingLoad]
   );
+  const groupedSpecialTeachingLoad = useMemo(() => {
+    const map = new Map<string, TLItem[]>();
+
+    const normalizeDisplayParts = (value: unknown) =>
+      String(value ?? "")
+        .split(/\n|,(?=\s*[A-Z])/)
+        .map((part) => part.trim())
+        .filter((part) => part && part !== "—");
+
+    const normalizeStudentReasonPairs = (it: TLItem): TLItemStudentReasonPair[] => {
+      const explicitPairs = Array.isArray((it as any)?.student_reason_pairs)
+        ? (((it as any).student_reason_pairs as unknown[])
+            .filter((pair): pair is Record<string, unknown> => Boolean(pair) && typeof pair === "object")
+            .map((pair) => ({
+              special_id: String(pair.special_id || (it as any)?.special_id || "").trim() || undefined,
+              student: String(pair.student || "").trim(),
+              reason: String(pair.reason || "").trim(),
+            }))
+            .filter((pair) => pair.student))
+        : [];
+      if (explicitPairs.length) return explicitPairs;
+
+      const students = Array.isArray((it as any)?.students)
+        ? (((it as any).students as unknown[]).flatMap((value) => normalizeDisplayParts(value)))
+        : normalizeDisplayParts((it as any)?.student);
+      const reasons = Array.isArray((it as any)?.reasons)
+        ? (((it as any).reasons as unknown[]).flatMap((value) => normalizeDisplayParts(value)))
+        : normalizeDisplayParts((it as any)?.reason);
+      const maxLen = Math.max(students.length, reasons.length, 0);
+      if (!maxLen) return [];
+      return Array.from({ length: maxLen }, (_, index) => ({
+        special_id: String((it as any)?.special_id || "").trim() || undefined,
+        student: students[index] || students[0] || "",
+        reason: reasons[index] || reasons[0] || "",
+      })).filter((pair) => pair.student);
+    };
+
+    const sectionSig = (it: TLItem) =>
+      [
+        String((it as any)?.section_id || "").trim().toUpperCase(),
+        String(it.section || "").trim().toUpperCase(),
+        String((it as any)?.day1 || "").trim().toUpperCase(),
+        String((it as any)?.time1 || "").trim().toUpperCase(),
+        String((it as any)?.day2 || "").trim().toUpperCase(),
+        String((it as any)?.time2 || "").trim().toUpperCase(),
+        String((it as any)?.special_id || "").trim().toUpperCase(),
+      ].join("|");
+
+    (specialTeachingLoad || []).forEach((it) => {
+      const key = [
+        String((it as any)?.course_id || "").trim().toUpperCase(),
+        sectionSig(it),
+      ].join("|");
+      if (!map.has(key)) map.set(key, []);
+      map.get(key)!.push(it);
+    });
+
+    return Array.from(map.entries())
+      .map(([groupKey, items]) => {
+        const base = { ...(items[0] || {}) } as TLItem;
+        const pairByKey = new Map<string, TLItemStudentReasonPair>();
+        items.forEach((it) => {
+          normalizeStudentReasonPairs(it).forEach((pair, pairIndex) => {
+            const dedupeKey = `${String(pair.special_id || (it as any)?.special_id || "").trim() || `ROW-${pairIndex}`}|${pair.student}|${pair.reason}`;
+            if (!pairByKey.has(dedupeKey)) pairByKey.set(dedupeKey, pair);
+          });
+        });
+        const studentReasonPairs = Array.from(pairByKey.values()).sort((a, b) => {
+          const reasonCompare = String(a.reason || "").localeCompare(String(b.reason || ""), undefined, {
+            sensitivity: "base",
+          });
+          if (reasonCompare !== 0) return reasonCompare;
+          return `${a.student}|${a.special_id || ""}`.localeCompare(`${b.student}|${b.special_id || ""}`, undefined, {
+            sensitivity: "base",
+          });
+        });
+        const reasonGroupMap = new Map<string, TLItemReasonGroup>();
+        studentReasonPairs.forEach((pair, pairIndex) => {
+          const reasonKey = String(pair.reason || "").trim() || "Unspecified";
+          if (!reasonGroupMap.has(reasonKey)) {
+            reasonGroupMap.set(reasonKey, { reason: reasonKey, students: [], pair_keys: [] });
+          }
+          const group = reasonGroupMap.get(reasonKey)!;
+          const studentName = String(pair.student || "").trim();
+          if (studentName && !group.students.includes(studentName)) {
+            group.students.push(studentName);
+          }
+          group.pair_keys.push(`${pair.special_id || reasonKey}-${pairIndex}`);
+        });
+        const reasonGroups = Array.from(reasonGroupMap.values());
+        const students = studentReasonPairs.map((pair) => pair.student).filter(Boolean);
+        const reasons = reasonGroups.map((group) => group.reason);
+        const specialIds = Array.from(new Set(items.flatMap((it) => collectSpecialIds(it))));
+        const backendStudentCount = Math.max(
+          0,
+          ...items.map((it) => {
+            const raw = Number((it as any)?.student_count ?? 0);
+            return Number.isFinite(raw) ? raw : 0;
+          })
+        );
+        const finalStudentCount = Math.max(students.length, backendStudentCount);
+        const overriddenStatus = specialActionOverrides[groupKey];
+        const allAccepted = items.every(
+          (it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() === "ACCEPTED"
+        );
+        return {
+          ...base,
+          special_group_key: groupKey,
+          special_id: specialIds[0] || String((base as any)?.special_id || ""),
+          special_ids: specialIds,
+          student_reason_pairs: studentReasonPairs,
+          reason_groups: reasonGroups,
+          students,
+          reasons,
+          student: students.join("\n"),
+          reason: reasons.join("\n"),
+          student_count: finalStudentCount,
+          special_faculty_status: overriddenStatus || (allAccepted ? "ACCEPTED" : "PENDING"),
+        } as TLItem;
+      })
+      .filter((it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() !== "REJECTED");
+  }, [specialTeachingLoad, specialActionOverrides]);
+  const acceptedSpecialTeachingLoad = useMemo(
+    () =>
+      groupedSpecialTeachingLoad.filter(
+        (it) => String((it as any)?.special_faculty_status || "PENDING").toUpperCase() === "ACCEPTED"
+      ),
+    [groupedSpecialTeachingLoad]
+  );
+  const selectedSpecialList = useMemo(
+    () =>
+      acceptedSpecialTeachingLoad.filter(
+        (it) => Boolean(selectedSpecialIds[String((it as any)?.special_group_key || (it as any)?.special_id || "")])
+      ),
+    [acceptedSpecialTeachingLoad, selectedSpecialIds]
+  );
+  const selectedSpecialStudentCount = useMemo(
+    () =>
+      selectedSpecialList.reduce((total, it) => {
+        const raw = Number((it as any)?.student_count ?? 0);
+        if (Number.isFinite(raw) && raw > 0) return total + raw;
+
+        const explicitPairs = Array.isArray((it as any)?.student_reason_pairs)
+          ? (it as any).student_reason_pairs.filter((pair: any) => pair && typeof pair === "object")
+          : [];
+        if (explicitPairs.length > 0) return total + explicitPairs.length;
+
+        const students = Array.isArray((it as any)?.students)
+          ? (it as any).students.filter((value: any) => String(value ?? "").trim() && String(value ?? "").trim() !== "—")
+          : [];
+        if (students.length > 0) return total + students.length;
+
+        return total;
+      }, 0),
+    [selectedSpecialList]
+  );
+  const allSpecialSelected =
+    acceptedSpecialTeachingLoad.length > 0 && selectedSpecialList.length === acceptedSpecialTeachingLoad.length;
 
 
 
@@ -1585,37 +1928,36 @@ const scheduleFinalLabel = (() => {
 
   return (
     <section className="mx-auto w-full max-w-screen-2xl px-4">
-	      <div className="rounded-xl border border-neutral-200 bg-white p-5">
-	        <div className="mb-4 flex flex-col gap-3 xl:grid xl:grid-cols-[minmax(220px,1fr)_auto_minmax(320px,1fr)] xl:items-start">
-          <div className="min-w-0">
-            <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
-            <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
-          </div>
+        <div className="rounded-xl border border-neutral-200 bg-white p-5">
+        <div className="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div className="flex w-full flex-col gap-3">
+            <div className="flex flex-wrap items-center justify-center gap-x-2 gap-y-1 xl:justify-start">
+              <h3 className="text-lg font-bold text-neutral-900">Teaching Load Summary</h3>
+              <p className="text-sm text-neutral-500">{term?.term_label || ""}</p>
+            </div>
 
-          {/* Legend / spacer column */}
-          <div className="hidden xl:flex xl:justify-center xl:justify-self-center">
-            {view !== "Special" ? (
-              <div className="flex flex-wrap items-center justify-center gap-3 rounded-full border border-neutral-200 bg-white px-3 py-1 text-xs text-neutral-700 shadow-sm">
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
-                  <span>Manila</span>
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
-                  <span>Laguna</span>
-                </span>
-                <span className="inline-flex items-center gap-2">
-                  <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
-                  <span>Serviced</span>
-                </span>
+            {view === "Calendar" ? (
+              <div className="flex w-full justify-start">
+                <div className="inline-flex max-w-full flex-wrap items-center gap-4 rounded-xl border border-neutral-200 bg-white px-4 py-2 text-xs text-neutral-700 shadow-sm">
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
+                    <span>Manila</span>
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
+                    <span>Laguna</span>
+                  </span>
+                  <span className="inline-flex items-center gap-2">
+                    <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
+                    <span>Serviced</span>
+                  </span>
+                </div>
               </div>
-            ) : (
-              <div className="h-8" aria-hidden="true" />
-            )}
+            ) : null}
           </div>
 
-          <div className="flex items-start gap-2 flex-wrap xl:flex-nowrap xl:justify-self-end xl:justify-end xl:ml-auto">
-            <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+          <div className="flex w-full flex-col gap-3 xl:max-w-[620px] xl:items-end">
+            <div className="inline-flex w-full rounded-xl border border-neutral-200 bg-neutral-50 p-1 xl:w-auto xl:self-end">
               {["Calendar", "List", "Special"].map((v) => (
                 <button
                   key={v}
@@ -1623,7 +1965,7 @@ const scheduleFinalLabel = (() => {
                   onClick={() => setView(v as any)}
                   aria-pressed={view === v}
                   className={cls(
-                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold transition",
+                    "inline-flex flex-1 h-9 items-center justify-center rounded-lg px-4 text-sm font-semibold transition xl:flex-none",
                     view === v
                       ? "bg-emerald-700 text-white shadow-sm"
                       : "text-neutral-700 hover:bg-white"
@@ -1634,135 +1976,245 @@ const scheduleFinalLabel = (() => {
                 </button>
               ))}
             </div>
-	            {view !== "Special" ? (
-	              <div className="flex flex-col items-start">
-	                <button
-	                  type="button"
-	                  onClick={async () => {
-              try {
-                if (isAccepting) return;
-                setIsAccepting(true);
 
-                const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-                const userId = raw.userId || raw.user_id || raw.id || "";
-                const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+            {view !== "Special" ? (
+              
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="min-w-0">
+                    
+                  </div>
 
-                const resp: any = await acceptFacultyLoadAssignment(
-                  userId,
-                  { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
-                );
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-stretch sm:justify-end lg:w-auto">
 
-                console.log("ACCEPT resp:", resp);
 
-                if (sendToGcal) {
-                  if (resp?.calendar_ok === false) {
-                    onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
-                  } else if (resp?.calendar_ok === true) {
-                    onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
-                  } else {
-                    onToast?.("success", "Schedule accepted.", "Success");
-                  }
-                } else {
-                  onToast?.("success", "Schedule accepted.", "Success");
-                }
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          if (isAccepting) return;
+                          setIsAccepting(true);
 
-                await onRefresh?.();
-              } catch (e: any) {
-                const msg = e?.response?.data?.detail || e?.message || "Failed to accept schedule.";
-                onToast?.("error", msg, "Action failed");
-                console.error(e);
-              } finally {
-                setIsAccepting(false);
-              }
-	                  }}
-	                  disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
-	                  className={cls(
-	                    "inline-flex h-9 items-center justify-center rounded-lg px-4 text-sm font-medium shadow",
-	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    (isAccepting || scheduleFinalEffective || isAlreadyApproved)
-	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-	                  )}
-	                >
-	                  {scheduleFinalEffective
-	                    ? "Finalized"
-	                    : isAlreadyApproved
-	                    ? "Approved"
-	                    : isAccepting
-	                    ? "Accepting…"
-	                    : "Accept Schedule"}
-	                </button>
+                          const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                          const userId = raw.userId || raw.user_id || raw.id || "";
+                          const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
 
-	                <label className="mt-2 inline-flex items-center gap-2 text-xs text-slate-700 select-none">
-	                  <input
-	                    type="checkbox"
-	                    className="h-3.5 w-3.5 rounded border-neutral-300 text-emerald-700 accent-emerald-600 focus:ring-emerald-600/40"
-	                    checked={sendToGcal}
-	                    onChange={(e) => setSendToGcal(e.target.checked)}
-	                    disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
-	                  />
-	                  <span>Send to GCalendar</span>
-	                </label>
-	              </div>
-	            ) : (
-	              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-	                <button
-	                  type="button"
-	                  onClick={async () => {
-	                    try {
-	                      if (isSyncingSpecial) return;
-	                      setIsSyncingSpecial(true);
+                          const resp: any = await acceptFacultyLoadAssignment(
+                            userId,
+                            { ...(termId ? { term_id: termId } : {}), send_to_gcal: sendToGcal }
+                          );
 
-	                      const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
-	                      const userId = raw.userId || raw.user_id || raw.id || "";
-	                      const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+                          console.log("ACCEPT resp:", resp);
 
-	                      const resp: any = await acceptFacultyLoadAssignment(
-                        userId,
-                        ({
-                          ...(termId ? { term_id: termId } : {}),
-                          send_to_gcal: true,
-                          sync_special_only: true,
-                          overwrite_gcal: true,
-                        } as any)
-                      );
+                          if (sendToGcal) {
+                            if (resp?.calendar_ok === false) {
+                              onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Accepted (calendar issue)");
+                            } else if (resp?.calendar_ok === true) {
+                              onToast?.("success", "Schedule accepted and calendar scheduled by term dates.", "Success");
+                            } else {
+                              onToast?.("success", "Schedule accepted.", "Success");
+                            }
+                          } else {
+                            onToast?.("success", "Schedule accepted.", "Success");
+                          }
 
-	                      if (resp?.calendar_ok === false) {
-	                        onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
-	                      } else {
-	                        onToast?.(
-	                          "success",
-	                          resp?.calendar_events_created
-	                            ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
-	                            : "No special classes to sync.",
-	                          "Synced"
-	                        );
-	                      }
-	                    } catch (e: any) {
-	                      const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
-	                      onToast?.("error", msg, "Action failed");
-	                      console.error(e);
-	                    } finally {
-	                      setIsSyncingSpecial(false);
-	                    }
-	                  }}
-	                  disabled={isSyncingSpecial}
-	                  className={cls(
-	                    "inline-flex h-8 items-center justify-center rounded-lg px-4 text-sm font-semibold shadow-sm whitespace-nowrap",
-	                    "focus:outline-none focus:ring-2 focus:ring-emerald-600/40",
-	                    isSyncingSpecial
-	                      ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
-	                      : "bg-emerald-700 text-white hover:bg-emerald-800 active:translate-y-[0.5px]"
-	                  )}
-	                  title="Sync Special Classes to Google Calendar"
-	                >
-	                  {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
-	                </button>
-	              </div>
-	            )}
-        </div>
+                          await onRefresh?.();
+                        } catch (e: any) {
+                          const msg = e?.response?.data?.detail || e?.message || "Failed to accept schedule.";
+                          onToast?.("error", msg, "Action failed");
+                          console.error(e);
+                        } finally {
+                          setIsAccepting(false);
+                        }
+                      }}
+                      disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-normal shadow-sm sm:min-w-[172px] sm:flex-none",
+                        "focus:outline-none focus:ring-2 focus:ring-blue-600/30",
+                        (isAccepting || scheduleFinalEffective || isAlreadyApproved)
+                          ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                          : "bg-blue-600 text-white hover:bg-blue-700 active:translate-y-[0.5px]"
+                      )}
+                    >
+                      {scheduleFinalEffective
+                        ? "Finalized"
+                        : isAlreadyApproved
+                        ? "Approved"
+                        : isAccepting
+                        ? "Accepting…"
+                        : "Accept Schedule"}
+                    </button>
+
+                     <label
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center gap-2 rounded-xl border bg-white px-3 text-sm font-medium shadow-sm sm:min-w-[172px] sm:flex-none",
+                        isAccepting || scheduleFinalEffective || isAlreadyApproved
+                          ? "border-neutral-200 text-neutral-400 opacity-70"
+                          : "border-[#e17100] text-[#e17100]"
+                      )}
+                    >
+                      <input
+                        type="checkbox"
+                        className="h-4 w-4 rounded border-orange-300 accent-orange-500 focus:ring-orange-500/30"
+                        checked={sendToGcal}
+                        onChange={(e) => setSendToGcal(e.target.checked)}
+                        disabled={isAccepting || scheduleFinalEffective || isAlreadyApproved}
+                      />
+                      <span className="whitespace-nowrap">Sync to GCalendar</span>
+                    </label>
+                  </div>
+                </div>
+              
+            ) : (
+              
+                <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                  <div className="min-w-0">
+                    
+                  </div>
+
+                  <div className="flex w-full flex-col gap-2 sm:flex-row sm:items-stretch sm:justify-end lg:w-auto">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!selectedSpecialStudentCount) {
+                          onToast?.("warning", "Select at least one special class.", "Nothing selected");
+                          return;
+                        }
+                        setBulkSpecialOpen(true);
+                      }}
+                      disabled={bulkSpecialSending || selectedSpecialStudentCount === 0}
+                      className={cls(
+                        "inline-flex h-10 items-center justify-center rounded-xl px-4 text-sm font-normal shadow-sm whitespace-nowrap sm:min-w-[172px] sm:flex-none",
+                        "focus:outline-none focus:ring-2 focus:ring-blue-600/30",
+                        bulkSpecialSending || selectedSpecialList.length === 0
+                          ? "bg-neutral-300 text-neutral-600 cursor-not-allowed"
+                          : "bg-blue-600 text-white hover:bg-blue-700 active:translate-y-[0.5px]"
+                      )}
+                      title="Send one grouped inbox message per accepted student"
+                    >
+                      Send to ({selectedSpecialStudentCount}) Student
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          if (isSyncingSpecial) return;
+                          setIsSyncingSpecial(true);
+
+                          const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+                          const userId = raw.userId || raw.user_id || raw.id || "";
+                          const termId = (term as any)?.term_id || (term as any)?._id || (term as any)?.id;
+
+                          const resp: any = await acceptFacultyLoadAssignment(
+                            userId,
+                            ({
+                              ...(termId ? { term_id: termId } : {}),
+                              send_to_gcal: true,
+                              sync_special_only: true,
+                              overwrite_gcal: true,
+                            } as any)
+                          );
+
+                          if (resp?.calendar_ok === false) {
+                            onToast?.("warning", resp?.calendar_error || "Calendar was not created.", "Sync issue");
+                          } else {
+                            onToast?.(
+                              "success",
+                              resp?.calendar_events_created
+                                ? `Synced ${resp.calendar_events_created} special-class event(s) to Google Calendar.`
+                                : "No special classes to sync.",
+                              "Synced"
+                            );
+                          }
+                        } catch (e: any) {
+                          const msg = e?.response?.data?.detail || e?.message || "Failed to sync special classes.";
+                          onToast?.("error", msg, "Action failed");
+                          console.error(e);
+                        } finally {
+                          setIsSyncingSpecial(false);
+                        }
+                      }}
+                      disabled={isSyncingSpecial}
+                      className={cls(
+                        "inline-flex h-11 w-full items-center justify-center rounded-xl border bg-white px-4 text-sm font-medium shadow-sm whitespace-nowrap",
+                        "focus:outline-none focus:ring-2 focus:ring-orange-500/30",
+                        isSyncingSpecial
+                          ? "border-neutral-200 text-neutral-400 opacity-70 cursor-not-allowed"
+                          : "border-[#e17100] text-[#e17100] hover:bg-orange-50 active:translate-y-[0.5px]"
+                      )}
+                      title="Sync Special Classes to Google Calendar"
+                    >
+                      {isSyncingSpecial ? "Syncing…" : "Sync to Google Calendar"}
+                  </button>
+                  </div>
+                </div>
+              
+            )}
+          </div>
         </div>
       </div>
+
+      <BulkSpecialMessageDialog
+        open={bulkSpecialOpen}
+        selectedCount={selectedSpecialStudentCount}
+        message={bulkSpecialMessage}
+        sending={bulkSpecialSending}
+        onChangeMessage={setBulkSpecialMessage}
+        onClose={() => {
+          if (bulkSpecialSending) return;
+          setBulkSpecialOpen(false);
+        }}
+        onSend={async () => {
+          try {
+            if (bulkSpecialSending) return;
+            const ids = Array.from(
+              new Set(
+                selectedSpecialList
+                  .flatMap((it) => collectSpecialIds(it as TLItem))
+                  .map((v) => String(v || "").trim())
+                  .filter(Boolean)
+              )
+            );
+            if (ids.length === 0) {
+              onToast?.("warning", "Select at least one special class.", "Nothing selected");
+              return;
+            }
+
+            setBulkSpecialSending(true);
+            const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
+            const userId = raw.userId || raw.user_id || raw.id || "";
+            if (!userId) throw new Error("User is not logged in");
+
+            const resp = await apiPost("/api/faculty/special-class/bulk-message", {
+              user_id: userId,
+              special_ids: ids,
+              message: bulkSpecialMessage.trim(),
+            });
+
+            const sentCount = Number(resp?.sent_count || 0);
+            const skippedCount = Array.isArray(resp?.skipped) ? resp.skipped.length : 0;
+            if (sentCount > 0) {
+              onToast?.(
+                "success",
+                skippedCount > 0
+                  ? `Sent ${sentCount} message(s). ${skippedCount} item(s) were skipped.`
+                  : `Sent ${sentCount} message(s) to selected students.`,
+                "Messages sent"
+              );
+            } else {
+              onToast?.("warning", "No messages were sent.", "Nothing sent");
+            }
+
+            setSelectedSpecialIds({});
+            setBulkSpecialMessage("");
+            setBulkSpecialOpen(false);
+          } catch (e: any) {
+            onToast?.("error", e?.message || "Failed to send bulk messages.", "Action failed");
+          } finally {
+            setBulkSpecialSending(false);
+          }
+        }}
+      />
 
       {/* Custom reject confirmation (Special Class tab) */}
       <ConfirmDialog
@@ -1803,13 +2255,21 @@ const scheduleFinalLabel = (() => {
             if (!userId) throw new Error("User is not logged in");
             if (!it?.special_id) throw new Error("Missing special class id");
 
+            const groupKey = String((it as any)?.special_group_key || it.special_id || "").trim();
             await apiPost("/api/faculty/special-class/respond", {
               user_id: userId,
               special_id: it.special_id,
+              special_ids: (() => {
+                const specialIds = collectSpecialIds(it as TLItem);
+                return specialIds.length ? specialIds : [it.special_id];
+              })(),
               action: "reject",
             });
 
-            onToast?.("info", "Special class rejected. OM/Chair notified.");
+            if (groupKey) {
+              setSpecialActionOverrides((prev) => ({ ...prev, [groupKey]: "REJECTED" }));
+            }
+            onToast?.("info", "Special class rejected. Notifications sent to OM, Chair, and student(s).");
             setRejectSpecialOpen(false);
             setRejectSpecialItem(null);
             await Promise.resolve(onRefresh?.());
@@ -1820,27 +2280,6 @@ const scheduleFinalLabel = (() => {
           }
         }}
       />
-
-	      {/* Legend (mobile): centered above the calendar/list table */}
-	      {view !== "Special" && (
-        <div className="mb-3 flex justify-center xl:hidden">
-          <div className="flex flex-wrap items-center justify-center gap-3 rounded-xl border border-neutral-200 bg-white px-3 py-2 text-xs text-neutral-700 shadow-sm">
-            <span className="font-semibold text-neutral-800">Legend:</span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.manila }} />
-              <span>Manila</span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.laguna }} />
-              <span>Laguna</span>
-            </span>
-            <span className="inline-flex items-center gap-2">
-              <span className="h-3 w-3 rounded-sm" style={{ backgroundColor: CAMPUS_COLORS.serviced }} />
-              <span>Serviced</span>
-            </span>
-          </div>
-        </div>
-      )}
 
       {/*
         IMPORTANT:
@@ -1857,14 +2296,14 @@ const scheduleFinalLabel = (() => {
           <div className="overflow-x-auto">
             <div className="min-w-[860px] rounded-xl border border-neutral-300">
               <div className="grid grid-cols-[140px_repeat(6,1fr)] bg-emerald-800 text-white">
-                <div className="flex items-center justify-center px-3 py-2 text-sm font-semibold">
+                <div className={cls(TABLE_HEADER_CENTER, "flex items-center justify-center")}>
                   Time
                 </div>
                 {/* --- MODIFIED: Do not render "TBA" column header --- */}
                 {DAY_ORDER.filter(d => d !== "TBA").map((d) => (
                   <div
                     key={d}
-                    className="flex items-center justify-center px-3 py-2 text-sm font-semibold"
+                    className={cls(TABLE_HEADER_CENTER, "flex items-center justify-center")}
                   >
                     {d}
                   </div>
@@ -1932,7 +2371,7 @@ const scheduleFinalLabel = (() => {
   <>
     {/* Special Class Tab (List-style) */}
   <div className="overflow-x-auto">
-    <div className="min-w-[1100px] rounded-xl border border-neutral-300 bg-white">
+    <div className="min-w-[1160px] rounded-xl border border-neutral-300 bg-white">
 
 
       <div className="w-full">
@@ -1940,6 +2379,7 @@ const scheduleFinalLabel = (() => {
         <table className="w-full table-fixed border-separate border-spacing-0 text-sm">
           
           <colgroup>
+            <col className="w-[4%]" />
             <col className="w-[12%]" />
             <col className="w-[16%]" />
             {/* Evenly distribute the remaining columns (do not adjust Student/Reason) */}
@@ -1952,14 +2392,35 @@ const scheduleFinalLabel = (() => {
             <col className="w-[9%]" />
             <col className="w-[9%]" />
           </colgroup>
-          <thead className="bg-emerald-50 text-emerald-900">
+          <thead className="bg-emerald-800 text-white">
             <tr className="[&>th]:border-b [&>th]:border-gray-200">
+              <th className={TABLE_HEADER_CENTER}>
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 rounded border-gray-300 accent-emerald-600"
+                  checked={allSpecialSelected}
+                  disabled={acceptedSpecialTeachingLoad.length === 0}
+                  onChange={(e) => {
+                    const checked = e.target.checked;
+                    setSelectedSpecialIds(() => {
+                      if (!checked) return {};
+                      const next: Record<string, boolean> = {};
+                      acceptedSpecialTeachingLoad.forEach((row) => {
+                        const sid = String((row as any)?.special_group_key || (row as any)?.special_id || "").trim();
+                        if (sid) next[sid] = true;
+                      });
+                      return next;
+                    });
+                  }}
+                  aria-label="Select all accepted special classes"
+                />
+              </th>
               {SPECIAL_TABLE_HEADERS.map((h) => (
                 <th
                   key={h}
                   className={cls(
-                    "px-3 py-2 text-xs font-semibold whitespace-normal break-words",
-                    (h === "Course Code & Title" || h === "Student" || h === "Reason") ? "text-left" : "text-center"
+                    (h === "Course Code & Title" || h === "Student" || h === "Reason") ? TABLE_HEADER_LEFT : TABLE_HEADER_CENTER,
+                    "whitespace-normal break-words"
                   )}
                 >
                   {h}
@@ -1968,14 +2429,14 @@ const scheduleFinalLabel = (() => {
             </tr>
           </thead>
           <tbody className="text-gray-900">
-            {specialTeachingLoad.length === 0 ? (
+            {groupedSpecialTeachingLoad.length === 0 ? (
               <tr>
-                <td colSpan={SPECIAL_TABLE_HEADERS.length} className="px-4 py-6 text-center text-sm text-neutral-500">
+                <td colSpan={SPECIAL_TABLE_HEADERS.length + 1} className="px-4 py-6 text-center text-sm text-neutral-500">
                   No special classes.
                 </td>
               </tr>
             ) : (
-              specialTeachingLoad.map((it, idx) => {
+              groupedSpecialTeachingLoad.map((it, idx) => {
                 const t1 = splitBeginEnd(it.time1);
                 const t2 = splitBeginEnd(it.time2);
 
@@ -1987,10 +2448,21 @@ const scheduleFinalLabel = (() => {
                 const room1Display = normalizeRoomDisplayForSpecial((it as any).room1);
                 const room2Display = normalizeRoomDisplayForSpecial((it as any).room2);
 
-                const modeDisplay = specialModeFromRooms((it as any).room1, (it as any).room2);
+                const modeDisplay = specialModeDisplay((it as any).mode);
 
                 const facStatus = String((it as any)?.special_faculty_status || "PENDING").toUpperCase();
                 const isPending = facStatus !== "ACCEPTED";
+                const reasonGroups = ((((it as any)?.reason_groups || []) as TLItemReasonGroup[]).length
+                  ? (((it as any)?.reason_groups || []) as TLItemReasonGroup[])
+                  : [{
+                      reason: "Unspecified",
+                      students: ((((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[])
+                        .filter((pair) => String(pair?.student || "").trim())
+                        .map((pair) => String(pair.student || "").trim())
+                        .filter(Boolean)),
+                      pair_keys: [],
+                    }]
+                ).filter((group) => Array.isArray(group.students) && group.students.length > 0);
 
                 const onAcceptSpecial = async (e: React.MouseEvent) => {
                   e.stopPropagation();
@@ -1999,13 +2471,19 @@ const scheduleFinalLabel = (() => {
                     const userId = raw.userId || raw.user_id || raw.id;
                     if (!userId) throw new Error("User is not logged in");
 
+                    const groupKey = String((it as any)?.special_group_key || (it as any)?.special_id || "").trim();
+                    const specialIds = collectSpecialIds(it as TLItem);
                     await apiPost("/api/faculty/special-class/respond", {
                       user_id: userId,
                       special_id: (it as any)?.special_id,
+                      special_ids: specialIds.length ? specialIds : [(it as any)?.special_id],
                       action: "accept",
                     });
 
-                    onToast?.("success", "Special class accepted. OM/Chair notified.");
+                    if (groupKey) {
+                      setSpecialActionOverrides((prev) => ({ ...prev, [groupKey]: "ACCEPTED" }));
+                    }
+                    onToast?.("success", "Special class accepted. Notifications sent to OM, Chair, and student(s).");
                     await Promise.resolve(onRefresh?.());
                   } catch (err: any) {
                     onToast?.("error", err?.message || "Failed to accept special class.");
@@ -2014,9 +2492,11 @@ const scheduleFinalLabel = (() => {
 
                 const onRejectSpecial = async (e: React.MouseEvent) => {
                   e.stopPropagation();
+                  const specialIds = collectSpecialIds(it as TLItem);
                   setRejectSpecialItem({
                     ...it,
                     special_id: (it as any)?.special_id,
+                    special_ids: specialIds.length ? specialIds : [(it as any)?.special_id],
                   });
                   setRejectSpecialOpen(true);
                 };
@@ -2037,6 +2517,10 @@ const scheduleFinalLabel = (() => {
                       syllabus: it.syllabus,
                       is_special_class: true,
                       special_id: (it as any)?.special_id,
+                      special_ids: (() => {
+                        const specialIds = collectSpecialIds(it as TLItem);
+                        return specialIds.length ? specialIds : [(it as any)?.special_id];
+                      })(),
                       forceConversationOnly: true,
                       allowStartConversation: true,
                       originalItem: it,
@@ -2062,16 +2546,79 @@ const scheduleFinalLabel = (() => {
                     }}
                     title="Open Proposed Schedule"
                   >
-                                        <td className="px-3 py-3 align-top">
+                    <td
+                      className="px-3 py-3 align-top text-center"
+                      onClick={(e) => e.stopPropagation()}
+                    >
+                      <input
+                        type="checkbox"
+                        className="mt-1 h-4 w-4 rounded border-gray-300 accent-emerald-600"
+                        disabled={isPending}
+                        checked={Boolean(selectedSpecialIds[String((it as any)?.special_group_key || (it as any)?.special_id || "")])}
+                        onChange={(e) => {
+                          const sid = String((it as any)?.special_group_key || (it as any)?.special_id || "").trim();
+                          if (!sid || isPending) return;
+                          const checked = e.target.checked;
+                          setSelectedSpecialIds((prev) => {
+                            const next = { ...prev };
+                            if (checked) next[sid] = true;
+                            else delete next[sid];
+                            return next;
+                          });
+                        }}
+                        aria-label={`Select accepted special class ${it.course_code || ""} ${it.section || ""}`}
+                      />
+                    </td>
+                    <td className="px-3 py-3 align-top">
                       <div className="leading-tight">
-                        <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">{(it as any)?.student || "—"}</div>
-                      
+                        <div className="text-sm font-semibold text-gray-900 break-words whitespace-normal">
+                          {`${Number((it as any)?.student_count ?? 0)} student${Number((it as any)?.student_count ?? 0) === 1 ? "" : "s"}`}
+                        </div>
+                        <div className="mt-2 space-y-3 text-[12px] text-gray-700">
+                          {reasonGroups.map((group, groupIdx) => (
+                            <div
+                              key={`${String(group.reason || "Unspecified")}-${groupIdx}`}
+                              className="rounded-lg border border-transparent px-0.5 py-0.5"
+                            >
+                              <div className="space-y-1">
+                                {group.students.map((student, studentIdx) => {
+                                  const pair = (((it as any)?.student_reason_pairs || []) as TLItemStudentReasonPair[]).find((candidate) => {
+                                    const candidateName = String(candidate?.student || "").trim();
+                                    const currentName = String(student || "").trim();
+                                    const reasonName = String(group.reason || "").trim();
+                                    const candidateReason = String(candidate?.reason || "").trim() || "Unspecified";
+                                    return candidateName === currentName && candidateReason === reasonName;
+                                  });
+
+                                  return (
+                                    <button
+                                      key={`${group.pair_keys?.[studentIdx] || `${group.reason}-${student}-${studentIdx}`}`}
+                                      type="button"
+                                      onClick={(e) => openSpecialStudentEaf(e, pair)}
+                                      className="break-words whitespace-normal leading-relaxed text-left text-emerald-700 hover:text-emerald-800 hover:underline"
+                                      title="Open EAF"
+                                    >
+                                      {student}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </td>
 
                     <td className="px-3 py-3 align-top">
-                      <div className="text-[12px] text-gray-800 break-words whitespace-normal">
-                        {(it as any)?.reason || "—"}
+                      <div className="mt-[30px] space-y-3 text-[12px] text-gray-800 break-words whitespace-normal">
+                        {reasonGroups.map((group, groupIdx) => (
+                          <div
+                            key={`${String(group.reason || "Unspecified")}-${groupIdx}`}
+                            className="rounded-lg border border-neutral-200 bg-neutral-50 px-2.5 py-2 leading-relaxed"
+                          >
+                            {group.reason || "Unspecified"}
+                          </div>
+                        ))}
                       </div>
                     </td>
 
@@ -2171,25 +2718,28 @@ const scheduleFinalLabel = (() => {
                             title="Message OM/Chair"
                             aria-label="Message OM/Chair"
                           >
-                            <Inbox className="h-4 w-4 text-slate-700" />
+                            <MessageSquareText className="h-4 w-4 text-slate-700" />
                           </button>
                         </div>
                       ) : (
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            openEditSpecial(it);
-                          }}
-                          className={cls(
-                            "inline-flex items-center justify-center rounded-md border px-2 py-1 text-xs",
-                            "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
-                          )}
-                          title="Edit Special Class Schedule"
-                          aria-label="Edit Special Class Schedule"
-                        >
-                          <Edit className="h-4 w-4" />
-                        </button>
+                        <div className="flex items-center justify-center gap-1.5">
+
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openEditSpecial(it);
+                            }}
+                            className={cls(
+                              "inline-flex h-8 w-8 items-center justify-center rounded-lg border",
+                              "border-emerald-200 bg-emerald-50 hover:bg-emerald-100 active:translate-y-[0.5px]"
+                            )}
+                            title="Edit Special Class Schedule"
+                            aria-label="Edit Special Class Schedule"
+                          >
+                            <Edit className="h-4 w-4" />
+                          </button>
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -2207,21 +2757,21 @@ const scheduleFinalLabel = (() => {
     {/* New List View */}
           <div className="space-y-6">
             <div className="overflow-x-auto">
-              <div className="rounded-xl border border-gray-200 overflow-hidden bg-white">
+              <div className=" border border-gray-200 overflow-hidden bg-white">
                 <table className="w-full table-fixed text-[13px]">
-                  <colgroup>
-                    <col className="w-[320px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[90px]" />
-                    <col className="w-[150px]" />
-                    <col className="w-[180px]" />
-                    <col className="w-[92px]" />
-                    <col className="w-[76px]" />
-                  </colgroup>
-                  <thead className="bg-emerald-50 text-emerald-900">
-                    <tr className="[&>th]:border-b [&>th]:border-gray-200">
+                <colgroup>
+                  <col className="w-[34%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                  <col className="w-[11%]" />
+                </colgroup>
+                  <thead className="bg-emerald-800 text-white">
+                    <tr className="[&>th]:border-b [&>th]:border-emerald-700">
                       {LIST_HEADERS.map((h) => (
-                        <th key={h} className={cls("px-4 py-3 font-semibold", h === "Course Code & Title" ? "text-left" : "text-center")}>
+                        <th key={h} className={h === "Course Code & Title" ? TABLE_HEADER_LEFT : TABLE_HEADER_CENTER}>
                           {h}
                         </th>
                       ))}
@@ -2239,19 +2789,20 @@ const scheduleFinalLabel = (() => {
                         const t1 = splitBeginEnd(it.time1);
                         const t2 = splitBeginEnd(it.time2);
                         const isSpecial = Boolean((it as any)?.is_special_class);
+                        const isConvertedFromSpecial = Boolean((it as any)?.converted_from_special);
                         const isServiced = !isSpecial && Boolean((it as any)?.is_serviced);
 
-                        // Days: for special classes show initial-only (M/T/W/H/F/S/U) to match regular.
+                        // Days: converted Special Classes should also use initials in List view.
                         const d1Raw = it.day1 && it.day1 !== "TBA" ? it.day1 : "";
                         const d2Raw = it.day2 && it.day2 !== "TBA" ? it.day2 : "";
-                        const d1 = d1Raw ? ((isSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
-                        const d2 = d2Raw ? ((isSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
+                        const d1 = d1Raw ? ((isSpecial || isConvertedFromSpecial || isServiced) ? dayInitial(d1Raw) : d1Raw) : "—";
+                        const d2 = d2Raw ? ((isSpecial || isConvertedFromSpecial || isServiced) ? dayInitial(d2Raw) : d2Raw) : "—";
 
-                        // Rooms: for special classes show TBA instead of ONLINE.
-                        const room1Display = isSpecial
+                        // Rooms: converted Special Classes should also keep TBA instead of ONLINE.
+                        const room1Display = (isSpecial || isConvertedFromSpecial)
                           ? normalizeRoomDisplayForSpecial((it as any).room1)
                           : (isServiced ? ((it as any).room1 || "TBA") : ((it as any).room1 || "—"));
-                        const room2Display = isSpecial
+                        const room2Display = (isSpecial || isConvertedFromSpecial)
                           ? normalizeRoomDisplayForSpecial((it as any).room2)
                           : (isServiced ? ((it as any).room2 || "TBA") : ((it as any).room2 || "—"));
 
@@ -2259,7 +2810,7 @@ const scheduleFinalLabel = (() => {
                         // In List view: Special Classes should NOT show "Special Class" in the Mode column.
                         const modeRaw = String(it.mode || "").trim();
                         const modeDisplay = isSpecial
-                          ? specialModeFromRooms((it as any).room1, (it as any).room2)
+                          ? specialModeDisplay((it as any).mode)
                           : (modeRaw || "—");
 
                         const hasSecondMeeting = Boolean(
@@ -2273,7 +2824,7 @@ const scheduleFinalLabel = (() => {
                           <tr
                             key={idx}
                             className={cls(
-                              isSpecial ? "bg-emerald-50" : (isServiced ? "bg-emerald-50/60" : "bg-white"),
+                              //isSpecial ? "bg-emerald-50" : (isServiced ? "bg-[#CBD5C0]" : "bg-white"),
                               "[&>td]:border-t [&>td]:border-gray-100"
                             )}
                           >
@@ -2286,8 +2837,8 @@ const scheduleFinalLabel = (() => {
                             <td className="px-4 py-3 align-middle text-center">{it.section || "—"}</td>
                             <td className="px-4 py-3 align-top text-center">
                               <div className="flex flex-col items-center gap-1 text-[12px] text-gray-800 leading-tight">
-                                <div className="font-semibold">{d1 || "—"}</div>
-                                {hasSecondMeeting && <div className="font-semibold">{d2 || "—"}</div>}
+                                <div className="font-normal">{d1 || "—"}</div>
+                                {hasSecondMeeting && <div className="font-normal">{d2 || "—"}</div>}
                               </div>
                             </td>
                             <td className="px-4 py-3 align-top text-center">
@@ -2406,9 +2957,9 @@ const scheduleFinalLabel = (() => {
 
             <div className="max-h-[80vh] overflow-y-auto p-5">
               {(() => {
-	                // NOTE: specialEdit is guarded by `{specialEdit && (...)}` above,
-	                // but TS doesn't always narrow across the IIFE boundary.
-	                const oi = (specialEdit?.original ?? {}) as any;
+                  // NOTE: specialEdit is guarded by `{specialEdit && (...)}` above,
+                  // but TS doesn't always narrow across the IIFE boundary.
+                  const oi = (specialEdit?.original ?? {}) as any;
                 const t1 = splitBeginEnd(oi?.time1);
                 const t2 = splitBeginEnd(oi?.time2);
                 const orig1 = `${dayInitial(oi?.day1 || "TBA") || "TBA"} ${(t1.begin && t1.end && t1.begin !== "—") ? `${t1.begin}–${t1.end}` : "TBA"} (${normalizeRoomDisplayForSpecial((oi as any)?.room1) || "TBA"})`;
@@ -2500,7 +3051,7 @@ const scheduleFinalLabel = (() => {
                             })),
                           ].filter((o) => o.value !== "")}
                           includeEmptyOption={{ value: "", label: "TBA" }}
-                          disabled={specialRoomsLoading}
+                          disabled={true}
                         />
 
                         </div>
@@ -2555,7 +3106,7 @@ const scheduleFinalLabel = (() => {
                             })),
                           ].filter((o) => o.value !== "")}
                           includeEmptyOption={{ value: "", label: "TBA" }}
-                          disabled={specialRoomsLoading || !specialEditDraft.day2}
+                          disabled={true}
                         />
                         </div>
                     </div>
@@ -3025,283 +3576,283 @@ function ChangeRequestModal({
       />
 
       <div className="fixed inset-0 z-80 grid place-items-center bg-black/30 p-3">
-	    <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
-	      {/* Header */}
-	      <div className="border-b border-neutral-200 p-5 sm:p-6">
-	        <div className="flex items-start justify-between gap-4">
-	          <div className="min-w-0">
-	            <h3 className="text-xl font-semibold text-emerald-700">Proposed Schedule</h3>
-	            <p className="mt-0.5 text-sm text-neutral-500">
-	              {context.item.code} {context.item.sec}
-	            </p>
-	          </div>
-	          <button
-	            className="shrink-0 rounded-full p-1 hover:bg-neutral-100"
-	            onClick={onClose}
-	            aria-label="Close"
-	            type="button"
-	          >
-	            <X className="h-5 w-5" />
-	          </button>
-	        </div>
+      <div className="w-full max-w-5xl rounded-2xl bg-white shadow-2xl max-h-[92vh] flex flex-col overflow-hidden">
+        {/* Header */}
+        <div className="border-b border-neutral-200 p-5 sm:p-6">
+          <div className="flex items-start justify-between gap-4">
+            <div className="min-w-0">
+              <h3 className="text-xl font-semibold text-emerald-700">Proposed Schedule</h3>
+              <p className="mt-0.5 text-sm text-neutral-500">
+                {context.item.code} {context.item.sec}
+              </p>
+            </div>
+            <button
+              className="shrink-0 rounded-full p-1 hover:bg-neutral-100"
+              onClick={onClose}
+              aria-label="Close"
+              type="button"
+            >
+              <X className="h-5 w-5" />
+            </button>
+          </div>
 
-	        {/* Panel switcher */}
-	        <div className="mt-4 flex w-full items-center justify-between gap-3">
-	          {(context.item as any)?.forceConversationOnly ? (
+          {/* Panel switcher */}
+          <div className="mt-4 flex w-full items-center justify-between gap-3">
+            {(context.item as any)?.forceConversationOnly ? (
               <div className="inline-flex rounded-xl border border-emerald-200 bg-emerald-50 px-3 py-1.5 text-sm font-medium text-emerald-900">
                 Conversation
               </div>
             ) : (
-	            <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
-	              <button
-	                type="button"
-	                onClick={() => setPanel("request")}
-	                className={cls(
-	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                  panel === "request"
-	                    ? "bg-white text-neutral-900 shadow-sm"
-	                    : "text-neutral-600 hover:text-neutral-900"
-	                )}
-	                aria-pressed={panel === "request"}
-	              >
-	                Request
-	              </button>
-	              <button
-	                type="button"
-	                onClick={() => setPanel("conversation")}
-	                className={cls(
-	                  "rounded-lg px-3 py-1.5 text-sm font-medium",
-	                  panel === "conversation"
-	                    ? "bg-white text-neutral-900 shadow-sm"
-	                    : "text-neutral-600 hover:text-neutral-900"
-	                )}
-	                aria-pressed={panel === "conversation"}
-	              >
-	                Conversation
-	              </button>
-	            </div>
-	          )}
-	        </div>
-	      </div>
+              <div className="inline-flex rounded-xl border border-neutral-200 bg-neutral-50 p-1">
+                <button
+                  type="button"
+                  onClick={() => setPanel("request")}
+                  className={cls(
+                    "rounded-lg px-3 py-1.5 text-sm font-medium",
+                    panel === "request"
+                      ? "bg-white text-neutral-900 shadow-sm"
+                      : "text-neutral-600 hover:text-neutral-900"
+                  )}
+                  aria-pressed={panel === "request"}
+                >
+                  Request
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setPanel("conversation")}
+                  className={cls(
+                    "rounded-lg px-3 py-1.5 text-sm font-medium",
+                    panel === "conversation"
+                      ? "bg-white text-neutral-900 shadow-sm"
+                      : "text-neutral-600 hover:text-neutral-900"
+                  )}
+                  aria-pressed={panel === "conversation"}
+                >
+                  Conversation
+                </button>
+              </div>
+            )}
+          </div>
+        </div>
 
-	      {/* Body (scrollable) */}
-	      <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
-	        {effectivePanel === "conversation" ? (
-	          <RfcThreadView
-	            term={term}
-	            sectionId={(() => {
-	              const oiAny: any = (context.item.originalItem as any) || {};
-	              const isSpecial = Boolean(
-	                (context.item as any)?.is_special_class ||
-	                  (context.item as any)?.isSpecialClass ||
-	                  oiAny?.is_special_class
-	              );
-	              const raw =
-	                (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
-	                oiAny?.section_id ||
-	                oiAny?.sectionId ||
-	                "";
-	              return normalizeRfcKey(raw, isSpecial);
-	            })()}
-	            allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
-	            alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
-	          />
-	        ) : (
-	          <div className="space-y-4">
-	            {/* Status banners */}
-	            {scheduleFinal && (
-	              <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
-	                The schedule is already finalized and locked. RFC is disabled.
-	              </div>
-	            )}
-	
-	            {isFinalized && (
-	              <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-	                This course has already been finalized by the Office Manager. RFC is disabled for this course.
-	              </div>
-	            )}
-	
-	            {/* Current schedule summary */}
-	            <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
-	              <div className="flex items-center justify-between gap-3">
-	                <div className="text-sm font-semibold text-neutral-800">Current schedule</div>
-	                <button
-	                  type="button"
-	                  onClick={() => setPanel("conversation")}
-	                  className="text-sm font-medium text-emerald-700 hover:underline"
-	                >
-	                  View conversation
-	                </button>
-	              </div>
-	              {/* Compact meeting layout (Day / Time / Room columns) */}
-	              <div className="mt-3 overflow-hidden rounded-xl border border-neutral-200 bg-white">
-	                <div className="grid grid-cols-3 gap-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-600">
-	                  <div>Day</div>
-	                  <div>Time</div>
-	                  <div className="text-right">Room</div>
-	                </div>
-	
-	                <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
-	                  <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
-	                  <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
-	                  <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
-	                </div>
+        {/* Body (scrollable) */}
+        <div className="flex-1 min-h-0 overflow-y-auto p-5 sm:p-6">
+          {effectivePanel === "conversation" ? (
+            <RfcThreadView
+              term={term}
+              sectionId={(() => {
+                const oiAny: any = (context.item.originalItem as any) || {};
+                const isSpecial = Boolean(
+                  (context.item as any)?.is_special_class ||
+                    (context.item as any)?.isSpecialClass ||
+                    oiAny?.is_special_class
+                );
+                const raw =
+                  (isSpecial ? (oiAny?.special_id || (context.item as any)?.special_id) : "") ||
+                  oiAny?.section_id ||
+                  oiAny?.sectionId ||
+                  "";
+                return normalizeRfcKey(raw, isSpecial);
+              })()}
+              allowStartConversation={Boolean((context.item as any)?.allowStartConversation)}
+              alwaysShowReply={Boolean((context.item as any)?.is_special_class)}
+            />
+          ) : (
+            <div className="space-y-4">
+              {/* Status banners */}
+              {scheduleFinal && (
+                <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+                  The schedule is already finalized and locked. RFC is disabled.
+                </div>
+              )}
+  
+              {isFinalized && (
+                <div className="rounded-xl border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
+                  This course has already been finalized by the Office Manager. RFC is disabled for this course.
+                </div>
+              )}
+  
+              {/* Current schedule summary */}
+              <div className="rounded-2xl border border-neutral-200 bg-neutral-50 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="text-sm font-semibold text-neutral-800">Current schedule</div>
+                  <button
+                    type="button"
+                    onClick={() => setPanel("conversation")}
+                    className="text-sm font-medium text-emerald-700 hover:underline"
+                  >
+                    View conversation
+                  </button>
+                </div>
+                {/* Compact meeting layout (Day / Time / Room columns) */}
+                <div className="mt-3 overflow-hidden rounded-xl border border-neutral-200 bg-white">
+                  <div className="grid grid-cols-3 gap-0 border-b border-neutral-200 bg-neutral-50 px-3 py-2 text-xs font-semibold text-neutral-600">
+                    <div>Day</div>
+                    <div>Time</div>
+                    <div className="text-right">Room</div>
+                  </div>
+  
+                  <div className="grid grid-cols-3 gap-0 px-3 py-2 text-sm">
+                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day1) || "TBA"}</div>
+                    <div className="font-medium text-neutral-800">{String(oi?.time1 || "TBA")}</div>
+                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room1) || "TBA"}</div>
+                  </div>
 
-	                {hasSecond ? (
-	                  <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
-	                    <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
-	                    <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
-	                    <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
-	                  </div>
-	                ) : (
-	                  <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">
-	                    <div className="col-span-3">No second meeting</div>
-	                  </div>
-	                )}
-	              </div>
-	            </div>
-	
-	            {/* Step 1: choose what to change */}
-	            <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	              <div className="flex items-start justify-between gap-3">
-	                <div>
-	                  <div className="text-sm font-semibold text-neutral-800">1) What would you like to change?</div>
-	                  <div className="mt-0.5 text-sm text-neutral-500">Select one or more options.</div>
-	                </div>
-	              </div>
-	              <div className="mt-3 flex flex-wrap gap-2">
-	                {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
-	                  <button
-	                    key={opt}
-	                    type="button"
-	                    onClick={() => toggle(opt)}
-	                    className={cls(
-	                      "rounded-xl border px-3 py-2 text-sm",
-	                      "transition-colors",
-	                      choices.includes(opt)
-	                        ? "border-emerald-600 bg-emerald-50 text-emerald-800"
-	                        : "border-neutral-300 bg-white hover:bg-neutral-50"
-	                    )}
-	                  >
-	                    {opt}
-	                  </button>
-	                ))}
-	              </div>
-	            </div>
-	
-	            {/* Step 2: details */}
-	            {(mustTime || mustDay || choices.includes("Other")) && (
-	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	                <div className="text-sm font-semibold text-neutral-800">2) Provide the new schedule/details</div>
-	                <div className="mt-0.5 text-sm text-neutral-500">
-	                  For paired schedules, Meeting 1 and Meeting 2 are submitted together.
-	                </div>
-	
-	                {mustTime && (
-	                  <div className="mt-4">
-	                    <div className="mb-2 text-sm font-medium text-neutral-700">New time slot</div>
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
-	                        <Dropdown
-	                          value={selTime1}
-	                          onChange={setSelTime1}
-	                          options={filteredTimeSlots1}
-	                          placeholder="— Select a time —"
-	                        />
-	                      </div>
-	                      {hasSecond && (
-	                        <div>
-	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
-	                          <Dropdown
-	                            value={selTime2}
-	                            onChange={setSelTime2}
-	                            options={filteredTimeSlots2}
-	                            placeholder="— Select a time —"
-	                          />
-	                        </div>
-	                      )}
-	                    </div>
-	                  </div>
-	                )}
-	
-	                {mustDay && (
-	                  <div className="mt-4">
-	                    <div className="mb-2 text-sm font-medium text-neutral-700">New class day</div>
-	                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-	                      <div>
-	                        <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
-	                        <Dropdown
-	                          value={selDay1}
-	                          onChange={(v) => setSelDay1(v as DayLong)}
-	                          options={filteredDays1}
-	                          placeholder="— Select a day —"
-	                        />
-	                      </div>
-	                      {hasSecond && (
-	                        <div>
-	                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
-	                          <Dropdown
-	                            value={selDay2}
-	                            onChange={(v) => setSelDay2(v as DayLong)}
-	                            options={filteredDays2}
-	                            placeholder="— Select a day —"
-	                          />
-	                        </div>
-	                      )}
-	                    </div>
-	                  </div>
-	                )}
-	
-	                {choices.includes("Other") && (
-	                  <div className="mt-4">
-	                    <label className="mb-1 block text-sm font-medium text-neutral-700">
-	                      Specify change <span className="text-red-500">*</span>
-	                    </label>
-	                    <input
-	                      type="text"
-	                      className="w-full rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
-	                      placeholder="Type your custom change…"
-	                      value={otherText}
-	                      onChange={(e) => setOtherText(e.target.value)}
-	                    />
-	                  </div>
-	                )}
-	              </div>
-	            )}
-	
-	            {/* Step 3: remarks */}
-	            {!!choices.length && (
-	              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
-	                <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
-	                <textarea
-	                  rows={4}
-	                  className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
-	                  placeholder="Include brief context so OM can review faster..."
-	                  value={remarks}
-	                  onChange={(e) => setRemarks(e.target.value)}
-	                />
+                  {hasSecond ? (
+                    <div className="grid grid-cols-3 gap-0 border-t border-neutral-100 px-3 py-2 text-sm">
+                      <div className="font-medium text-neutral-800">{dayAbbrev(oi?.day2) || "TBA"}</div>
+                      <div className="font-medium text-neutral-800">{String(oi?.time2 || "TBA")}</div>
+                      <div className="text-right text-neutral-700">{normalizeRoomDisplayForSpecial(oi?.room2) || "TBA"}</div>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-3 border-t border-neutral-100 px-3 py-2 text-sm text-neutral-500">
+                      <div className="col-span-3">No second meeting</div>
+                    </div>
+                  )}
+                </div>
+              </div>
+  
+              {/* Step 1: choose what to change */}
+              <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-sm font-semibold text-neutral-800">1) What would you like to change?</div>
+                    <div className="mt-0.5 text-sm text-neutral-500">Select one or more options.</div>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  {(["Change class time", "Change class day", "Other"] as ChangeKind[]).map((opt) => (
+                    <button
+                      key={opt}
+                      type="button"
+                      onClick={() => toggle(opt)}
+                      className={cls(
+                        "rounded-xl border px-3 py-2 text-sm",
+                        "transition-colors",
+                        choices.includes(opt)
+                          ? "border-emerald-600 bg-emerald-50 text-emerald-800"
+                          : "border-neutral-300 bg-white hover:bg-neutral-50"
+                      )}
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+              </div>
+  
+              {/* Step 2: details */}
+              {(mustTime || mustDay || choices.includes("Other")) && (
+                <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                  <div className="text-sm font-semibold text-neutral-800">2) Provide the new schedule/details</div>
+                  <div className="mt-0.5 text-sm text-neutral-500">
+                    For paired schedules, Meeting 1 and Meeting 2 are submitted together.
+                  </div>
+  
+                  {mustTime && (
+                    <div className="mt-4">
+                      <div className="mb-2 text-sm font-medium text-neutral-700">New time slot</div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+                          <Dropdown
+                            value={selTime1}
+                            onChange={setSelTime1}
+                            options={filteredTimeSlots1}
+                            placeholder="— Select a time —"
+                          />
+                        </div>
+                        {hasSecond && (
+                          <div>
+                            <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+                            <Dropdown
+                              value={selTime2}
+                              onChange={setSelTime2}
+                              options={filteredTimeSlots2}
+                              placeholder="— Select a time —"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+  
+                  {mustDay && (
+                    <div className="mt-4">
+                      <div className="mb-2 text-sm font-medium text-neutral-700">New class day</div>
+                      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                        <div>
+                          <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 1</div>
+                          <Dropdown
+                            value={selDay1}
+                            onChange={(v) => setSelDay1(v as DayLong)}
+                            options={filteredDays1}
+                            placeholder="— Select a day —"
+                          />
+                        </div>
+                        {hasSecond && (
+                          <div>
+                            <div className="mb-1 text-xs font-semibold text-neutral-600">Meeting 2</div>
+                            <Dropdown
+                              value={selDay2}
+                              onChange={(v) => setSelDay2(v as DayLong)}
+                              options={filteredDays2}
+                              placeholder="— Select a day —"
+                            />
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+  
+                  {choices.includes("Other") && (
+                    <div className="mt-4">
+                      <label className="mb-1 block text-sm font-medium text-neutral-700">
+                        Specify change <span className="text-red-500">*</span>
+                      </label>
+                      <input
+                        type="text"
+                        className="w-full rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+                        placeholder="Type your custom change…"
+                        value={otherText}
+                        onChange={(e) => setOtherText(e.target.value)}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+  
+              {/* Step 3: remarks */}
+              {!!choices.length && (
+                <div className="rounded-2xl border border-neutral-200 bg-white p-4">
+                  <div className="text-sm font-semibold text-neutral-800">3) Special remarks <span className="text-red-500">*</span></div>
+                  <textarea
+                    rows={4}
+                    className="mt-3 w-full resize-y rounded-xl border border-neutral-300 p-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-600/20"
+                    placeholder="Include brief context so OM can review faster..."
+                    value={remarks}
+                    onChange={(e) => setRemarks(e.target.value)}
+                  />
                 {!remarks.trim() && (
                   <div className="mt-1 text-xs text-red-600">Remarks are required to send this RFC.</div>
                 )}
-	              </div>
-	            )}
-	          </div>
-	        )}
-	      </div>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
 
-	      {/* Footer */}
-	      {forceConversationOnly ? (
-	        <div className="p-6 pt-0 flex items-center justify-end">
-	          <button
-	            onClick={onClose}
-	            className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
-	          >
-	            Close
-	          </button>
-	        </div>
-	      ) : (
-	        <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
+        {/* Footer */}
+        {forceConversationOnly ? (
+          <div className="p-6 pt-0 flex items-center justify-end">
+            <button
+              onClick={onClose}
+              className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
+            >
+              Close
+            </button>
+          </div>
+        ) : (
+          <div className="p-6 pt-0 flex items-center justify-end gap-2.5">
             <button
               onClick={onClose}
               className="inline-flex h-9 items-center justify-center rounded-xl border border-neutral-200 bg-neutral-100 px-4 text-sm text-slate-900 shadow-sm hover:bg-neutral-200/70 active:translate-y-[0.5px]"
@@ -3443,7 +3994,7 @@ function ChangeRequestModal({
             } finally {
               onClose();
             }
-	          }}
+            }}
 
               className={cls(
                 "inline-flex h-9 items-center gap-2 rounded-xl px-4 text-sm text-white shadow",
@@ -3455,8 +4006,8 @@ function ChangeRequestModal({
               <SendIcon className="h-4 w-4" strokeWidth={2.2} />
               Send
             </button>
-	        </div>
-	      )}
+          </div>
+        )}
       </div>
       </div>
     </>
@@ -3557,7 +4108,7 @@ function RfcThreadView({
       )}
 
       {/* Quick reply: allow faculty to respond in-thread even without creating a new RFC request */}
-      {!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation)) && (
+      {(!locked && !!sectionId && (Boolean(alwaysShowReply) || hasMsgs || Boolean(allowStartConversation))) ? (
         <div className="mt-3 flex items-end gap-2">
           <textarea
             rows={2}
@@ -3570,8 +4121,7 @@ function RfcThreadView({
             type="button"
             disabled={sending || !reply.trim() || !sectionId}
             onClick={async () => {
-              if (!reply.trim()) return;
-              if (!sectionId) return;
+              if (!reply.trim() || !sectionId) return;
               try {
                 setSending(true);
                 const raw = JSON.parse(localStorage.getItem("animo.user") || "{}");
@@ -3582,7 +4132,6 @@ function RfcThreadView({
                   message: reply.trim(),
                 });
                 setReply("");
-                // Refresh thread so the new message appears immediately.
                 const refreshed = await getFacultyLoadAssignmentRfc(userId, {
                   term_id: (term as any)?.term_id || (term as any)?._id || (term as any)?.id,
                   section_id: sectionId,
@@ -3597,13 +4146,13 @@ function RfcThreadView({
             className={cls(
               "inline-flex h-9 w-10 items-center justify-center rounded-xl text-white shadow",
               "bg-[#1F7A49] hover:brightness-[1.06] active:translate-y-[0.5px]",
-              (sending || !reply.trim()) && "opacity-60 cursor-not-allowed"
+              (sending || !reply.trim() || !sectionId) && "opacity-60 cursor-not-allowed"
             )}
           >
             <SendIcon className={cls("h-4 w-4", sending && "animate-pulse")} />
           </button>
         </div>
-      )}
+      ) : null}
     </div>
   );
 }

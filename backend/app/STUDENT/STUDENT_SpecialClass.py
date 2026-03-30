@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+import base64
+import binascii
+from pathlib import Path
+from uuid import uuid4
 import re
 from typing import Any, Dict, Optional, List, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi.responses import Response
 from pymongo import ReturnDocument
 
 from ..main import db
@@ -20,6 +25,13 @@ COL_COURSES = "courses"
 COL_PROGRAMS = "programs"
 COL_TERMS = "terms"
 COL_PREEN_COUNT = "preenlistment_count"
+COL_SPECIAL_WINDOWS = "specialclass_windows"
+COL_PETITIONS = "student_petitions"
+
+SPECIAL_EAF_UPLOAD_DIR = Path(__file__).resolve().parent.parent / "uploads" / "specialclass_eaf"
+SPECIAL_EAF_MAX_BYTES = 5 * 1024 * 1024
+SPECIAL_EAF_ALLOWED_EXTS = {".pdf"}
+SPECIAL_EAF_ALLOWED_CONTENT_TYPES = {"", "application/pdf", "application/octet-stream"}
 
 COL_SECTIONS = "sections"
 COL_SECTION_SCHEDULES = "section_schedules"
@@ -43,6 +55,52 @@ def _upper_name(first: str, last: str) -> str:
 
 def _now_dt() -> datetime:
     return datetime.now(timezone.utc)
+
+async def _resolve_student_identity(user_id: str) -> Dict[str, Any]:
+    user = await db[COL_USERS].find_one(
+        {"user_id": user_id},
+        {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
+    ) or {}
+
+    first_name = str(user.get("first_name") or "")
+    last_name = str(user.get("last_name") or "")
+    student_number = str(user.get("student_number") or "").strip()
+    program_id = str(user.get("program_id") or "").strip()
+
+    async def _latest_identity(coll: str, id_field: str) -> Dict[str, Any]:
+        return await db[coll].find_one(
+            {"user_id": user_id, id_field: {"$exists": True}},
+            sort=[("submitted_at", -1)],
+            projection={"_id": 0, "student_number": 1, "program_id": 1},
+        ) or {}
+
+    for coll, id_field in ((COL_SPECIAL, "special_id"), (COL_PETITIONS, "petition_id")):
+        if student_number and program_id:
+            break
+        prev = await _latest_identity(coll, id_field)
+        if not student_number and prev.get("student_number") is not None:
+            student_number = str(prev.get("student_number") or "").strip()
+        if not program_id and prev.get("program_id"):
+            program_id = str(prev.get("program_id") or "").strip()
+
+    program_code = ""
+    if program_id:
+        prog = await db[COL_PROGRAMS].find_one(
+            {"program_id": program_id},
+            {"_id": 0, "program_code": 1},
+        ) or {}
+        program_code = str(prog.get("program_code") or "").strip()
+
+    return {
+        "ok": bool(user),
+        "first_name": first_name,
+        "last_name": last_name,
+        "student_number": student_number,
+        "program_id": program_id,
+        "program_code": program_code,
+        "lock_student_number": bool(student_number),
+        "lock_degree": bool(program_code),
+    }
 
 async def _active_term() -> Dict[str, Any]:
     """
@@ -95,6 +153,119 @@ async def _active_term() -> Dict[str, Any]:
         return next_terms[0]
 
     return current
+
+
+
+def _parse_date_any(dt):
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            return dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    if not dt:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(dt).replace("Z", "+00:00"))
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+async def _special_window_for_term(term: Dict[str, Any]) -> Dict[str, Any]:
+    term = term or {}
+    term_id = term.get("term_id")
+    if not term_id:
+        return {"openISO": "", "deadlineISO": "", "term_id": None}
+
+    override = await db[COL_SPECIAL_WINDOWS].find_one(
+        {"term_id": term_id},
+        {"_id": 0, "open_dt": 1, "deadline_dt": 1, "openISO": 1, "deadlineISO": 1, "term_id": 1},
+    )
+    if not override:
+        return {"openISO": "", "deadlineISO": "", "term_id": term_id}
+
+    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
+    deadline_dt = _parse_date_any(override.get("deadline_dt") or override.get("deadlineISO"))
+    return {
+        "openISO": open_dt.isoformat() if open_dt else "",
+        "deadlineISO": deadline_dt.isoformat() if deadline_dt else "",
+        "term_id": term_id,
+    }
+
+
+def _as_bool(v: Any) -> bool:
+    if isinstance(v, bool):
+        return v
+    s = str(v or "").strip().lower()
+    return s in {"1", "true", "yes", "y", "on"}
+
+
+def _safe_filename(name: str) -> str:
+    base = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "").strip())
+    return base.strip("._") or "eaf.pdf"
+
+
+def _write_eaf_bytes(filename: str, content_type: str, data: bytes) -> Dict[str, Any]:
+    filename = _safe_filename(filename or "")
+    if not filename:
+        raise HTTPException(status_code=400, detail="Please attach your EAF file.")
+
+    ext = Path(filename).suffix.lower()
+    if ext not in SPECIAL_EAF_ALLOWED_EXTS:
+        raise HTTPException(status_code=400, detail="EAF must be uploaded as a PDF file.")
+
+    content_type = str(content_type or "").split(";")[0].strip().lower()
+    if content_type not in SPECIAL_EAF_ALLOWED_CONTENT_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid EAF file type. Please upload a PDF file.")
+
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded EAF file is empty.")
+    if len(data) > SPECIAL_EAF_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="EAF file must be 5 MB or smaller.")
+
+    SPECIAL_EAF_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    stored_name = f"{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}_{uuid4().hex}.pdf"
+    full_path = SPECIAL_EAF_UPLOAD_DIR / stored_name
+    full_path.write_bytes(data)
+
+    return {
+        "eaf_original_name": filename,
+        "eaf_content_type": content_type or "application/pdf",
+        "eaf_size": len(data),
+        "eaf_storage_path": str(full_path),
+        "eaf_uploaded_at": _now_dt(),
+        "eaf_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def _save_eaf_base64(file_name: str, content_type: str, b64data: str) -> Dict[str, Any]:
+    if not b64data:
+        raise HTTPException(status_code=400, detail="Please attach your EAF file.")
+    raw = str(b64data)
+    if "," in raw and raw.strip().lower().startswith("data:"):
+        raw = raw.split(",", 1)[1]
+    try:
+        data = base64.b64decode(raw, validate=True)
+    except (binascii.Error, ValueError):
+        raise HTTPException(status_code=400, detail="Uploaded EAF file is invalid or corrupted.")
+    return _write_eaf_bytes(file_name, content_type, data)
+
+
+def _eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        p = Path(raw_path)
+        if p.exists() and p.is_file():
+            return True
+    if str(doc.get("eaf_base64") or "").strip():
+        return True
+    return False
+
+
+def _build_eaf_view_url(user_id: str, special_id: str) -> str:
+    return f"/api/student/specialclass/eaf?userId={user_id}&specialId={special_id}"
+
 
 async def _find_course_by_code(code: str) -> Optional[Dict[str, Any]]:
     if not code:
@@ -233,6 +404,76 @@ def _is_valid_hhmm(s: str) -> bool:
 
 def _mins(hhmm: str) -> int:
     return int(hhmm[:2]) * 60 + int(hhmm[2:])
+
+async def _bulk_schedule_info_by_ids(schedule_pairs: List[Tuple[str, str]]) -> Dict[Tuple[str, str], Dict[str, str]]:
+    pairs: List[Tuple[str, str]] = []
+    wanted_ids: List[str] = []
+    seen_pairs: set[Tuple[str, str]] = set()
+    for raw_sid1, raw_sid2 in (schedule_pairs or []):
+        sid1 = str(raw_sid1 or "").strip()
+        sid2 = str(raw_sid2 or "").strip()
+        key = (sid1, sid2)
+        if key in seen_pairs or (not sid1 and not sid2):
+            continue
+        seen_pairs.add(key)
+        pairs.append(key)
+        if sid1:
+            wanted_ids.append(sid1)
+        if sid2:
+            wanted_ids.append(sid2)
+
+    wanted_ids = sorted({sid for sid in wanted_ids if sid})
+    if not wanted_ids:
+        return {}
+
+    rows = await db[COL_SECTION_SCHEDULES].find(
+        {"schedule_id": {"$in": wanted_ids}},
+        {"_id": 0, "schedule_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1, "room_code": 1},
+    ).to_list(5000)
+    by_id = {str((r or {}).get("schedule_id") or "").strip(): (r or {}) for r in (rows or [])}
+
+    room_ids = sorted({str((r or {}).get("room_id") or "").strip() for r in (rows or []) if str((r or {}).get("room_id") or "").strip()})
+    room_code_by_id: Dict[str, str] = {}
+    if room_ids:
+        room_docs = await db[COL_ROOMS].find(
+            {"room_id": {"$in": room_ids}},
+            {"_id": 0, "room_id": 1, "room_code": 1, "room_number": 1, "room_name": 1},
+        ).to_list(2000)
+        for rm in room_docs or []:
+            rid = str((rm or {}).get("room_id") or "").strip()
+            if not rid:
+                continue
+            code = str((rm or {}).get("room_code") or (rm or {}).get("room_number") or (rm or {}).get("room_name") or "").strip()
+            if code:
+                room_code_by_id[rid] = code
+
+    def _room_label(row: Dict[str, Any]) -> str:
+        room_id = str((row or {}).get("room_id") or "").strip()
+        room_code = str((row or {}).get("room_code") or "").strip()
+        if room_code:
+            return room_code
+        if room_id.upper() == "ONLINE":
+            return "TBA"
+        return room_code_by_id.get(room_id, room_id)
+
+    def _slot(schedule_id: str) -> Dict[str, str]:
+        row = by_id.get(schedule_id, {}) if schedule_id else {}
+        return {
+            "day": _normalize_day((row or {}).get("day")),
+            "begin": _to_hhmm((row or {}).get("start_time")),
+            "end": _to_hhmm((row or {}).get("end_time")),
+            "room": _room_label(row) if row else "",
+        }
+
+    out: Dict[Tuple[str, str], Dict[str, str]] = {}
+    for sid1, sid2 in pairs:
+        slot1 = _slot(sid1)
+        slot2 = _slot(sid2)
+        out[(sid1, sid2)] = {
+            "day1": slot1["day"], "begin1": slot1["begin"], "end1": slot1["end"], "room1": slot1["room"],
+            "day2": slot2["day"], "begin2": slot2["begin"], "end2": slot2["end"], "room2": slot2["room"],
+        }
+    return out
 
 async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, Any]]:
     """
@@ -468,6 +709,44 @@ async def _bulk_assignment_info(section_ids: List[str]) -> Dict[str, Dict[str, A
 
 # ---------------- route ----------------
 
+@router.get("/specialclass/eaf")
+async def special_class_view_eaf(
+    userId: str = Query(..., min_length=3),
+    specialId: str = Query(..., min_length=3),
+):
+    doc = await db[COL_SPECIAL].find_one(
+        {"user_id": userId, "special_id": specialId},
+        {"_id": 0, "eaf_storage_path": 1, "eaf_original_name": 1, "eaf_content_type": 1, "eaf_base64": 1},
+    )
+    if not doc:
+        raise HTTPException(status_code=404, detail="EAF not found.")
+
+    raw_path = str(doc.get("eaf_storage_path") or "").strip()
+    if raw_path:
+        file_path = Path(raw_path)
+        if file_path.exists() and file_path.is_file():
+            data = file_path.read_bytes()
+            return Response(
+                content=data,
+                media_type=str(doc.get("eaf_content_type") or "application/pdf"),
+                headers={"Content-Disposition": f'inline; filename="{str(doc.get("eaf_original_name") or file_path.name)}"'},
+            )
+
+    b64 = str(doc.get("eaf_base64") or "").strip()
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        return Response(
+            content=data,
+            media_type=str(doc.get("eaf_content_type") or "application/pdf"),
+            headers={"Content-Disposition": f'inline; filename="{str(doc.get("eaf_original_name") or "eaf.pdf")}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+
+
 @router.post("/specialclass")
 async def special_class_handler(
     userId: str = Query(..., min_length=3),
@@ -518,12 +797,21 @@ async def special_class_handler(
                 "status": 1,
                 "remarks": 1,
                 "submitted_at": 1,
+                "eaf_original_name": 1,
+                "eaf_content_type": 1,
+                "eaf_size": 1,
+                "eaf_uploaded_at": 1,
+                "eaf_storage_path": 1,
+                "eaf_base64": 1,
 
                 # assignment ids/fields (if OM already updated record)
                 "section_id": 1,
                 "section_code": 1,
                 "faculty_id": 1,
                 "faculty_name": 1,
+                "schedule_id1": 1,
+                "schedule_id2": 1,
+                "schedule_cleared": 1,
 
                 # custom schedule (if stored)
                 "day1": 1, "begin1": 1, "end1": 1, "room1": 1,
@@ -551,6 +839,15 @@ async def special_class_handler(
         # resolve section-based schedule/faculty in bulk
         section_ids = [(r.get("section_id") or "").strip() for r in raw_rows if (r.get("section_id") or "").strip()]
         derived_map = await _bulk_assignment_info(section_ids)
+        schedule_pairs = [
+            (
+                (r.get("schedule_id1") or "").strip(),
+                (r.get("schedule_id2") or "").strip(),
+            )
+            for r in raw_rows
+            if (r.get("schedule_id1") or "").strip() or (r.get("schedule_id2") or "").strip()
+        ]
+        special_schedule_map = await _bulk_schedule_info_by_ids(schedule_pairs)
 
         def to_view(r: Dict[str, Any]) -> Dict[str, Any]:
             ay = r.get("terms", {}).get("acad_year_start")
@@ -573,8 +870,51 @@ async def special_class_handler(
             enrolled = int(r.get("enrolled") or 0)
             section_remarks = (r.get("section_remarks") or "").strip()
 
-            # derived overrides if section_id exists
-            if section_id and section_id in derived_map:
+            schedule_id1 = (r.get("schedule_id1") or "").strip()
+            schedule_id2 = (r.get("schedule_id2") or "").strip()
+            schedule_cleared = _as_bool(r.get("schedule_cleared"))
+
+            if schedule_cleared:
+                day1 = begin1 = end1 = room1 = ""
+                day2 = begin2 = end2 = room2 = ""
+                schedule_summary = ""
+                if section_id and section_id in derived_map:
+                    d = derived_map[section_id]
+                    if d.get("section_code"):
+                        section_code = (d.get("section_code") or "").strip()
+                    if d.get("faculty_name"):
+                        faculty_name = (d.get("faculty_name") or "").strip()
+                    enrollment_cap = int(d.get("enrollment_cap") or 0)
+                    enrolled = int(d.get("enrolled") or 0)
+                    section_remarks = (d.get("section_remarks") or "").strip()
+            elif (schedule_id1 or schedule_id2) and (schedule_id1, schedule_id2) in special_schedule_map:
+                d = special_schedule_map[(schedule_id1, schedule_id2)]
+                day1 = (d.get("day1") or "").strip()
+                begin1 = (d.get("begin1") or "").strip()
+                end1 = (d.get("end1") or "").strip()
+                room1 = (d.get("room1") or "").strip()
+                day2 = (d.get("day2") or "").strip()
+                begin2 = (d.get("begin2") or "").strip()
+                end2 = (d.get("end2") or "").strip()
+                room2 = (d.get("room2") or "").strip()
+
+                if section_id and section_id in derived_map:
+                    dd = derived_map[section_id]
+                    if dd.get("section_code"):
+                        section_code = (dd.get("section_code") or "").strip()
+                    if dd.get("faculty_name"):
+                        faculty_name = (dd.get("faculty_name") or "").strip()
+                    enrollment_cap = int(dd.get("enrollment_cap") or 0)
+                    enrolled = int(dd.get("enrolled") or 0)
+                    section_remarks = (dd.get("section_remarks") or "").strip()
+
+                parts = []
+                if day1 and begin1 and end1:
+                    parts.append(f"{day1} {begin1}-{end1}")
+                if day2 and begin2 and end2:
+                    parts.append(f"{day2} {begin2}-{end2}")
+                schedule_summary = "; ".join(parts)
+            elif section_id and section_id in derived_map:
                 d = derived_map[section_id]
                 if d.get("section_code"):
                     section_code = (d.get("section_code") or "").strip()
@@ -609,6 +949,12 @@ async def special_class_handler(
                 "special_id": r.get("special_id", ""),
                 "user_id": r.get("user_id", ""),
                 "course_id": r.get("course_id"),
+                "has_eaf": _eaf_available(r),
+                "eaf_original_name": r.get("eaf_original_name", ""),
+                "eaf_content_type": r.get("eaf_content_type", ""),
+                "eaf_size": r.get("eaf_size", 0),
+                "eaf_uploaded_at": r.get("eaf_uploaded_at"),
+                "eaf_view_url": _build_eaf_view_url(r.get("user_id", ""), r.get("special_id", "")),
 
                 "course_code": r.get("courses", {}).get("course_code", ""),
                 "course_title": r.get("courses", {}).get("course_title", ""),
@@ -656,25 +1002,7 @@ async def special_class_handler(
 
     # ---------- PROFILE ----------
     if action == "profile":
-        u = await db[COL_USERS].find_one(
-            {"user_id": userId},
-            {"_id": 0, "first_name": 1, "last_name": 1, "student_number": 1, "program_id": 1},
-        )
-        program_code = ""
-        if u and u.get("program_id"):
-            p = await db[COL_PROGRAMS].find_one(
-                {"program_id": u["program_id"]},
-                {"_id": 0, "program_code": 1},
-            )
-            program_code = (p or {}).get("program_code", "") or ""
-
-        return {
-            "ok": bool(u),
-            "first_name": (u or {}).get("first_name", ""),
-            "last_name": (u or {}).get("last_name", ""),
-            "student_number": str((u or {}).get("student_number", "") or ""),
-            "program_code": program_code,
-        }
+        return await _resolve_student_identity(userId)
 
     # ---------- OPTIONS ----------
     if action == "options":
@@ -725,6 +1053,9 @@ async def special_class_handler(
         ]
         courses = [c async for c in db[COL_COURSES].aggregate(pipeline)]
 
+        active_term = await _active_term()
+        submission_window = await _special_window_for_term(active_term)
+
         return {
             "ok": True,
             "departments": dept_names,
@@ -732,6 +1063,7 @@ async def special_class_handler(
             "programs": programs_out,
             "reasons": cfg.get("reasons", []),
             "statuses": cfg.get("statuses", []),
+            "submission_window": submission_window,
         }
 
     # ---------- COURSE INFO (units/title/department from DB) ----------
@@ -771,9 +1103,11 @@ async def special_class_handler(
         if not payload:
             raise HTTPException(status_code=400, detail="Missing payload")
 
+        identity = await _resolve_student_identity(userId)
+        sn = str(identity.get("student_number") or payload.get("studentNumber") or "").strip()
+        degree = str(identity.get("program_code") or payload.get("degree") or "").strip()
+
         required = [
-            "studentNumber",
-            "degree",
             "unitsRemaining",
             "graduatingAfterTerm",
             "courseCode",
@@ -785,15 +1119,21 @@ async def special_class_handler(
         for k in required:
             if payload.get(k) is None or str(payload.get(k)).strip() == "":
                 raise HTTPException(status_code=400, detail="All required fields must be filled.")
+        if not sn or not degree:
+            raise HTTPException(status_code=400, detail="All required fields must be filled.")
 
-        sn = str(payload["studentNumber"]).strip()
         if not (sn.isdigit() and len(sn) == 8):
             raise HTTPException(status_code=400, detail="Student number must be exactly 8 digits.")
 
-        if payload.get("agree") is not True:
+        if _as_bool(payload.get("agree")) is not True:
             raise HTTPException(status_code=400, detail="You must agree to the Terms and Conditions.")
 
-        degree = str(payload["degree"]).strip()
+        eaf_meta = _save_eaf_base64(
+            str(payload.get("eafFileName") or ""),
+            str(payload.get("eafContentType") or "application/pdf"),
+            str(payload.get("eafBase64") or ""),
+        )
+
         prog = await _get_program_by_code(degree)
         if not prog:
             raise HTTPException(status_code=400, detail="Selected program not found.")
@@ -805,7 +1145,7 @@ async def special_class_handler(
         if units_remaining < 0:
             raise HTTPException(status_code=400, detail="Units Remaining cannot be negative.")
 
-        graduating_after_term = bool(payload["graduatingAfterTerm"])
+        graduating_after_term = _as_bool(payload["graduatingAfterTerm"])
 
         cfg = await _get_special_config()
         reasons = set(cfg.get("reasons", []))
@@ -845,6 +1185,21 @@ async def special_class_handler(
         if not term_id:
             raise HTTPException(status_code=503, detail="No active term configured.")
 
+        submission_window = await _special_window_for_term(active_term)
+        open_dt = _parse_date_any(submission_window.get("openISO"))
+        deadline_dt = _parse_date_any(submission_window.get("deadlineISO"))
+        now = _now_dt()
+        if not open_dt or not deadline_dt:
+            raise HTTPException(status_code=403, detail="Special class submission window has not been started.")
+        if open_dt.tzinfo is None:
+            open_dt = open_dt.replace(tzinfo=timezone.utc)
+        if deadline_dt.tzinfo is None:
+            deadline_dt = deadline_dt.replace(tzinfo=timezone.utc)
+        if now < open_dt:
+            raise HTTPException(status_code=403, detail="Special class submission window has not started yet.")
+        if now > deadline_dt:
+            raise HTTPException(status_code=403, detail="Special class submission deadline has passed.")
+
         dup = await db[COL_SPECIAL].find_one({
             "user_id": userId,
             "course_id": course["course_id"],
@@ -875,6 +1230,8 @@ async def special_class_handler(
             "course_units": course_units,
             "reason": reason,
             "reason_other": reason_other,
+
+            **eaf_meta,
 
             "status": initial_status,
             "remarks": "",
@@ -942,6 +1299,12 @@ async def special_class_handler(
             "special_id": special_id,
             "user_id": userId,
             "course_id": course["course_id"],
+            "has_eaf": True,
+            "eaf_original_name": eaf_meta.get("eaf_original_name", ""),
+            "eaf_content_type": eaf_meta.get("eaf_content_type", ""),
+            "eaf_size": eaf_meta.get("eaf_size", 0),
+            "eaf_uploaded_at": eaf_meta.get("eaf_uploaded_at"),
+            "eaf_view_url": _build_eaf_view_url(userId, special_id),
             "course_code": course.get("course_code", ""),
             "course_title": course.get("course_title", ""),
             "department_name": dept_name,

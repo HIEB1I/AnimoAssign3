@@ -6,14 +6,19 @@ import re
 import json
 import hashlib
 import secrets
+import base64
+import binascii
+from pathlib import Path
 from bson import ObjectId
 from typing import Any, Dict, List, Optional, Tuple, Literal, Set
 from collections import defaultdict
 
 from fastapi import APIRouter, HTTPException, Query, Body
+from fastapi.responses import Response
 from pymongo.errors import DuplicateKeyError
 from ..main import db
 from ..Notifications import create_notification
+from ..status_rules import ACTIVE_SPECIAL_STATUSES, CONVERT_TO_REGULAR_SPECIAL_STATUS, get_active_special_section_ids
 
 router = APIRouter(prefix="/apo", tags=["apo"])
 
@@ -45,6 +50,7 @@ COL_SPECIAL = "special_class"
 COL_APO_OFFERINGS_AUDIT = "apo_offerings_audit"
 COL_APO_SUBMISSIONS = "apo_scheduling_submissions"
 COL_OM_SUBMIT_WINDOWS = "om_submit_windows"
+COL_CLASS_RETENTION = "class_retention"
 
 # Undo/Redo support:
 # - When a section is SOFT-deleted we can restore it by flipping status back to active.
@@ -68,6 +74,66 @@ def _course_code_str(course_doc: Dict[str, Any]) -> str:
     if isinstance(cc, list):
         return (cc[0] or "").strip()
     return (cc or "").strip()
+
+
+def _safe_str(x: Any) -> str:
+    return str(x).strip() if x is not None else ""
+
+
+def _eaf_available(doc: Dict[str, Any]) -> bool:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                return True
+        except Exception:
+            pass
+    return bool(_safe_str(doc.get("eaf_base64")))
+
+
+def _build_apo_eaf_view_url(special_id: str, term_id: str = "", user_id: str = "") -> str:
+    sid = _safe_str(special_id)
+    if not sid:
+        return ""
+    base = f"/api/apo/courseofferings?view=specialclass&action=eaf&specialId={sid}"
+    tid = _safe_str(term_id)
+    if tid:
+        base += f"&termId={tid}"
+    uid = _safe_str(user_id)
+    if uid:
+        base += f"&userId={uid}"
+    return base
+
+
+def _inline_eaf_response(doc: Dict[str, Any]) -> Response:
+    raw_path = _safe_str(doc.get("eaf_storage_path"))
+    if raw_path:
+        try:
+            file_path = Path(raw_path)
+            if file_path.exists() and file_path.is_file():
+                data = file_path.read_bytes()
+                return Response(
+                    content=data,
+                    media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+                    headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or file_path.name}"'},
+                )
+        except Exception:
+            pass
+
+    b64 = _safe_str(doc.get("eaf_base64"))
+    if b64:
+        try:
+            data = base64.b64decode(b64, validate=True)
+        except (binascii.Error, ValueError):
+            raise HTTPException(status_code=404, detail="EAF file is unavailable.")
+        return Response(
+            content=data,
+            media_type=_safe_str(doc.get("eaf_content_type")) or "application/pdf",
+            headers={"Content-Disposition": f'inline; filename="{_safe_str(doc.get("eaf_original_name")) or "eaf.pdf"}"'},
+        )
+
+    raise HTTPException(status_code=404, detail="EAF file is unavailable.")
 
 async def _audit_offering_change(
     *, action: str, user_id: str, term_id: str, campus_id: str,
@@ -4163,7 +4229,7 @@ async def get_course_offerings(
     department_id: Optional[str] = Query(None),
     batch_id: Optional[str] = Query(None),
     program_id: Optional[str] = Query(None),
-    view: Optional[Literal["curriculum", "offerings", "specialclass"]] = Query("offerings"),
+    view: Optional[Literal["curriculum", "offerings", "specialclass", "dissolved"]] = Query("offerings"),
     action: Optional[str] = Query(None),
 
     # room filtering params
@@ -4176,7 +4242,9 @@ async def get_course_offerings(
     section_id: Optional[str] = Query(None),
     course_id: Optional[str] = Query(None),
     slot: Optional[int] = Query(None),              
-    schedule_id: Optional[str] = Query(None),      
+    schedule_id: Optional[str] = Query(None),
+    specialId: Optional[str] = Query(None),
+    termId: Optional[str] = Query(None),
     # NEW: used only when action == "catalogSearch"
     q: Optional[str] = Query(None),
     limit: int = Query(20),
@@ -4539,16 +4607,36 @@ async def get_course_offerings(
         return await _get_planning_term() or (await _ensure_current_term() or {})
 
 
+    async def _active_special_section_ids_for_term(term_id: str) -> set[str]:
+        return await get_active_special_section_ids(
+            db,
+            term_id,
+            special_col=COL_SPECIAL,
+            assign_col=COL_FAC_ASSIGN,
+            schedule_col=COL_SCHEDS,
+        )
+
+    async def _converted_special_section_ids_for_term(term_id: str) -> set[str]:
+        rows = await db[COL_SPECIAL].find(
+            {"term_id": term_id, "status": CONVERT_TO_REGULAR_SPECIAL_STATUS},
+            {"_id": 0, "section_id": 1},
+        ).to_list(10000)
+        return {str(r.get("section_id") or "").strip() for r in rows if str(r.get("section_id") or "").strip()}
+
     async def _specialclass_rows(term_id: str, filters: Dict[str, Any]) -> List[Dict[str, Any]]:
         filters = filters or {}
 
-        # Pull rows; exclude Mongo _id so we don't need ObjectId conversion
-        rows = [x async for x in db[COL_SPECIAL].find({"term_id": term_id, **filters}, {"_id": 0})]
-        if not rows:
-            return []
-
         def _s(x: Any) -> str:
             return (str(x).strip() if x is not None else "")
+
+        # Pull rows; exclude Mongo _id so we don't need ObjectId conversion
+        match = {"term_id": term_id, **filters}
+        if not _s(filters.get("special_id")) and "status" not in filters:
+            match["status"] = {"$in": list(ACTIVE_SPECIAL_STATUSES)}
+
+        rows = [x async for x in db[COL_SPECIAL].find(match, {"_id": 0})]
+        if not rows:
+            return []
 
         def _course_code_str(cc: Any) -> str:
             if isinstance(cc, list):
@@ -4662,8 +4750,10 @@ async def get_course_offerings(
         def _resolve_faculty_id(r: Dict[str, Any]) -> str:
             asg_id = _s(r.get("assignment_id"))
             if asg_id:
-                return _s((asg_map.get(asg_id) or {}).get("faculty_id"))
-            return ""
+                resolved = _s((asg_map.get(asg_id) or {}).get("faculty_id"))
+                if resolved:
+                    return resolved
+            return _s(r.get("faculty_id"))
 
         # Collect section_ids from either row.section_id OR assignment.section_id
         # Special classes may reference sections that are not in the curriculum / not in the regular offerings.
@@ -4926,7 +5016,7 @@ async def get_course_offerings(
                 "room_number": _slot_room_number(rid, rt),
             }
 
-        def _normalize_entry(e: Dict[str, Any]) -> Dict[str, Any]:
+        def _normalize_entry(e: Dict[str, Any], section_id: str = "") -> Dict[str, Any]:
             # Prefer canonical schedule doc (from section_schedules) when schedule_id is present.
             sid0 = _s(e.get("schedule_id"))
             src = sched_by_id.get(sid0) if sid0 else None
@@ -4934,6 +5024,20 @@ async def get_course_offerings(
             day0 = _s((src or {}).get("day") or e.get("day"))
             st0 = _hhmm((src or {}).get("start_time") or e.get("start_time"))
             et0 = _hhmm((src or {}).get("end_time") or e.get("end_time"))
+
+            if not src and section_id and day0 and st0 and et0:
+                for cand in (sched_by_section.get(section_id, []) or []):
+                    cand_day = _s(cand.get("day"))
+                    cand_st = _hhmm(cand.get("start_time"))
+                    cand_et = _hhmm(cand.get("end_time"))
+                    if cand_day == day0 and cand_st == st0 and cand_et == et0:
+                        src = cand
+                        sid0 = _s(cand.get("schedule_id")) or sid0
+                        break
+
+            day0 = _s((src or {}).get("day") or day0)
+            st0 = _hhmm((src or {}).get("start_time") or st0)
+            et0 = _hhmm((src or {}).get("end_time") or et0)
             rid = _s((src or {}).get("room_id") or e.get("room_id"))
             rt = _s((src or {}).get("room_type") or e.get("room_type"))
 
@@ -5021,7 +5125,7 @@ async def get_course_offerings(
                     slot_entries.append(slot2_in)
 
                 if slot_entries:
-                    se_norm = [_normalize_entry(e) for e in slot_entries if isinstance(e, dict)]
+                    se_norm = [_normalize_entry(e, sid) for e in slot_entries if isinstance(e, dict)]
                     r["schedule_entries"] = se_norm
                 else:
                     # Fallback to schedules by section_id (normal case)
@@ -5030,7 +5134,7 @@ async def get_course_offerings(
                     se_norm = [_slot_from_sched(s) for s in scheds[:2]]
                     r["schedule_entries"] = se_norm
             else:
-                r["schedule_entries"] = [_normalize_entry(e) for e in se if isinstance(e, dict)]
+                r["schedule_entries"] = [_normalize_entry(e, sid) for e in se if isinstance(e, dict)]
 
             # Always set slot1/slot2 from normalized schedule_entries so room_id/room_number display is consistent
             se2 = r.get("schedule_entries") if isinstance(r.get("schedule_entries"), list) else []
@@ -5054,8 +5158,9 @@ async def get_course_offerings(
 
             # faculty display name: prefer stored faculty_name, else derive via faculty_profile -> users
             faculty_name = _s(r.get("faculty_name"))
+            fid = _resolve_faculty_id(r)
+            r["faculty_id"] = fid or None
             if not faculty_name:
-                fid = _resolve_faculty_id(r)
                 fp = fac_profile_map.get(fid) if fid else None
 
                 if fp:
@@ -5070,6 +5175,294 @@ async def get_course_offerings(
 
         return rows
 
+    if action == "specialclassDetail":
+        sid = _safe_str(specialId)
+        if not sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+
+        term_sc_meta = await _active_term_for_specialclass()
+        term_id_sc = _safe_str(termId) or _safe_str(term_id) or _safe_str((term_sc_meta or {}).get("term_id"))
+        if not term_id_sc:
+            raise HTTPException(status_code=400, detail="No active term found for special class.")
+
+        raw_doc = await db[COL_SPECIAL].find_one(
+            {"term_id": term_id_sc, "special_id": sid},
+            {"_id": 0},
+        )
+        if not raw_doc:
+            raise HTTPException(status_code=404, detail="Special class record not found.")
+
+        rows_detail = await _specialclass_rows(term_id_sc, {"special_id": sid})
+        row = rows_detail[0] if rows_detail else dict(raw_doc)
+
+        program_code = ""
+        program_id_detail = _safe_str(raw_doc.get("program_id"))
+        if program_id_detail:
+            prog_doc = await db[COL_PROGRAMS].find_one(
+                {"program_id": program_id_detail},
+                {"_id": 0, "program_code": 1, "program_name": 1},
+            ) or {}
+            program_code = _safe_str(prog_doc.get("program_code")) or _safe_str(prog_doc.get("program_name"))
+
+        row["program_code"] = program_code
+        row["graduating_after_term"] = raw_doc.get("graduating_after_term")
+        row["reason"] = raw_doc.get("reason") or ""
+        row["reason_other"] = raw_doc.get("reason_other") or ""
+        row["has_eaf"] = _eaf_available(raw_doc)
+        row["eaf_original_name"] = raw_doc.get("eaf_original_name") or ""
+        row["eaf_content_type"] = raw_doc.get("eaf_content_type") or ""
+        row["eaf_size"] = raw_doc.get("eaf_size") or 0
+        row["eaf_uploaded_at"] = raw_doc.get("eaf_uploaded_at")
+        row["eaf_view_url"] = _build_apo_eaf_view_url(sid, term_id_sc, userId)
+
+        return {"ok": True, "row": row}
+
+    if action == "eaf":
+        sid = _safe_str(specialId)
+        if not sid:
+            raise HTTPException(status_code=400, detail="specialId is required.")
+        term_sc_meta = await _active_term_for_specialclass()
+        term_id_sc = _safe_str(termId) or _safe_str(term_id) or _safe_str((term_sc_meta or {}).get("term_id"))
+        match: Dict[str, Any] = {"special_id": sid}
+        if term_id_sc:
+            match["term_id"] = term_id_sc
+        doc = await db[COL_SPECIAL].find_one(
+            match,
+            {"_id": 0, "eaf_storage_path": 1, "eaf_original_name": 1, "eaf_content_type": 1, "eaf_base64": 1},
+        )
+        if not doc:
+            raise HTTPException(status_code=404, detail="EAF not found.")
+        return _inline_eaf_response(doc)
+
+
+    async def _dissolved_rows(term_id: str, campus_id: str) -> List[Dict[str, Any]]:
+        term_id = (term_id or "").strip()
+        campus_id = (campus_id or "").strip()
+        if not term_id:
+            return []
+
+        def _s(x: Any) -> str:
+            return (str(x).strip() if x is not None else "")
+
+        def _course_code_str(cc: Any) -> str:
+            if isinstance(cc, list):
+                return _s(cc[0]) if cc else ""
+            return _s(cc)
+
+        def _hhmm(x: Any) -> str:
+            s = re.sub(r"[^\d]", "", _s(x))
+            return s.zfill(4) if s else ""
+
+        def _fmt_time(hhmm: str) -> str:
+            hhmm = _hhmm(hhmm)
+            return f"{hhmm[:2]}:{hhmm[2:]}" if len(hhmm) == 4 else ""
+
+        DAY_ORDER = {"M": 1, "T": 2, "W": 3, "H": 4, "F": 5, "S": 6}
+
+        ret_rows = await db[COL_CLASS_RETENTION].find(
+            {
+                "term_id": term_id,
+                "status": {"$regex": r"^dissolved$", "$options": "i"},
+            },
+            {"_id": 0, "term_id": 1, "course_id": 1, "section_id": 1, "status": 1, "enrolled": 1, "updated_at": 1},
+        ).to_list(None)
+        if not ret_rows:
+            return []
+
+        section_ids = sorted({_s(r.get("section_id")) for r in ret_rows if _s(r.get("section_id"))})
+        course_ids = sorted({_s(r.get("course_id")) for r in ret_rows if _s(r.get("course_id"))})
+
+        sec_map: Dict[str, Dict[str, Any]] = {}
+        if section_ids:
+            async for s in db[COL_SECTIONS].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "section_code": 1, "campus_id": 1, "enrolled": 1},
+            ):
+                sid = _s(s.get("section_id"))
+                if sid:
+                    sec_map[sid] = s
+            async for s in db[COL_SECTIONS_SUBMITTED].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "section_code": 1, "campus_id": 1, "enrolled": 1},
+            ):
+                sid = _s(s.get("section_id"))
+                if sid and sid not in sec_map:
+                    sec_map[sid] = s
+
+        filtered_rows = []
+        for r in ret_rows:
+            sid = _s(r.get("section_id"))
+            sec = sec_map.get(sid) or {}
+            row_campus = _s(sec.get("campus_id"))
+            if campus_id and row_campus and row_campus != campus_id:
+                continue
+            filtered_rows.append(r)
+
+        if not filtered_rows:
+            return []
+
+        section_ids = sorted({_s(r.get("section_id")) for r in filtered_rows if _s(r.get("section_id"))})
+        course_ids = sorted({_s(r.get("course_id")) for r in filtered_rows if _s(r.get("course_id"))})
+
+        course_map: Dict[str, Dict[str, str]] = {}
+        if course_ids:
+            async for c in db[COL_COURSES].find(
+                {"course_id": {"$in": course_ids}},
+                {"_id": 0, "course_id": 1, "course_code": 1, "course_title": 1},
+            ):
+                cid = _s(c.get("course_id"))
+                course_map[cid] = {
+                    "course_code": _course_code_str(c.get("course_code")),
+                    "course_title": _s(c.get("course_title")),
+                }
+
+        assign_map: Dict[str, Dict[str, str]] = {}
+        faculty_ids: set[str] = set()
+        user_ids: set[str] = set()
+        if section_ids:
+            async for a in db[COL_FAC_ASSIGN].find(
+                {"section_id": {"$in": section_ids}, "is_archived": {"$ne": True}},
+                {"_id": 0, "section_id": 1, "faculty_id": 1, "user_id": 1},
+            ):
+                sid = _s(a.get("section_id"))
+                if not sid or sid in assign_map:
+                    continue
+                assign_map[sid] = {"faculty_id": _s(a.get("faculty_id")), "user_id": _s(a.get("user_id"))}
+                if _s(a.get("faculty_id")):
+                    faculty_ids.add(_s(a.get("faculty_id")))
+                if _s(a.get("user_id")):
+                    user_ids.add(_s(a.get("user_id")))
+
+        fac_profile_map: Dict[str, Dict[str, Any]] = {}
+        if faculty_ids:
+            async for fp in db[COL_FAC_PROFILES].find(
+                {"faculty_id": {"$in": sorted(faculty_ids)}},
+                {"_id": 0, "faculty_id": 1, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+            ):
+                fid = _s(fp.get("faculty_id"))
+                fac_profile_map[fid] = fp
+                if _s(fp.get("user_id")):
+                    user_ids.add(_s(fp.get("user_id")))
+
+        user_map: Dict[str, Dict[str, Any]] = {}
+        if user_ids:
+            async for u in db[COL_USERS].find(
+                {"user_id": {"$in": sorted(user_ids)}},
+                {"_id": 0, "user_id": 1, "first_name": 1, "last_name": 1, "middle_name": 1},
+            ):
+                user_map[_s(u.get("user_id"))] = u
+
+        room_ids: set[str] = set()
+        sched_by_section: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+        if section_ids:
+            async for sch in db[COL_SCHEDS].find(
+                {"section_id": {"$in": section_ids}},
+                {"_id": 0, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_id": 1},
+            ):
+                sid = _s(sch.get("section_id"))
+                if not sid:
+                    continue
+                sched_by_section[sid].append(sch)
+                rid = _s(sch.get("room_id"))
+                if rid and rid.upper() != "ONLINE":
+                    room_ids.add(rid)
+
+        room_map: Dict[str, str] = {}
+        if room_ids:
+            async for rm in db[COL_ROOMS].find(
+                {"room_id": {"$in": sorted(room_ids)}},
+                {"_id": 0, "room_id": 1, "room_number": 1, "room_name": 1},
+            ):
+                rid = _s(rm.get("room_id"))
+                room_map[rid] = _s(rm.get("room_number")) or _s(rm.get("room_name")) or rid
+
+        def _caps_name(doc: Dict[str, Any]) -> str:
+            last = _s(doc.get("last_name"))
+            first = _s(doc.get("first_name"))
+            middle = _s(doc.get("middle_name"))
+            name = ", ".join([p for p in [last, first] if p]) if last or first else ""
+            if middle:
+                name = f"{name} {middle}".strip()
+            return name or "UNASSIGNED"
+
+        def _faculty_name_for_section(sid: str) -> str:
+            a = assign_map.get(sid) or {}
+            uid = _s(a.get("user_id"))
+            if uid and user_map.get(uid):
+                return _caps_name(user_map[uid])
+            fid = _s(a.get("faculty_id"))
+            fp = fac_profile_map.get(fid) if fid else None
+            if fp:
+                linked_uid = _s(fp.get("user_id"))
+                if linked_uid and user_map.get(linked_uid):
+                    return _caps_name(user_map[linked_uid])
+                return _caps_name(fp)
+            return "UNASSIGNED"
+
+        def _schedule_entries_for_section(sid: str) -> List[Dict[str, Any]]:
+            scheds = list(sched_by_section.get(sid) or [])
+            scheds.sort(key=lambda x: (DAY_ORDER.get(_s(x.get("day")), 99), _hhmm(x.get("start_time"))))
+            entries: List[Dict[str, Any]] = []
+            for sch in scheds[:2]:
+                rid = _s(sch.get("room_id"))
+                room_label = ""
+                if rid and rid.upper() != "ONLINE":
+                    room_label = room_map.get(rid, rid)
+                elif rid.upper() == "ONLINE":
+                    room_label = "TBA"
+                entries.append({
+                    "day": _s(sch.get("day")),
+                    "start_time": _hhmm(sch.get("start_time")),
+                    "end_time": _hhmm(sch.get("end_time")),
+                    "room_id": rid or None,
+                    "room_number": room_label or "TBA",
+                })
+            return entries
+
+        def _schedule_text_for_entries(entries: List[Dict[str, Any]]) -> str:
+            parts: List[str] = []
+            for sch in (entries or [])[:2]:
+                day = _s(sch.get("day"))
+                st = _fmt_time(_hhmm(sch.get("start_time")))
+                en = _fmt_time(_hhmm(sch.get("end_time")))
+                room_label = _s(sch.get("room_number"))
+                seg = " ".join([x for x in [day, f"{st}-{en}" if st and en else "", room_label if room_label and room_label != "TBA" else ""] if x])
+                if seg:
+                    parts.append(seg)
+            return " / ".join(parts)
+
+        out: List[Dict[str, Any]] = []
+        for r in filtered_rows:
+            sid = _s(r.get("section_id"))
+            cid = _s(r.get("course_id"))
+            sec = sec_map.get(sid) or {}
+            course = course_map.get(cid, {})
+            enrolled = r.get("enrolled")
+            if enrolled in (None, ""):
+                enrolled = sec.get("enrolled")
+            try:
+                enrolled = int(enrolled) if enrolled not in (None, "") else 0
+            except Exception:
+                enrolled = 0
+            schedule_entries = _schedule_entries_for_section(sid)
+            out.append({
+                "section_id": sid,
+                "course_id": cid,
+                "course_code": course.get("course_code", ""),
+                "course_title": course.get("course_title", ""),
+                "section_code": _s(sec.get("section_code")),
+                "faculty_name": _faculty_name_for_section(sid),
+                "schedule_entries": schedule_entries,
+                "slot1": schedule_entries[0] if len(schedule_entries) > 0 else None,
+                "slot2": schedule_entries[1] if len(schedule_entries) > 1 else None,
+                "schedule_text": _schedule_text_for_entries(schedule_entries),
+                "enrolled_students": enrolled,
+                "status": "Dissolved",
+                "updated_at": r.get("updated_at"),
+            })
+
+        out.sort(key=lambda x: (str(x.get("course_code") or ""), str(x.get("section_code") or "")))
+        return out
 
     if view == "specialclass":
         term = await _active_term_for_specialclass()
@@ -5103,6 +5496,17 @@ async def get_course_offerings(
             "campus": campus,
             "term_id": term_id_sc,
             "term_label": term_label(term_for_label),
+            "rows": rows,
+        }
+
+    if view == "dissolved":
+        rows = await _dissolved_rows(term_id, campus_id)
+        return {
+            "ok": True,
+            "view": "dissolved",
+            "campus": campus,
+            "term_id": term_id,
+            "term_label": term_label(planning_term),
             "rows": rows,
         }
 
@@ -5320,6 +5724,8 @@ async def get_course_offerings(
 
     campus_sec_by_course: Dict[str, List[Dict[str, Any]]]= {}
     planned_capacity_by_course: Dict[str, int] = {}
+    active_special_section_ids = await _active_special_section_ids_for_term(term_id)
+    converted_special_section_ids = await _converted_special_section_ids_for_term(term_id)
 
     for cid in allowed_course_ids:
         lvl = (c_map_all.get(cid) or {}).get("program_level")
@@ -5337,10 +5743,23 @@ async def get_course_offerings(
 
         secs = [s async for s in db[COL_SECTIONS].find(
             sec_q, {"_id": 0, "section_id": 1, "section_code": 1, "enrollment_cap": 1, "remarks": 1, "batch_number": 1,
-                    "course_id": 1, "fulfilled_placeholder_course_id": 1,
+                    "course_id": 1, "fulfilled_placeholder_course_id": 1, "is_dissolved": 1, "class_retention_status": 1,
                     # preserve user-intended placement in Offerings UI
                     "owner_batch_id": 1, "owner_program_id": 1}
         )]
+        secs = [
+            s for s in secs
+            if (
+                str(s.get("section_id") or "").strip() not in active_special_section_ids
+                and not bool(s.get("is_dissolved"))
+                and str(s.get("class_retention_status") or "").strip().lower() != "dissolved"
+                and "DISSOLVED" not in str(s.get("remarks") or "").upper()
+                and (
+                    str(s.get("section_id") or "").strip() in converted_special_section_ids
+                    or "SPECIAL CLASS" not in str(s.get("remarks") or "").upper()
+                )
+            )
+        ]
         campus_sec_by_course[cid] = secs
         planned_capacity_by_course[cid] = sum(int(s.get("enrollment_cap") or DEFAULT_CAP) for s in secs)
 
@@ -5659,6 +6078,98 @@ async def get_course_offerings(
                         "sizing": sizing_payload(),
                     })
 
+    existing_regular_section_ids = {
+        str((((r or {}).get("section") or {}).get("section_id") or "")).strip()
+        for r in rows
+        if isinstance((r or {}).get("section"), dict)
+    }
+
+    extra_converted_sections = [
+        s async for s in db[COL_SECTIONS].find(
+            {
+                "term_id": term_id,
+                "campus_id": campus_id,
+                "section_id": {"$in": sorted(converted_special_section_ids - existing_regular_section_ids)},
+                "status": {"$ne": "archived"},
+            },
+            {"_id": 0, "section_id": 1, "section_code": 1, "enrollment_cap": 1, "remarks": 1, "course_id": 1, "owner_batch_id": 1, "owner_program_id": 1},
+        )
+    ] if converted_special_section_ids else []
+
+    extra_index = 0
+    for s in extra_converted_sections:
+        sid = str(s.get("section_id") or "").strip()
+        if not sid:
+            continue
+        if sid in active_special_section_ids:
+            continue
+        if bool(s.get("is_dissolved")) or str(s.get("class_retention_status") or "").strip().lower() == "dissolved" or "DISSOLVED" in str(s.get("remarks") or "").upper():
+            continue
+        offered_cid = str(s.get("course_id") or "").strip()
+        if not offered_cid:
+            continue
+        offered_info = c_map_all.get(offered_cid)
+        if not offered_info:
+            c_map_all.update(await map_courses([offered_cid]))
+            offered_info = c_map_all.get(offered_cid, {})
+        dep_name = dep_map.get((offered_info or {}).get("department_id", ""), {}).get("department_name", "")
+        faculty_name, user_id_res, faculty_id_res = await first_faculty_name_for_section(term_id, sid)
+        slot1, slot2 = await slot_payload_from_schedules(sid)
+        batch_id_extra = str(s.get("owner_batch_id") or "").strip()
+        program_id_extra = str(s.get("owner_program_id") or "").strip()
+        binfo = batch_by_id.get(batch_id_extra, {})
+        batch_num = int(binfo.get("batch_number") or 0) if binfo else 0
+        extra_index += 1
+        rows.append({
+            "program_no": f"SPECIAL-CONVERTED-{extra_index}",
+            "block_index": 1,
+            "batch": {
+                "batch_id": batch_id_extra,
+                "batch_code": _norm_code((binfo or {}).get("batch_code")),
+                "batch_number": batch_num or None,
+            },
+            "program": {"program_id": program_id_extra, "program_code": (prog_map_view.get(program_id_extra, {}) or {}).get("program_code", "")},
+            "course": {
+                "course_id": offered_cid,
+                "course_code": (offered_info or {}).get("course_code", ""),
+                "course_title": (offered_info or {}).get("course_title", ""),
+                "program_level": (offered_info or {}).get("program_level", ""),
+                "program_level_label": (offered_info or {}).get("program_level_label", ""),
+                "department_id": (offered_info or {}).get("department_id", ""),
+                "department_name": dep_name,
+                "type_of_course": (offered_info or {}).get("type_of_course", ""),
+            },
+            "offered_course": None,
+            "placeholder_course": None,
+            "section": {
+                "section_id": sid,
+                "section_code": s.get("section_code", ""),
+                "enrollment_cap": s.get("enrollment_cap"),
+                "remarks": s.get("remarks", ""),
+            },
+            "faculty": {"faculty_id": faculty_id_res, "user_id": user_id_res, "faculty_name": faculty_name},
+            "slot1": slot1,
+            "slot2": slot2,
+            "links": {
+                "curriculum_id": "",
+                "term_id": term_id,
+                "course_id": offered_cid,
+                "batch_id": batch_id_extra,
+                "program_id": program_id_extra,
+                "section_id": sid,
+                "fulfilled_placeholder_course_id": "",
+            },
+            "sizing": {
+                "preenlistment_total": 0,
+                "cohort_estimate": 0,
+                "planning_demand": 0,
+                "planned_capacity": int(s.get("enrollment_cap") or 0),
+                "existing_sections": 1,
+                "suggest_additional": 0,
+                "deficit": 0,
+            },
+        })
+
     def _sec_num(code: str) -> int:
         return int("".join(ch for ch in (code or "") if ch.isdigit()) or "0")
 
@@ -5900,22 +6411,364 @@ async def post_course_offerings(
         if not term_id_target:
             raise HTTPException(status_code=422, detail="term_id is required.")
 
-        base = await db[COL_SPECIAL].find_one(
-            {"term_id": term_id_target, "special_id": special_id},
-            {"_id": 0, "special_id": 1, "term_id": 1, "section_id": 1, "schedule_entries": 1, "assignment_id": 1, "course_id": 1, "section_code": 1},
-        )
-        if not base:
+        target_special_ids: List[str] = []
+        if isinstance(payload.get("special_ids"), list):
+            for raw_sid in payload.get("special_ids") or []:
+                sid0 = _safe_str(raw_sid)
+                if sid0 and sid0 not in target_special_ids:
+                    target_special_ids.append(sid0)
+        if special_id not in target_special_ids:
+            target_special_ids.insert(0, special_id)
+
+        special_docs = await db[COL_SPECIAL].find(
+            {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
+            {
+                "_id": 0,
+                "special_id": 1,
+                "term_id": 1,
+                "section_id": 1,
+                "schedule_entries": 1,
+                "slot1": 1,
+                "slot2": 1,
+                "schedule_id1": 1,
+                "schedule_id2": 1,
+                "day1": 1,
+                "begin1": 1,
+                "end1": 1,
+                "day2": 1,
+                "begin2": 1,
+                "end2": 1,
+                "room_id1": 1,
+                "room_id2": 1,
+                "assignment_id": 1,
+                "faculty_id": 1,
+                "faculty_name": 1,
+                "course_id": 1,
+                "section_code": 1,
+            },
+        ).to_list(max(len(target_special_ids), 1) + 5)
+        if not special_docs:
             raise HTTPException(status_code=404, detail="Special class record not found.")
+
+        def _has_binding(doc: Dict[str, Any]) -> bool:
+            if _safe_str(doc.get("section_id")):
+                return True
+            if _safe_str(doc.get("assignment_id")):
+                return True
+            se0 = doc.get("schedule_entries")
+            if isinstance(se0, list):
+                for ent in se0[:2]:
+                    if isinstance(ent, dict) and _safe_str(ent.get("schedule_id")):
+                        return True
+            for key0 in ("slot1", "slot2"):
+                ent = doc.get(key0)
+                if isinstance(ent, dict) and _safe_str(ent.get("schedule_id")):
+                    return True
+            if _safe_str(doc.get("schedule_id1")) or _safe_str(doc.get("schedule_id2")):
+                return True
+            return False
+
+        base = next((d for d in special_docs if _has_binding(d)), None) or next(
+            (d for d in special_docs if _safe_str(d.get("special_id")) == special_id),
+            special_docs[0],
+        )
+
+        def _entry_has_meaning(ent: Any) -> bool:
+            if not isinstance(ent, dict):
+                return False
+            for key in ("schedule_id", "day", "start_time", "end_time", "room_id", "room_type"):
+                if _safe_str(ent.get(key)):
+                    return True
+            return False
+
+        def _entry_day_code(v: Any) -> str:
+            u = _safe_str(v).upper()
+            if u in {"M", "T", "W", "H", "F", "S"}:
+                return u
+            return {
+                "MONDAY": "M",
+                "TUESDAY": "T",
+                "WEDNESDAY": "W",
+                "THURSDAY": "H",
+                "FRIDAY": "F",
+                "SATURDAY": "S",
+            }.get(u, "")
+
+        def _entry_hhmm(v: Any) -> str:
+            s = re.sub(r"[^\d]", "", str(v or "").strip())
+            if len(s) == 3:
+                s = "0" + s
+            return s if len(s) == 4 else ""
+
+        async def _resolve_faculty_id_for_bundle() -> str:
+            payload_faculty_id = _safe_str(payload.get("faculty_id"))
+            if payload_faculty_id:
+                return payload_faculty_id
+            payload_assignment_id = _safe_str(payload.get("assignment_id"))
+            if payload_assignment_id:
+                asg = await db[COL_FAC_ASSIGN].find_one(
+                    {"assignment_id": payload_assignment_id, "is_archived": {"$ne": True}},
+                    {"_id": 0, "faculty_id": 1},
+                ) or {}
+                fid = _safe_str(asg.get("faculty_id"))
+                if fid:
+                    return fid
+            for doc0 in special_docs:
+                fid = _safe_str(doc0.get("faculty_id"))
+                if fid:
+                    return fid
+                asg_id = _safe_str(doc0.get("assignment_id"))
+                if asg_id:
+                    asg = await db[COL_FAC_ASSIGN].find_one(
+                        {"assignment_id": asg_id, "is_archived": {"$ne": True}},
+                        {"_id": 0, "faculty_id": 1},
+                    ) or {}
+                    fid = _safe_str(asg.get("faculty_id"))
+                    if fid:
+                        return fid
+            return ""
+
+        async def _materialize_special_bundle(entries: List[Tuple[int, Dict[str, Any]]]) -> Dict[str, Optional[str]]:
+            course_id_bundle = _safe_str(payload.get("course_id")) or _safe_str(base.get("course_id"))
+            if not course_id_bundle:
+                raise HTTPException(status_code=400, detail="Missing course_id for Special Class room save.")
+
+            course_doc = await db[COL_COURSES].find_one(
+                {"course_id": course_id_bundle},
+                {"_id": 0, "room_type": 1, "program_level": 1, "course_code": 1},
+            ) or {}
+            room_type_value = course_doc.get("room_type")
+            if isinstance(room_type_value, list):
+                room_type_value = room_type_value[0] if room_type_value else None
+            room_type_value = _safe_str(room_type_value) or None
+            prefix = campus_section_prefix_for_course(
+                campus.get("campus_name", ""),
+                course_doc.get("program_level"),
+                None,
+            ) or campus_section_prefix(campus.get("campus_name", "")) or "S"
+            if isinstance(prefix, tuple):
+                prefix = prefix[0] if prefix else "S"
+            section_code_bundle = _safe_str(payload.get("section_code")) or _safe_str(base.get("section_code")) or await next_section_code(str(prefix), term_id_target, course_id_bundle)
+            faculty_id_bundle = await _resolve_faculty_id_for_bundle()
+            sid = await _next_seq_id(COL_SECTIONS, "section_id", "SEC", 4)
+            cap = await default_capacity_for_course(course_id_bundle)
+            created_at = now()
+            sec_doc = {
+                "section_id": sid,
+                "section_code": section_code_bundle,
+                "course_id": course_id_bundle,
+                "term_id": term_id_target,
+                "campus_id": campus_id,
+                "enrollment_cap": cap,
+                "remarks": "SPECIAL CLASS",
+                "batch_number": 0,
+                "status": "active",
+                "created_at": created_at,
+                "updated_at": created_at,
+                "created_by_office": "APO",
+                "created_source": "SPECIAL_CLASS_BINDING",
+            }
+            await db[COL_SECTIONS].insert_one(sec_doc)
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"section_id": sid},
+                {"$set": {
+                    "section_id": sid,
+                    "term_id": term_id_target,
+                    "course_id": course_id_bundle,
+                    "section_code": section_code_bundle,
+                    "submitted_for_scheduling": True,
+                    "campus_id": campus_id,
+                    "enrollment_cap": cap,
+                    "batch_number": 0,
+                    "remarks": "SPECIAL CLASS",
+                    "updated_at": created_at,
+                }, "$setOnInsert": {"created_at": created_at}},
+                upsert=True,
+            )
+            await _provision_sched_and_assignment_for_new_section(sec_doc)
+
+            schedule_ids: Dict[int, str] = {}
+            for slot_idx, ent in entries:
+                day_code = _entry_day_code(ent.get("day"))
+                st = _entry_hhmm(ent.get("start_time"))
+                et = _entry_hhmm(ent.get("end_time"))
+                if not (day_code and st and et):
+                    continue
+                schedule_id = _sch_id_from_sec(sid, slot_idx)
+                await db[COL_SCHEDS].update_one(
+                    {"schedule_id": schedule_id},
+                    {"$set": {
+                        "section_id": sid,
+                        "day": day_code,
+                        "start_time": st,
+                        "end_time": et,
+                        "room_id": None,
+                        "room_type": _safe_str(ent.get("room_type")) or room_type_value,
+                        "updated_at": created_at,
+                    }},
+                    upsert=True,
+                )
+                schedule_ids[slot_idx] = schedule_id
+
+            assignment_id_bundle = None
+            if faculty_id_bundle:
+                asg_existing = await db[COL_FAC_ASSIGN].find_one(
+                    {"section_id": sid, "is_archived": {"$ne": True}},
+                    {"_id": 0, "assignment_id": 1},
+                ) or {}
+                assignment_id_bundle = _safe_str(asg_existing.get("assignment_id")) or _asg_id_from_sec(sid)
+                await db[COL_FAC_ASSIGN].update_one(
+                    {"assignment_id": assignment_id_bundle},
+                    {"$set": {
+                        "assignment_id": assignment_id_bundle,
+                        "load_id": None,
+                        "section_id": sid,
+                        "faculty_id": faculty_id_bundle,
+                        "term_id": term_id_target,
+                        "is_archived": False,
+                        "updated_at": created_at,
+                    }, "$setOnInsert": {"created_at": created_at}},
+                    upsert=True,
+                )
+
+            await db[COL_SPECIAL].update_many(
+                {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
+                {"$set": {
+                    "section_id": sid,
+                    "section_code": section_code_bundle,
+                    "assignment_id": assignment_id_bundle,
+                    "schedule_id1": schedule_ids.get(1),
+                    "schedule_id2": schedule_ids.get(2),
+                    "updated_at": created_at,
+                }},
+            )
+            for doc0 in special_docs:
+                doc0["section_id"] = sid
+                doc0["section_code"] = section_code_bundle
+                doc0["assignment_id"] = assignment_id_bundle
+                doc0["schedule_id1"] = schedule_ids.get(1)
+                doc0["schedule_id2"] = schedule_ids.get(2)
+            return {
+                "section_id": sid,
+                "section_code": section_code_bundle,
+                "assignment_id": assignment_id_bundle,
+                "schedule_id1": schedule_ids.get(1),
+                "schedule_id2": schedule_ids.get(2),
+            }
 
         updates: Dict[str, Any] = {"updated_at": now()}
 
         if "remarks" in payload:
             updates["remarks"] = payload.get("remarks") or ""
+        if "section_code" in payload:
+            updates["section_code"] = (payload.get("section_code") or "").strip()
 
-        await db[COL_SPECIAL].update_one(
-            {"term_id": term_id_target, "special_id": special_id},
+        await db[COL_SPECIAL].update_many(
+            {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
             {"$set": updates},
         )
+
+        # Optional: persist section code to linked section records
+        section_id_sc = _safe_str(payload.get("section_id"))
+        if not section_id_sc:
+            for doc0 in special_docs:
+                sid0 = _safe_str(doc0.get("section_id"))
+                if sid0:
+                    section_id_sc = sid0
+                    break
+        if not section_id_sc:
+            payload_assignment_id = _safe_str(payload.get("assignment_id"))
+            if payload_assignment_id:
+                asg = await db[COL_FAC_ASSIGN].find_one(
+                    {"assignment_id": payload_assignment_id},
+                    {"_id": 0, "section_id": 1},
+                ) or {}
+                section_id_sc = _safe_str(asg.get("section_id"))
+        if not section_id_sc:
+            for doc0 in special_docs:
+                asg_id = _safe_str(doc0.get("assignment_id"))
+                if not asg_id:
+                    continue
+                asg = await db[COL_FAC_ASSIGN].find_one(
+                    {"assignment_id": asg_id},
+                    {"_id": 0, "section_id": 1},
+                ) or {}
+                section_id_sc = _safe_str(asg.get("section_id"))
+                if section_id_sc:
+                    break
+        if not section_id_sc:
+            payload_se = payload.get("schedule_entries")
+            if isinstance(payload_se, list):
+                for ent in payload_se[:2]:
+                    if not isinstance(ent, dict):
+                        continue
+                    sched_id0 = _safe_str(ent.get("schedule_id"))
+                    if not sched_id0:
+                        continue
+                    sch0 = await db[COL_SCHEDS].find_one(
+                        {"schedule_id": sched_id0},
+                        {"_id": 0, "section_id": 1},
+                    ) or {}
+                    section_id_sc = _safe_str(sch0.get("section_id"))
+                    if section_id_sc:
+                        break
+        if not section_id_sc:
+            schedule_lookup_ids: List[str] = []
+            for doc0 in special_docs:
+                for sid_key in ("schedule_id1", "schedule_id2"):
+                    sid0 = _safe_str(doc0.get(sid_key))
+                    if sid0 and sid0 not in schedule_lookup_ids:
+                        schedule_lookup_ids.append(sid0)
+                base_se = doc0.get("schedule_entries")
+                if isinstance(base_se, list):
+                    for ent in base_se[:2]:
+                        if isinstance(ent, dict):
+                            sid0 = _safe_str(ent.get("schedule_id"))
+                            if sid0 and sid0 not in schedule_lookup_ids:
+                                schedule_lookup_ids.append(sid0)
+                for key0 in ("slot1", "slot2"):
+                    ent = doc0.get(key0)
+                    if isinstance(ent, dict):
+                        sid0 = _safe_str(ent.get("schedule_id"))
+                        if sid0 and sid0 not in schedule_lookup_ids:
+                            schedule_lookup_ids.append(sid0)
+            for sched_id0 in schedule_lookup_ids:
+                sch0 = await db[COL_SCHEDS].find_one(
+                    {"schedule_id": sched_id0},
+                    {"_id": 0, "section_id": 1},
+                ) or {}
+                section_id_sc = _safe_str(sch0.get("section_id"))
+                if section_id_sc:
+                    break
+        if not section_id_sc:
+            req_section_code = _safe_str(payload.get("section_code"))
+            req_course_id = _safe_str(payload.get("course_id")) or _safe_str(base.get("course_id"))
+            if req_section_code and req_course_id:
+                sec0 = await db[COL_SECTIONS].find_one(
+                    {"term_id": term_id_target, "section_code": req_section_code, "course_id": req_course_id},
+                    {"_id": 0, "section_id": 1},
+                ) or await db[COL_SECTIONS_SUBMITTED].find_one(
+                    {"term_id": term_id_target, "section_code": req_section_code, "course_id": req_course_id},
+                    {"_id": 0, "section_id": 1},
+                ) or {}
+                section_id_sc = _safe_str(sec0.get("section_id"))
+
+        if section_id_sc:
+            await db[COL_SPECIAL].update_many(
+                {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
+                {"$set": {"section_id": section_id_sc, "updated_at": now()}},
+            )
+
+        new_section_code = (payload.get("section_code") or "").strip() if "section_code" in payload else ""
+        if section_id_sc and "section_code" in payload:
+            await db[COL_SECTIONS].update_one(
+                {"section_id": section_id_sc},
+                {"$set": {"section_code": new_section_code, "updated_at": now()}},
+            )
+            await db[COL_SECTIONS_SUBMITTED].update_one(
+                {"section_id": section_id_sc},
+                {"$set": {"section_code": new_section_code, "updated_at": now()}},
+            )
 
         # Optional: persist room edits by updating the section_schedules records
         # IMPORTANT: validate using the same rules as Room Allocation / eligibleRooms:
@@ -5925,21 +6778,39 @@ async def post_course_offerings(
         # - overlap conflicts (term-aware)
         se = payload.get("schedule_entries")
         if isinstance(se, list):
-            section_id_sc = (base.get("section_id") or "").strip()
+            slot_entries = [
+                (idx, e)
+                for idx, e in enumerate(se[:2], start=1)
+                if isinstance(e, dict) and _entry_has_meaning(e)
+            ]
+            if slot_entries and not section_id_sc:
+                materialized = await _materialize_special_bundle(slot_entries)
+                section_id_sc = _safe_str(materialized.get("section_id"))
 
             # Track room assignments/changes so we can notify OM (in-app + Gmail).
             # We only notify when a real room is assigned or changed (nots when cleared to TBA).
             room_changes: List[Dict[str, Any]] = []
 
-            # Validate schedule_ids belong to this special class record (prevents updating unrelated schedules)
+            # Validate schedule_ids belong to the grouped special class set (prevents updating unrelated schedules)
             allowed_sched_ids: set[str] = set()
-            base_se = base.get("schedule_entries")
-            if isinstance(base_se, list):
-                for ent in base_se[:2]:
+            for doc0 in special_docs:
+                base_se = doc0.get("schedule_entries")
+                if isinstance(base_se, list):
+                    for ent in base_se[:2]:
+                        if isinstance(ent, dict):
+                            sid0 = str(ent.get("schedule_id") or "").strip()
+                            if sid0:
+                                allowed_sched_ids.add(sid0)
+                for key0 in ("slot1", "slot2"):
+                    ent = doc0.get(key0)
                     if isinstance(ent, dict):
                         sid0 = str(ent.get("schedule_id") or "").strip()
                         if sid0:
                             allowed_sched_ids.add(sid0)
+                for sid_key in ("schedule_id1", "schedule_id2"):
+                    sid0 = _safe_str(doc0.get(sid_key))
+                    if sid0:
+                        allowed_sched_ids.add(sid0)
 
             # Normalize helper (local to this action)
             def _t4_local(v: Any) -> str:
@@ -6056,11 +6927,20 @@ async def post_course_offerings(
             # NOTE: Some legacy Special Class rows may not carry schedule_id in their schedule_entries.
             # In that case, we fall back to matching schedules by (section_id + day + start_time + end_time)
             # and update *all* matching schedules to prevent stale room assignments (double-booking).
-            for idx, e in enumerate(se[:2], start=1):
+            for idx, e in slot_entries:
                 if not isinstance(e, dict):
                     continue
 
                 sched_id = str(e.get("schedule_id") or "").strip()
+                if not sched_id:
+                    legacy_sched_id = _safe_str(base.get(f"schedule_id{idx}"))
+                    if not legacy_sched_id:
+                        for doc0 in special_docs:
+                            legacy_sched_id = _safe_str(doc0.get(f"schedule_id{idx}"))
+                            if legacy_sched_id:
+                                break
+                    if legacy_sched_id:
+                        sched_id = legacy_sched_id
 
                 # Payload may include day/start/end when schedule_id is missing.
                 day_in = str(e.get("day") or "").strip()
@@ -6101,7 +6981,7 @@ async def post_course_offerings(
                         {"_id": 0, "schedule_id": 1, "section_id": 1, "day": 1, "start_time": 1, "end_time": 1, "room_type": 1, "room_id": 1},
                     )
                     if not sch:
-                        raise HTTPException(status_code=404, detail=f"Schedule not found: {sched_id}")
+                        sched_id = ""
 
                     # Ensure this schedule_id belongs to the special class record (if schedule_entries exist in the record).
                     if allowed_sched_ids and sched_id not in allowed_sched_ids:
@@ -6113,8 +6993,8 @@ async def post_course_offerings(
                 # If special_class.section_id is missing or mismatched, repair it using schedule.section_id.
                 if sch_section_id and (not section_id_sc or sch_section_id != section_id_sc):
                     section_id_sc = sch_section_id
-                    await db[COL_SPECIAL].update_one(
-                        {"term_id": term_id_target, "special_id": special_id},
+                    await db[COL_SPECIAL].update_many(
+                        {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
                         {"$set": {"section_id": section_id_sc, "updated_at": now()}},
                     )
 
@@ -6123,8 +7003,10 @@ async def post_course_offerings(
                 et = _hhmm(str((sch or {}).get("end_time") or "")) or et_fallback
 
                 if not (section_id_sc and day_code and st and et):
-                    # Without these, we cannot safely persist to section_schedules.
-                    continue
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Unable to resolve Special Class room save target for this slot.",
+                    )
 
                 # Find all matching schedules for this slot (to eliminate stale bookings).
                 match_ids: List[str] = []
@@ -6203,6 +7085,48 @@ async def post_course_offerings(
                     {"schedule_id": {"$in": match_ids}},
                     {"$set": set_doc},
                 )
+
+                # Keep special_class slot data in sync so Special Class re-reads the saved room
+                # even for legacy rows whose schedule_entries do not yet have schedule_id.
+                canonical_room_id = set_doc.get("room_id") if "room_id" in set_doc else None
+                canonical_entry = {
+                    "schedule_id": match_ids[0],
+                    "day": day_code,
+                    "start_time": st,
+                    "end_time": et,
+                    "room_type": rt_in or str((sch or {}).get("room_type") or "").strip() or None,
+                    "room_id": canonical_room_id,
+                }
+                existing_entries = []
+                for doc0 in special_docs:
+                    se0 = doc0.get("schedule_entries")
+                    if isinstance(se0, list) and len(se0) > 0:
+                        existing_entries = [x for x in se0[:2] if isinstance(x, dict)]
+                        break
+                while len(existing_entries) < idx:
+                    existing_entries.append({})
+                existing_entries[idx - 1] = canonical_entry
+                await db[COL_SPECIAL].update_many(
+                    {"term_id": term_id_target, "special_id": {"$in": target_special_ids}},
+                    {"$set": {
+                        "updated_at": now(),
+                        f"slot{idx}": canonical_entry,
+                        "schedule_entries": existing_entries[:2],
+                        f"schedule_id{idx}": canonical_entry.get("schedule_id"),
+                        f"day{idx}": canonical_entry.get("day") or "",
+                        f"begin{idx}": canonical_entry.get("start_time") or "",
+                        f"end{idx}": canonical_entry.get("end_time") or "",
+                        f"room_id{idx}": canonical_entry.get("room_id"),
+                    }},
+                )
+                for doc0 in special_docs:
+                    doc0["schedule_entries"] = list(existing_entries[:2])
+                    doc0[f"slot{idx}"] = dict(canonical_entry)
+                    doc0[f"schedule_id{idx}"] = canonical_entry.get("schedule_id")
+                    doc0[f"day{idx}"] = canonical_entry.get("day") or ""
+                    doc0[f"begin{idx}"] = canonical_entry.get("start_time") or ""
+                    doc0[f"end{idx}"] = canonical_entry.get("end_time") or ""
+                    doc0[f"room_id{idx}"] = canonical_entry.get("room_id")
 
                 # Record for notification (only when assigning/changing to a real room)
                 if room_id and room_id.lower() not in {"null", "none"} and room_id != old_room_id:
@@ -7244,13 +8168,23 @@ async def post_course_offerings(
         if shortage < 0:
             shortage = 0
 
+        # Frontend sends the visible shortage count from the Approval Required panel.
+        # Use it as a fallback because the recomputed pending list may temporarily miss
+        # the just-resolved course right after a delete/refresh cycle, which would
+        # otherwise store a suppression of 0 and cause the same prompt to remain visible.
+        requested_shortage = int(payload.get("keep_shortage_sections") or 0)
+        if requested_shortage < 0:
+            requested_shortage = 0
+
         if action == "planKeepCurrentIncrease":
             # Record suppression so this increase prompt stops appearing.
-            # Store the *current shortage*; future shortages larger than this will still prompt.
+            # Store the larger of the current recomputed shortage and the client-visible
+            # shortage so the exact item the user accepted is suppressed immediately.
+            effective_shortage = max(int(shortage or 0), int(requested_shortage or 0))
             plan_state = await db[COL_PLANSTATE].find_one({"term_id": term_id, "campus_id": campus_id}) or {}
             sup = plan_state.get("increase_sections_suppression") or {}
             sup = {str(k): int(v or 0) for k, v in sup.items() if str(k).strip()}
-            sup[cid] = max(int(sup.get(cid, 0) or 0), int(shortage or 0))
+            sup[cid] = max(int(sup.get(cid, 0) or 0), int(effective_shortage or 0))
             await db[COL_PLANSTATE].update_one(
                 {"term_id": term_id, "campus_id": campus_id},
                 {"$set": {
@@ -7261,7 +8195,7 @@ async def post_course_offerings(
                 }},
                 upsert=True,
             )
-            return {"ok": True, "suppressed": int(shortage or 0)}
+            return {"ok": True, "suppressed": int(effective_shortage or 0)}
 
         # action == planApplyIncrease
         if not inc_item or shortage <= 0:

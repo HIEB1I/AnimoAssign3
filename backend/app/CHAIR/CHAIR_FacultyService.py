@@ -876,6 +876,309 @@ async def _faculty_dropdown(dept_name: Optional[str]) -> List[Dict[str, Any]]:
     return out
 
 
+
+
+def _time_to_minutes(value: Any) -> Optional[int]:
+    s = str(value or '').strip()
+    if not s:
+        return None
+    if re.fullmatch(r"\d{1,2}:\d{2}", s):
+        hh, mm = s.split(':', 1)
+        try:
+            h = int(hh)
+            m = int(mm)
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
+        except Exception:
+            return None
+    digits = re.sub(r"\D", "", s)
+    if len(digits) == 3:
+        digits = '0' + digits
+    if len(digits) == 4:
+        try:
+            h = int(digits[:2])
+            m = int(digits[2:])
+            if 0 <= h <= 23 and 0 <= m <= 59:
+                return h * 60 + m
+        except Exception:
+            return None
+    return None
+
+
+def _normalize_day_short(value: Any) -> str:
+    raw = str(value or '').strip().upper()
+    if not raw:
+        return ''
+    if raw in {'M', 'T', 'W', 'H', 'F', 'S'}:
+        return raw
+    if raw in {'TH', 'THU', 'THUR', 'THURS', 'THURSDAY'}:
+        return 'H'
+    if raw.startswith('MON'):
+        return 'M'
+    if raw.startswith('TUE'):
+        return 'T'
+    if raw.startswith('WED'):
+        return 'W'
+    if raw.startswith('FRI'):
+        return 'F'
+    if raw.startswith('SAT'):
+        return 'S'
+    return raw[:1]
+
+
+def _ranges_overlap(begin_a: int, end_a: int, begin_b: int, end_b: int) -> bool:
+    return begin_a < end_b and begin_b < end_a
+
+
+def _meeting_slots_from_payload(payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+    out: List[Dict[str, Any]] = []
+    for suffix in ('1', '2'):
+        day = _normalize_day_short(payload.get(f'day{suffix}'))
+        begin = str(payload.get(f'begin{suffix}') or '').strip()
+        end = str(payload.get(f'end{suffix}') or '').strip()
+        if begin and not end:
+            end = END_BY_BEGIN.get(begin, end)
+        b = _time_to_minutes(begin)
+        e = _time_to_minutes(end)
+        if day and b is not None and e is not None and e > b:
+            out.append({
+                'day': day,
+                'begin': begin,
+                'end': end,
+                'begin_minutes': b,
+                'end_minutes': e,
+            })
+    return out
+
+
+async def _faculty_busy_slots(term_id: str, faculty_ids: List[str], db) -> Dict[str, List[Dict[str, str]]]:
+    term_id = str(term_id or '').strip()
+    faculty_ids = [str(fid or '').strip() for fid in (faculty_ids or []) if str(fid or '').strip()]
+    if not term_id or not faculty_ids:
+        return {}
+
+    result: Dict[str, List[Dict[str, str]]] = {fid: [] for fid in faculty_ids}
+
+    # IMPORTANT:
+    # Existing OM rows are not guaranteed to persist `faculty_assignments.term_id`.
+    # Some data sets only key assignments by section_id, while the term is carried by
+    # `sections_submitted` / `sections` / `section_schedules`.
+    #
+    # So we first pull all active assignments for the faculty, then keep only section_ids
+    # that belong to the requested term using the section/schedule collections.
+    cur = db[COL_ASSIGN].find(
+        {
+            'faculty_id': {'$in': faculty_ids},
+            'is_archived': {'$ne': True},
+            'faculty_id': {'$nin': [None, ''], '$in': faculty_ids},
+        },
+        {'_id': 0, 'faculty_id': 1, 'section_id': 1, 'term_id': 1},
+    )
+    assignments = [a async for a in cur]
+    if not assignments:
+        return result
+
+    section_ids = sorted({str(a.get('section_id') or '').strip() for a in assignments if str(a.get('section_id') or '').strip()})
+    if not section_ids:
+        return result
+
+    valid_section_ids: set[str] = set()
+    for a in assignments:
+        sid = str(a.get('section_id') or '').strip()
+        if sid and str(a.get('term_id') or '').strip() == term_id:
+            valid_section_ids.add(sid)
+
+    try:
+        cur_sub = db[COL_SECTIONS_SUBMITTED].find(
+            {'term_id': term_id, 'section_id': {'$in': section_ids}},
+            {'_id': 0, 'section_id': 1},
+        )
+        async for sec in cur_sub:
+            sid = str(sec.get('section_id') or '').strip()
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    try:
+        cur_sec = db[COL_SECTIONS].find(
+            {'term_id': term_id, 'section_id': {'$in': section_ids}},
+            {'_id': 0, 'section_id': 1},
+        )
+        async for sec in cur_sec:
+            sid = str(sec.get('section_id') or '').strip()
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    try:
+        cur_sched = db[COL_SCHED].find(
+            {'term_id': term_id, 'section_id': {'$in': section_ids}},
+            {'_id': 0, 'section_id': 1},
+        )
+        async for sched in cur_sched:
+            sid = str(sched.get('section_id') or '').strip()
+            if sid:
+                valid_section_ids.add(sid)
+    except Exception:
+        pass
+
+    assignments = [a for a in assignments if str(a.get('section_id') or '').strip() in valid_section_ids]
+    if not assignments:
+        return result
+
+    scoped_section_ids = sorted({str(a.get('section_id') or '').strip() for a in assignments if str(a.get('section_id') or '').strip()})
+    sched_cur = db[COL_SCHED].find(
+        {'section_id': {'$in': scoped_section_ids}},
+        {'_id': 0, 'section_id': 1, 'day': 1, 'day_of_week': 1, 'start_time': 1, 'end_time': 1, 'begin': 1, 'end': 1},
+    )
+    schedules_by_section: Dict[str, List[Dict[str, Any]]] = {}
+    async for sched in sched_cur:
+        sid = str(sched.get('section_id') or '').strip()
+        if sid:
+            schedules_by_section.setdefault(sid, []).append(sched)
+
+    seen_slots: Dict[str, set[tuple[str, str, str, str]]] = {fid: set() for fid in faculty_ids}
+
+    for asg in assignments:
+        fid = str(asg.get('faculty_id') or '').strip()
+        sid = str(asg.get('section_id') or '').strip()
+        if not fid or not sid:
+            continue
+        for sched in schedules_by_section.get(sid, []):
+            day = _normalize_day_short(sched.get('day') or sched.get('day_of_week'))
+            begin = str(sched.get('start_time') or sched.get('begin') or '').strip()
+            end = str(sched.get('end_time') or sched.get('end') or '').strip()
+            if begin and not end:
+                end = END_BY_BEGIN.get(begin, end)
+            if not day or not begin or not end:
+                continue
+            key = (sid, day, begin, end)
+            if key in seen_slots.setdefault(fid, set()):
+                continue
+            seen_slots[fid].add(key)
+            result.setdefault(fid, []).append({
+                'section_id': sid,
+                'day': day,
+                'begin': begin,
+                'end': end,
+            })
+
+    # Also include accepted Faculty Service schedules directly. This keeps the chair
+    # dropdown availability aligned with backend validation even if OM reflection
+    # is delayed or a previous response has not yet been mirrored into assignments.
+    try:
+        fs_cur = db.faculty_service.find(
+            {
+                'status': 'responded',
+                'faculty.faculty_id': {'$in': faculty_ids},
+                'section_id': {'$in': list(valid_section_ids)},
+            },
+            {
+                '_id': 0,
+                'section_id': 1,
+                'faculty': 1,
+                'day1': 1,
+                'begin1': 1,
+                'end1': 1,
+                'day2': 1,
+                'begin2': 1,
+                'end2': 1,
+            },
+        )
+        async for fs in fs_cur:
+            fid = str(((fs.get('faculty') or {}).get('faculty_id')) or '').strip()
+            sid = str(fs.get('section_id') or '').strip()
+            if not fid or not sid:
+                continue
+            for suffix in ('1', '2'):
+                day = _normalize_day_short(fs.get(f'day{suffix}'))
+                begin = str(fs.get(f'begin{suffix}') or '').strip()
+                end = str(fs.get(f'end{suffix}') or '').strip()
+                if begin and not end:
+                    end = END_BY_BEGIN.get(begin, end)
+                if not day or not begin or not end:
+                    continue
+                key = (sid, day, begin, end)
+                if key in seen_slots.setdefault(fid, set()):
+                    continue
+                seen_slots[fid].add(key)
+                result.setdefault(fid, []).append({
+                    'section_id': sid,
+                    'day': day,
+                    'begin': begin,
+                    'end': end,
+                })
+    except Exception:
+        pass
+
+    return result
+
+
+async def _find_faculty_schedule_conflicts(
+    *,
+    row: Dict[str, Any],
+    faculty_id: str,
+    payload: Dict[str, Any],
+) -> List[str]:
+    active_term = await _active_term()
+    term_id = str((active_term or {}).get('term_id') or '').strip()
+    fid = str(faculty_id or '').strip()
+    if not term_id or not fid:
+        return []
+
+    meetings = _meeting_slots_from_payload(payload)
+    if not meetings:
+        return []
+
+    exclude_section_ids = set(await _target_section_ids_for_faculty_service_row(row))
+    busy_map = await _faculty_busy_slots(term_id, [fid], db)
+    conflicts: List[str] = []
+
+    for meeting in meetings:
+        for busy in busy_map.get(fid, []):
+            sid = str(busy.get('section_id') or '').strip()
+            if sid and sid in exclude_section_ids:
+                continue
+            if _normalize_day_short(busy.get('day')) != meeting['day']:
+                continue
+            b = _time_to_minutes(busy.get('begin'))
+            e = _time_to_minutes(busy.get('end'))
+            if b is None or e is None or e <= b:
+                continue
+            if _ranges_overlap(meeting['begin_minutes'], meeting['end_minutes'], b, e):
+                label = f"{meeting['day']} {meeting['begin']}-{meeting['end']}"
+                if label not in conflicts:
+                    conflicts.append(label)
+    return conflicts
+
+
+async def _active_faculty_service_section_ids(*, term_id: str, section_ids: Optional[List[str]] = None) -> set[str]:
+    """Return section_ids that already have a non-terminal Faculty Service request.
+
+    A section should not be requestable again while there is already an existing
+    request for that same section waiting to be resolved/assigned.
+    """
+
+    q: Dict[str, Any] = {
+        "status": {"$in": ["sent", "responded"]},
+        "section_id": {"$nin": [None, ""]},
+    }
+    if section_ids is not None:
+        scoped = [str(s or '').strip() for s in section_ids if str(s or '').strip()]
+        if not scoped:
+            return set()
+        q["section_id"] = {"$in": scoped}
+
+    out: set[str] = set()
+    cur = db.faculty_service.find(q, {"_id": 0, "section_id": 1})
+    async for doc in cur:
+        sid = str(doc.get("section_id") or "").strip()
+        if sid:
+            out.add(sid)
+    return out
+
 # --------------------------- OPTIONS ---------------------------
 
 @router.get("/options")
@@ -911,13 +1214,17 @@ async def fs_options(
     wants_courses = bool(requesterDepartment or q)
 
     if wants_courses and dept_id and active_term_id:
-        # Read from OM Load Assignment source (sections_submitted)
+        # Read from OM Load Assignment source (sections_submitted).
         #
         # IMPORTANT:
-        # Faculty Service (CHAIR) must only show course/sections that are *UNASSIGNED*
-        # in OM Load Assignment. We treat a section as assigned when there exists a
-        # non-archived faculty_assignments row for the section+term with a non-empty
-        # faculty_id.
+        # Faculty Service (CHAIR) must only show course/sections that are BOTH:
+        #   - unassigned in OM Load Assignment, and
+        #   - not already covered by an existing active Faculty Service request.
+        #
+        # We treat a section as unavailable when there exists either:
+        #   - a non-archived faculty_assignments row with a non-empty faculty_id, or
+        #   - a faculty_service row for the same section that is still active
+        #     (status in {sent, responded}).
         pipe: List[Dict[str, Any]] = [
             {
                 "$match": {
@@ -935,7 +1242,6 @@ async def fs_options(
                                 "$expr": {
                                     "$and": [
                                         {"$eq": ["$section_id", "$$sid"]},
-                                        {"$eq": ["$term_id", active_term_id]},
                                         {"$ne": ["$is_archived", True]},
                                         {"$ne": ["$faculty_id", None]},
                                         {"$ne": ["$faculty_id", ""]},
@@ -949,7 +1255,24 @@ async def fs_options(
                     "as": "_assigned",
                 }
             },
-            {"$match": {"_assigned": {"$size": 0}}},
+            {
+                "$lookup": {
+                    "from": "faculty_service",
+                    "let": {"sid": "$section_id"},
+                    "pipeline": [
+                        {
+                            "$match": {
+                                "$expr": {"$eq": ["$section_id", "$$sid"]},
+                                "status": {"$in": ["sent", "responded"]},
+                            }
+                        },
+                        {"$project": {"_id": 1}},
+                        {"$limit": 1},
+                    ],
+                    "as": "_active_fs",
+                }
+            },
+            {"$match": {"_assigned": {"$size": 0}, "_active_fs": {"$size": 0}}},
             {
                 "$lookup": {
                     "from": "courses",
@@ -1086,7 +1409,6 @@ async def fs_options(
                 # Assigned sections: any non-archived assignment with a real faculty_id.
                 asg_cur = db[COL_ASSIGN].find(
                     {
-                        "term_id": active_term_id,
                         "section_id": {"$in": sids},
                         "is_archived": {"$ne": True},
                         "faculty_id": {"$nin": [None, ""]},
@@ -1099,12 +1421,21 @@ async def fs_options(
                     if sid:
                         assigned.add(sid)
 
+                active_requested = await _active_faculty_service_section_ids(term_id=active_term_id, section_ids=sids)
+
                 for r in raw:
-                    if r["section_id"] in assigned:
+                    if r["section_id"] in assigned or r["section_id"] in active_requested:
                         continue
                     sections.append(r)
 
     faculty_opts = await _faculty_dropdown(toDepartment) if toDepartment else []
+    faculty_availability: Dict[str, List[Dict[str, str]]] = {}
+    if faculty_opts and active_term_id:
+        faculty_availability = await _faculty_busy_slots(
+            active_term_id,
+            [str(f.get("faculty_id") or "").strip() for f in faculty_opts],
+            db,
+        )
 
     return {
         "ok": True,
@@ -1114,6 +1445,7 @@ async def fs_options(
         "timeBegins": BEGIN,
         "days": DAYS,
         "facultyOptions": faculty_opts,
+        "facultyAvailability": faculty_availability,
         "activeTerm": active_term,  # <--- added
     }
 
@@ -1283,6 +1615,16 @@ async def fs_create(payload: Dict[str, Any] = Body(...)):
         raise HTTPException(status_code=400, detail="course_code is required.")
     if not section_id:
         raise HTTPException(status_code=400, detail="section_id is required.")
+
+    existing_active = await db.faculty_service.find_one(
+        {
+            "section_id": section_id,
+            "status": {"$in": ["sent", "responded"]},
+        },
+        {"_id": 0, "fs_id": 1},
+    )
+    if existing_active:
+        raise HTTPException(status_code=400, detail="A request already exists for this section.")
 
     # Validate section belongs to the selected course in the active/planning term when possible.
     try:
@@ -1467,6 +1809,22 @@ async def fs_respond(
             fac_out["last_name"] = fac_out["last_name"] or prof.get("last_name")
             user = await db.users.find_one({"user_id": prof.get("user_id")}, {"_id": 0, "email": 1})
             fac_out["email"] = fac_out["email"] or (user or {}).get("email")
+
+    conflict_labels = await _find_faculty_schedule_conflicts(
+        row=row,
+        faculty_id=str(fac_out.get("faculty_id") or "").strip(),
+        payload={
+            "day1": day1, "begin1": begin1, "end1": end1,
+            "day2": day2, "begin2": begin2, "end2": end2,
+        },
+    )
+    if conflict_labels:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Selected faculty is unavailable for: " + ", ".join(conflict_labels)
+            ),
+        )
 
     update = {
         "faculty": fac_out,
@@ -1738,6 +2096,27 @@ async def fs_restore(fs_id: str, payload: Dict[str, Any] = Body(default={})):
         update["end2"] = end2
     if remarks is not None:
         update["remarks"] = str(remarks)
+
+    if status == "responded":
+        merged_payload = {
+            "day1": update.get("day1", row.get("day1")),
+            "begin1": update.get("begin1", row.get("begin1")),
+            "end1": update.get("end1", row.get("end1")),
+            "day2": update.get("day2", row.get("day2")),
+            "begin2": update.get("begin2", row.get("begin2")),
+            "end2": update.get("end2", row.get("end2")),
+        }
+        merged_faculty = update.get("faculty") if isinstance(update.get("faculty"), dict) else row.get("faculty")
+        conflict_labels = await _find_faculty_schedule_conflicts(
+            row=row,
+            faculty_id=str((merged_faculty or {}).get("faculty_id") or "").strip(),
+            payload=merged_payload,
+        )
+        if conflict_labels:
+            raise HTTPException(
+                status_code=400,
+                detail=("Selected faculty is unavailable for: " + ", ".join(conflict_labels)),
+            )
 
     await db.faculty_service.update_one({"fs_id": fs_id}, {"$set": update})
 

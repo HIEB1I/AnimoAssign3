@@ -275,6 +275,14 @@ def _parse_date_any(dt: str | datetime | None) -> datetime | None:
       return None
 
 
+def _ensure_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 async def _prefs_window_override_for_term(term: dict | None) -> dict:
     term = term or {}
     term_id = term.get("term_id")
@@ -296,10 +304,10 @@ async def _prefs_window_override_for_term(term: dict | None) -> dict:
     if not override:
         return {"openISO": "", "deadlineISO": "", "term_id": term_id}
 
-    open_dt = _parse_date_any(override.get("open_dt") or override.get("openISO"))
-    deadline_dt = _parse_date_any(
+    open_dt = _ensure_utc(_parse_date_any(override.get("open_dt") or override.get("openISO")))
+    deadline_dt = _ensure_utc(_parse_date_any(
         override.get("deadline_dt") or override.get("deadlineISO")
-    )
+    ))
 
     return {
         "openISO": open_dt.isoformat() if open_dt else "",
@@ -347,13 +355,6 @@ async def _prefs_window_for_term(term: dict) -> dict:
 
     open_dt = _parse_date_any(raw_open)
     deadline_dt = _parse_date_any(raw_deadline)
-
-    def _ensure_utc(dt: datetime | None) -> datetime | None:
-        if dt is None:
-            return None
-        if dt.tzinfo is None:
-            return dt.replace(tzinfo=timezone.utc)
-        return dt
 
     open_dt = _ensure_utc(open_dt)
     deadline_dt = _ensure_utc(deadline_dt)
