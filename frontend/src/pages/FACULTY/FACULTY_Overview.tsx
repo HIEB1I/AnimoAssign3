@@ -1591,7 +1591,7 @@ const [isAccepting, setIsAccepting] = useState(false);
 
       setSpecialEditBusy(true);
 
-      await apiPost("/api/faculty/special-class/update-schedule", {
+      const resp = await apiPost("/api/faculty/special-class/update-schedule", {
         user_id: userId,
         special_id: specialEdit.special_id,
         special_ids: specialEdit.special_ids,
@@ -1611,7 +1611,18 @@ const [isAccepting, setIsAccepting] = useState(false);
             : {},
       });
 
-      onToast?.("success", "Special class schedule updated. Notifications sent to OM, Chair, and student(s).");
+      const updatedEvents = Number(resp?.calendar_sync_stats?.updated || 0);
+      const matchedExisting = Number(resp?.calendar_sync_stats?.matched_existing || 0);
+      const calendarSyncFailed = resp?.calendar_sync_ok === false;
+      const syncMsg = calendarSyncFailed
+        ? " Calendar auto-update to Google Calendar failed."
+        : updatedEvents > 0
+        ? ` Updated ${updatedEvents} Google Calendar event${updatedEvents === 1 ? "" : "s"} automatically.`
+        : matchedExisting > 0
+        ? " Google Calendar was already in sync."
+        : " No existing Google Calendar event was found, so no new calendar event was created automatically.";
+
+      onToast?.("success", `Special class schedule updated. Notifications sent to OM, Chair, and student(s).${syncMsg}`);
       setSpecialEdit(null);
       setSpecialRooms1([]);
       setSpecialRooms2([]);
