@@ -1958,6 +1958,24 @@ async def _fetch_reflected_special_classes_for_faculty(
 async def _student_user_id_for_special(d: Dict[str, Any]) -> str:
     return str(d.get("user_id") or d.get("student_user_id") or "").strip()
 
+def _is_active_special_status(status: Any) -> bool:
+    """Return True only for active special-class rows.
+
+    The EAF endpoint uses this before streaming the file. Without this helper,
+    clicking a student EAF raises a server-side NameError and returns 500.
+    """
+    s = str(status or "").strip().lower()
+    if not s:
+        return False
+    return s in {
+        "approved",
+        "pending",
+        "accepted",
+        "active",
+        "for approval",
+        "for_approval",
+    }
+
 def _faculty_eaf_available(doc: Dict[str, Any]) -> bool:
     raw_path = str(doc.get("eaf_storage_path") or "").strip()
     if raw_path:
