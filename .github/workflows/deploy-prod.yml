@@ -244,7 +244,7 @@ jobs:
             done
 
             docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans \
-              backend-secondary analytics-secondary frontend-secondary nginx-secondary
+              backend-secondary analytics-secondary frontend-secondary nginx
             
             # Show what's running (helps catch name mismatches)
             echo "== compose ps =="; docker compose -f "$FILE" ps
