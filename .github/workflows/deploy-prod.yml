@@ -243,46 +243,12 @@ jobs:
               docker rm -f "$c" 2>/dev/null || true
             done
 
-            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans
-
-            # Wait for a PRIMARY (up to ~6 minutes)
-            i=0; tries=90
-            while true; do
-              if docker exec -i mongo-secondary mongosh \
-                -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-                --authenticationDatabase admin --quiet \
-                --eval 'const s=rs.status(); if (s.ok===1 && s.members && s.members.some(m=>m.stateStr==="PRIMARY")) quit(0); quit(1);' >/dev/null 2>&1
-              then
-                echo "::notice ::Replica set has a PRIMARY"
-                break
-              fi
-              i=$((i+1)); if [ "$i" -ge "$tries" ]; then
-                echo "::error ::No PRIMARY elected"
-                docker logs mongo-secondary | tail -n 200 || true
-                exit 1
-              fi
-              sleep 2
-            done
+            docker compose -f "$FILE" --env-file "$ENVF" up -d --build --remove-orphans \
+              backend-secondary analytics-secondary frontend-secondary nginx-secondary
             
             # Show what's running (helps catch name mismatches)
             echo "== compose ps =="; docker compose -f "$FILE" ps
             echo "== container names =="; docker ps --format '{{.Names}}'
-
-            docker exec -i mongo-secondary mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet \
-              --eval "db.runCommand({ping:1})" || {
-                echo "::error ::mongo-secondary ping failed"
-                docker logs mongo-secondary | tail -n 200 || true
-                exit 1
-              }
-
-            docker exec -i mongo-secondary mongosh \
-              -u "$MONGO_INITDB_ROOT_USERNAME" -p "$MONGO_INITDB_ROOT_PASSWORD" \
-              --authenticationDatabase admin --quiet --eval "
-                const s=rs.status();
-                printjson(s.members.map(m=>({host:m.name,state:m.stateStr,self:!!m.self})));
-              " || true
 
             # Probe from inside each container's netns (no DNS/network guessing)
             curl_in() { # usage: curl_in <container> <url> <svc> [tries]
@@ -305,7 +271,7 @@ jobs:
             # Hit loopback because we’re inside the target container’s network namespace
             curl_in backend-secondary    http://127.0.0.1:8000/health   backend-secondary
             curl_in analytics-secondary  http://127.0.0.1:8000/health   analytics-secondary
-            curl_in frontend-secondary   http://127.0.0.1/              frontend-secondary
+            curl_in frontend-secondary   http://127.0.0.1:80/health     frontend-secondary
 
             # Reload nginx if present
             if docker ps --format '{{.Names}}' | grep -q '^nginx-secondary$'; then
