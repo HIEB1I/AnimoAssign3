@@ -40,6 +40,8 @@ services:
       - mongo-tertiary
     ports:
       - "28000:8000"
+    env_file:
+      - .env
     networks: [animoassign]
     restart: unless-stopped
 
